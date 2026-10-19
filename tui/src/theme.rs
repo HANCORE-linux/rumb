@@ -23,7 +23,7 @@ struct Live {
 
 impl Theme {
     fn fixed(palette: Palette) -> Self {
-        Theme { palette, generation: 0, live: None }
+        Theme { palette: readable_text(palette), generation: 0, live: None }
     }
 
     pub fn refresh(&mut self, now: Instant) -> bool {
@@ -91,11 +91,11 @@ fn stamp(live: &Live) -> Option<(SystemTime, String, bool)> {
 
 fn read_live(live: &Live) -> Option<Palette> {
     if std::fs::read_to_string(&live.name).is_ok_and(|name| name.trim().eq_ignore_ascii_case("labra")) {
-        return Some(Palette::labra());
+        return Some(readable_text(Palette::labra()));
     }
     let text = std::fs::read_to_string(&live.colors).ok()?;
     let light = live.colors.with_file_name("light.mode").is_file();
-    derive(&resolve(parse(&text), light))
+    derive(&resolve(parse(&text), light)).map(readable_text)
 }
 
 fn parse(text: &str) -> HashMap<String, String> {
@@ -226,6 +226,31 @@ fn legible(color: Color, against: Color, toward: Color) -> Color {
     (0..=10).map(|step| mix(color, toward, f64::from(step) / 10.0)).find(|candidate| contrast(*candidate, against) >= 3.0).unwrap_or(toward)
 }
 
+const TEXT_CONTRAST: f64 = 4.5;
+const TEXT_STEP: f64 = 1.25;
+
+fn worst_contrast(color: Color, backgrounds: &[Color]) -> f64 {
+    backgrounds.iter().map(|background| contrast(color, *background)).fold(f64::INFINITY, f64::min)
+}
+
+fn readable(color: Color, backgrounds: &[Color], target: f64, toward: Color) -> Color {
+    (0..=40).map(|step| mix(color, toward, f64::from(step) / 40.0)).find(|candidate| worst_contrast(*candidate, backgrounds) >= target).unwrap_or(toward)
+}
+
+fn readable_text(mut pal: Palette) -> Palette {
+    let tiles = [pal.page, pal.panel, pal.kpi];
+    let rows = [pal.page, pal.panel, pal.kpi, pal.teal_light];
+    pal.faint = readable(pal.faint, &tiles, TEXT_CONTRAST, pal.ink);
+    pal.label = readable(pal.label, &rows, (worst_contrast(pal.faint, &tiles) * TEXT_STEP).max(TEXT_CONTRAST), pal.ink);
+    pal.ink2 = readable(pal.ink2, &rows, (worst_contrast(pal.label, &rows) * TEXT_STEP).max(TEXT_CONTRAST), pal.ink);
+    pal.teal = readable(pal.teal, &tiles, TEXT_CONTRAST, pal.ink);
+    pal.alert = readable(pal.alert, &tiles, TEXT_CONTRAST, pal.ink);
+    let (white, black) = (Color::Rgb(255, 255, 255), Color::Rgb(0, 0, 0));
+    let away = if contrast(white, pal.bar) >= contrast(black, pal.bar) { white } else { black };
+    pal.bar_text = readable(pal.bar_text, &[pal.bar], TEXT_CONTRAST, away);
+    pal
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +279,20 @@ mod tests {
         }
         for name in names() {
             assert!(named(&name).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn every_palette_keeps_text_readable_and_graded() {
+        for name in names() {
+            let pal = readable_text(named(&name).unwrap());
+            let tiles = [pal.page, pal.panel, pal.kpi];
+            let rows = [pal.page, pal.panel, pal.kpi, pal.teal_light];
+            let (faint, label, ink2) = (worst_contrast(pal.faint, &tiles), worst_contrast(pal.label, &rows), worst_contrast(pal.ink2, &rows));
+            for (role, value) in [("faint", faint), ("label", label), ("ink2", ink2), ("teal", worst_contrast(pal.teal, &tiles)), ("alert", worst_contrast(pal.alert, &tiles)), ("bar_text", contrast(pal.bar_text, pal.bar))] {
+                assert!(value >= TEXT_CONTRAST, "{name} {role} {value:.2}");
+            }
+            assert!(faint < label && label <= ink2, "{name}: {faint:.2} {label:.2} {ink2:.2}");
         }
     }
 
