@@ -25,7 +25,7 @@ is a terminal dashboard for Arch Linux and Omarchy.
 It shows what the next update brings and what is already failing:
 pending repository and AUR updates ranked by risk,
 and the crashes, failed units, journal errors and Hyprland config errors
-since the last full system upgrade,
+since the last completed full system upgrade,
 each tied to the package that owns it,
 together with the Arch news published since then.
 .PP
@@ -72,7 +72,7 @@ Look for problems since
 .IR time ,
 for example
 .RB \(dq "7 days ago" \(dq.
-The default is the last full system upgrade.
+The default is the last completed full system upgrade.
 .TP
 .B \-\-no\-aur
 Skip the AUR update check.
@@ -119,7 +119,8 @@ AUR updates are checked with
 .B yay
 or
 .B paru
-when one of them is installed.
+when one of them is installed,
+and reported as not checked otherwise.
 The Arch news needs
 .BR xmllint .
 .SH ENVIRONMENT

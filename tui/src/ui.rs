@@ -773,10 +773,11 @@ fn freshness(app: &App, panel: Panel, now: Instant) -> Freshness {
     };
     match panel {
         Panel::Pending | Panel::Scan | Panel::Subsystems => from(app.stage_done_at[0], !app.update_errors.is_empty()),
-        Panel::Problems | Panel::Activity => from(app.stage_done_at[1], false),
+        Panel::Problems | Panel::Activity => from(app.stage_done_at[1], !app.problem_errors.is_empty()),
         Panel::News => from(app.stage_done_at[2], app.news_failed),
         Panel::Preflight => from(app.stage_done_at[3], false),
-        Panel::Installed | Panel::Repos | Panel::Deps | Panel::Journal => from(app.anatomy_at, false),
+        Panel::Installed | Panel::Repos | Panel::Deps => from(app.anatomy_at, false),
+        Panel::Journal => from(app.anatomy_at, app.problem_errors.iter().any(|source| source == "journal")),
         Panel::Log | Panel::Eye => Freshness::Current,
     }
 }
@@ -1662,6 +1663,7 @@ fn draw_problems(buf: &mut Buffer, area: Rect, focused: bool, app: &App, pal: &P
             "possibly-fixed" => (format!("↗ {} {}", problem.package, short_version(problem.fix_version())), pal.teal),
             "config" => ("config error".to_string(), pal.alert),
             "not-packaged" => ("not from a package".to_string(), pal.faint),
+            "unknown-owner" => ("owner unknown".to_string(), pal.faint),
             _ => ("no update pending".to_string(), pal.faint),
         };
         put(
@@ -1894,6 +1896,10 @@ fn draw_title(buf: &mut Buffer, layout: &Layout, app: &App, pal: &Palette, now: 
         };
         line.push(Span::raw("  "));
         line.extend(pill(&verdict, fg, bg, true));
+        if let Some(error) = &app.error {
+            let room = area.right().saturating_sub(x + width(&line) + 2 + 40);
+            line.push(Span::styled(format!("  {}", fit(error, room as usize)), Style::new().fg(pal.alert)));
+        }
     }
     put(buf, x, area.y + 1, line, area.width);
 
@@ -1956,6 +1962,12 @@ fn draw_footer(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, life: boo
     if app.detail.is_none() {
         if life {
             status = vec![mark("▆", pal.teal_mid, "errors"), mark("▆", pal.ink, "crashes")];
+        }
+        if app.live_lost {
+            status.push(mark("×", pal.alert, "live feed stopped"));
+        }
+        if app.aur_unavailable {
+            status.push(mark("·", pal.label, "AUR unchecked"));
         }
         // The freshness beads that are on screen right now
         let states: Vec<Freshness> = panels_of(app.view).iter().map(|panel| freshness(app, *panel, now)).collect();
@@ -2096,6 +2108,10 @@ fn draw_scan(buf: &mut Buffer, area: Rect, focused: bool, app: &App, model: &Mod
     ];
     let w = width(&legend);
     put(buf, mid.x + mid.width.saturating_sub(w) / 2, content.bottom().saturating_sub(1), legend, mid.width);
+}
+
+fn bump_label(bump: &str) -> &str {
+    if bump.is_empty() { "other" } else { bump }
 }
 
 fn bump_group(bump: &str) -> &'static str {
@@ -2269,8 +2285,8 @@ fn draw_subsystems(buf: &mut Buffer, area: Rect, focused: bool, app: &App, pal: 
                 let used = width(&spans) as usize;
                 spans.extend(version_ruler(update, (text_w as usize).saturating_sub(used), pal));
                 lines.push((2, spans));
-                let risk = format!("{} · {} risk", bump_group(&update.bump), update.risk);
-                let risk = if risk.chars().count() <= text_w as usize { risk } else { format!("{} · {}", bump_group(&update.bump), update.risk) };
+                let risk = format!("{} · {} risk", bump_label(&update.bump), update.risk);
+                let risk = if risk.chars().count() <= text_w as usize { risk } else { format!("{} · {}", bump_label(&update.bump), update.risk) };
                 lines.push((3, vec![Span::styled(risk, label)]));
             }
             if problems_known {
@@ -2483,7 +2499,7 @@ fn live_journal_count(app: &App, now: Instant) -> usize {
 }
 
 fn draw_preflight(buf: &mut Buffer, area: Rect, focused: bool, app: &App, pal: &Palette, now: Instant) {
-    let ok = app.preflight.as_ref().is_some_and(|p| p.free_ok && p.snapper_configured);
+    let ok = app.preflight.as_ref().is_some_and(|p| p.free_ok && p.snapshot_before_update);
     let right = match &app.preflight {
         Some(_) => vec![Span::styled(if ok { "ready" } else { "check" }, Style::new().fg(pal.bar_text).add_modifier(Modifier::BOLD))],
         None => Vec::new(),
@@ -2507,8 +2523,14 @@ fn draw_preflight(buf: &mut Buffer, area: Rect, focused: bool, app: &App, pal: &
         ),
         (
             "snapshot",
-            if preflight.snapper_configured { "snapper ✓".to_string() } else { "none — no rollback".to_string() },
-            if preflight.snapper_configured { pal.teal } else { pal.alert },
+            if preflight.snapshot_before_update {
+                "snapper ✓".to_string()
+            } else if preflight.snapper_configured {
+                "not automatic".to_string()
+            } else {
+                "none — no rollback".to_string()
+            },
+            if preflight.snapshot_before_update { pal.teal } else { pal.alert },
         ),
     ];
     for (index, (label, value, color)) in rows.iter().enumerate() {
@@ -2561,8 +2583,15 @@ fn draw_pending_detail(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, n
         buf[(inner.x + i, inner.y + 1)].set_symbol("─").set_fg(pal.rule);
     }
     let selected = app.selected.min(updates.len().saturating_sub(1));
-    for (index, update) in updates.iter().enumerate() {
-        let y = inner.y + 2 + index as u16;
+    let list_top = inner.y + 2;
+    let mut sized: Vec<&&Update> = updates.iter().filter(|u| u.download_bytes.is_some()).collect();
+    sized.sort_by_key(|u| std::cmp::Reverse(u.download_bytes.unwrap_or(0)));
+    let chart_rows = 1 + sized.len().min(5) as u16;
+    let all_fit = list_top + updates.len() as u16 + 2 + chart_rows <= inner.bottom();
+    let visible = if all_fit { updates.len() as u16 } else { inner.bottom().saturating_sub(list_top + 1 + chart_rows).max(1) };
+    let offset = (selected + 1).saturating_sub(visible as usize);
+    for (row, (index, update)) in updates.iter().enumerate().skip(offset).take(visible as usize).enumerate() {
+        let y = list_top + row as u16;
         if y >= inner.bottom() {
             break;
         }
@@ -2579,11 +2608,14 @@ fn draw_pending_detail(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, n
         put_right(buf, inner.right(), y, vec![Span::styled(delta, Style::new().fg(pal.label))]);
     }
 
+    if !all_fit {
+        let range = format!(" {}–{} of {} ", offset + 1, (offset + visible as usize).min(updates.len()), updates.len());
+        put_right(buf, table.right().saturating_sub(2), table.bottom().saturating_sub(1), vec![Span::styled(range, header)]);
+    }
+
     // Download by package, largest first
-    let chart_y = (inner.y + 4 + updates.len() as u16).min(inner.bottom().saturating_sub(5));
+    let chart_y = if all_fit { list_top + updates.len() as u16 + 2 } else { list_top + visible + 1 };
     put(buf, inner.x, chart_y, vec![Span::styled("DOWNLOAD BY PACKAGE", header)], inner.width);
-    let mut sized: Vec<&&Update> = updates.iter().filter(|u| u.download_bytes.is_some()).collect();
-    sized.sort_by_key(|u| std::cmp::Reverse(u.download_bytes.unwrap_or(0)));
     let max = sized.first().and_then(|u| u.download_bytes).unwrap_or(1).max(1);
     let reveal = progress(app, now, app.stage_done_at[0], 300.0, 900.0);
     for (index, update) in sized.iter().take(inner.bottom().saturating_sub(chart_y + 1) as usize).enumerate() {
@@ -2607,7 +2639,7 @@ fn draw_pending_detail(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, n
     scene.placements.push(Placement { rect: Rect::new(d.x, d.y, 12, 4), picture: Picture::Specimen(subsystem) });
     put(buf, d.x + 14, d.y, vec![Span::styled(update.name.clone(), Style::new().fg(pal.ink).add_modifier(Modifier::BOLD))], d.width);
     let mut tags = risk_pill(update, pal);
-    tags.push(Span::styled(format!("  {} · {} · {}", subsystem.label(), update.source, bump_group(&update.bump)), Style::new().fg(pal.label)));
+    tags.push(Span::styled(format!("  {} · {} · {}", subsystem.label(), update.source, bump_label(&update.bump)), Style::new().fg(pal.label)));
     put(buf, d.x + 14, d.y + 1, tags, d.width.saturating_sub(14));
     put(buf, d.x + 14, d.y + 2, version_ruler(update, d.width.saturating_sub(14) as usize, pal), d.width.saturating_sub(14));
     if !update.reason.is_empty() {
@@ -2634,12 +2666,21 @@ fn draw_pending_detail(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, n
     put(buf, facts_x, y + 2, vec![Span::styled(format!("{} it depends on", deps.depends), Style::new().fg(pal.ink2))], d.right().saturating_sub(facts_x));
     put(buf, facts_x, y + 3, vec![Span::styled(format!("{} require it", deps.required_by), Style::new().fg(pal.teal))], d.right().saturating_sub(facts_x));
     y += 12;
+    if y >= d.bottom() {
+        draw_footer(buf, Rect::new(area.x + 1, area.bottom() - 1, area.width.saturating_sub(2), 1), app, pal, false, now);
+        return;
+    }
     put(buf, d.x, y, vec![Span::styled("LINKED PROBLEMS", Style::new().fg(pal.label))], d.width);
     let linked: Vec<_> = app.problems.iter().filter(|p| p.package == update.name).collect();
-    if linked.is_empty() {
+    let room = d.bottom().saturating_sub(y + 1) as usize;
+    let shown = if linked.len() > room { room.saturating_sub(1) } else { linked.len() };
+    if linked.is_empty() && room > 0 {
         put(buf, d.x, y + 1, vec![Span::styled("none on this system", Style::new().fg(pal.faint))], d.width);
     }
-    for (index, problem) in linked.iter().enumerate() {
+    if linked.len() > shown && room > 0 {
+        put(buf, d.x, y + 1 + shown as u16, vec![Span::styled(format!("+{} more", linked.len() - shown), Style::new().fg(pal.label))], d.width);
+    }
+    for (index, problem) in linked.iter().take(shown).enumerate() {
         let kind = if problem.kind == "crash" { "crashes" } else { "errors" };
         let fixed = problem.status == "possibly-fixed";
         put(

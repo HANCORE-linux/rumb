@@ -8,7 +8,8 @@ mod ui;
 
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitCode};
+use std::process::{Command, ExitCode};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -16,8 +17,21 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
 
 use app::App;
-use source::Msg;
+use source::{Msg, Scan};
 use theme::Theme;
+
+static SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn on_signal(signal: libc::c_int) {
+    SIGNAL.store(signal, Ordering::Relaxed);
+}
+
+fn catch_signals() {
+    let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+        unsafe { libc::signal(signal, handler) };
+    }
+}
 
 const USAGE: &str = "rumb — Track software health. Spot trouble early.
 
@@ -122,10 +136,15 @@ fn main() -> ExitCode {
     }
 
     let mut terminal = ratatui::init();
+    catch_signals();
     let mut pictures = pictures::Pictures::query();
     let result = run(&mut terminal, &options, script, &mut theme, &mut pictures);
     ratatui::restore();
 
+    let signal = SIGNAL.load(Ordering::Relaxed);
+    if signal != 0 {
+        return ExitCode::from((128 + signal).clamp(0, 255) as u8);
+    }
     match result {
         Ok(true) => ExitCode::from(1),
         Ok(false) => ExitCode::SUCCESS,
@@ -136,22 +155,13 @@ fn main() -> ExitCode {
     }
 }
 
-fn start_source(options: &Options, script: Option<&PathBuf>) -> io::Result<(Option<Child>, Receiver<Msg>)> {
+fn start_source(options: &Options, script: Option<&PathBuf>) -> io::Result<(Option<Scan>, Receiver<Msg>)> {
     if options.demo {
         return Ok((None, source::spawn_demo()));
     }
     let script = script.expect("checked in main");
-    let (child, rx) = source::spawn_script(script, &options.args)?;
-    Ok((Some(child), rx))
-}
-
-fn stop(child: &mut Option<Child>, running: bool) {
-    if let Some(mut child) = child.take() {
-        if running {
-            let _ = child.kill();
-        }
-        let _ = child.wait();
-    }
+    let (scan, rx) = source::spawn_script(script, &options.args)?;
+    Ok((Some(scan), rx))
 }
 
 fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf>, theme: &mut Theme, pictures: &mut Option<pictures::Pictures>) -> io::Result<bool> {
@@ -160,6 +170,9 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
     let mut source_open = true;
 
     loop {
+        if SIGNAL.load(Ordering::Relaxed) != 0 {
+            break;
+        }
         let now = Instant::now();
         while source_open {
             match rx.try_recv() {
@@ -167,7 +180,10 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
                 Ok(Msg::Invalid) => {}
                 Ok(Msg::Eof { stderr }) => {
                     source_open = false;
-                    let status = child.as_mut().and_then(|child| child.wait().ok());
+                    let status = child.as_mut().and_then(Scan::exited);
+                    if child.is_some() && app.finished_at.is_some() {
+                        app.live_lost = true;
+                    }
                     if app.finished_at.is_none() {
                         let detail = stderr
                             .lines()
@@ -231,7 +247,7 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
                     KeyCode::Down if app.detail.is_some() => app.selected = (app.selected + 1).min(app.updates.len().saturating_sub(1)),
                     KeyCode::Up if app.detail.is_some() => app.selected = app.selected.saturating_sub(1),
                     KeyCode::Char('r') if app.finished_at.is_some() => {
-                        stop(&mut child, source_open);
+                        drop(child.take());
                         (child, rx) = start_source(options, script.as_ref())?;
                         let (view, focus, detail) = (app.view, app.focus, app.detail);
                         app = App::new(options.demo, !options.no_anim, Instant::now());
@@ -246,7 +262,7 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
         }
     }
 
-    stop(&mut child, source_open);
+    drop(child);
     Ok(app.error.is_some())
 }
 
@@ -377,6 +393,136 @@ mod tests {
         render(1, 1);
         let (buffer, _) = render(150, 44);
         assert!(!buffer.content().iter().map(|cell| cell.symbol()).collect::<String>().contains("Terminal size too small:"));
+    }
+
+    fn crowded_app(now: Instant) -> App {
+        let mut app = App::new(true, false, now);
+        for (_, event) in demo_events() {
+            app.apply(event, now);
+        }
+        let long = |i: usize| format!("pkg-{i:03}-with-a-rather-long-name");
+        let updates: Vec<Value> = (0..500)
+            .map(|i| {
+                let (source, risk) = (if i % 7 == 0 { "aur" } else { "repo" }, ["high", "medium", "low"][i % 3]);
+                json!({"name": long(i), "old": "1.0-1", "new": "2.0-1", "source": source, "bump": "major", "risk": risk,
+                    "reason": "core package, major version jump", "download_bytes": 1000 * i, "installed_delta_bytes": 10 * i})
+            })
+            .collect();
+        let mut problems: Vec<Value> = (0..60)
+            .map(|i| {
+                json!({"kind": "failed-unit", "subject": format!("unit-{i}.service"), "count": 1, "package": long(0),
+                    "status": "possibly-fixed", "update": format!("{} 1.0-1 -> 2.0-1", long(0))})
+            })
+            .collect();
+        problems.extend((0..60).map(|i| json!({"kind": "journal", "subject": format!("/usr/bin/tool-{i}"), "count": i + 1, "package": format!("tool-{i}"), "status": "no-update", "update": ""})));
+        let news: Vec<Value> = (0..40)
+            .map(|i| json!({"date": "2026-10-01", "title": format!("News item {i} with a rather long title that needs truncation"), "link": "https://archlinux.org/news/x/", "manual_intervention": i % 5 == 0}))
+            .collect();
+        app.apply(source::Event::Stage { stage: "updates".into(), data: json!({"updates": updates, "update_check_errors": []}) }, now);
+        app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": problems, "activity": []}) }, now);
+        app.apply(source::Event::Stage { stage: "news".into(), data: json!({"news": news, "news_check_failed": false}) }, now);
+        app.apply(source::Event::Activity { line: "transaction started".into() }, now);
+        for i in 450..500 {
+            app.apply(source::Event::Activity { line: format!("upgraded {} (1.0-1 -> 2.0-1)", long(i)) }, now);
+        }
+        for i in 0..300 {
+            app.apply(source::Event::Journal { time: "12:00:00".into(), ident: format!("ident-{i}"), message: "x".repeat(300) }, now);
+        }
+        app
+    }
+
+    #[test]
+    fn crowded_data_never_panics() {
+        let pal = palette::Palette::paper();
+        let mut failures = Vec::new();
+        for (width, height) in [(150, 44), (200, 60)] {
+            for view in 0..ui::VIEWS.len() {
+                for detail in std::iter::once(None).chain((0..ui::panels_of(view).len()).map(Some)) {
+                    for selected in [0, 449] {
+                        let now = Instant::now();
+                        let mut app = crowded_app(now);
+                        app.view = view;
+                        app.detail = detail;
+                        app.selected = selected;
+                        let model = ink::Model::new(&app);
+                        let later = now + Duration::from_secs(60);
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                            terminal.draw(|frame| drop(ui::draw(frame, &app, &model, &pal, later))).unwrap();
+                        }));
+                        if outcome.is_err() {
+                            failures.push(format!("{width}x{height} view {view} detail {detail:?} selected {selected}"));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "panicked: {failures:#?}");
+    }
+
+    fn screen(app: &App, width: u16, height: u16) -> Vec<String> {
+        let pal = palette::Palette::paper();
+        let model = ink::Model::new(app);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| drop(ui::draw(frame, app, &model, &pal, app.started + Duration::from_secs(60)))).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height).map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect()).collect()
+    }
+
+    #[test]
+    fn full_list_scrolls_to_the_selection_without_overlap() {
+        let mut app = crowded_app(Instant::now());
+        app.detail = Some(0);
+        for selected in [0, 300, 449] {
+            app.selected = selected;
+            let name = app.sorted_updates()[selected].name[..8].to_string();
+            let rows = screen(&app, 150, 44);
+            let chart = rows.iter().position(|row| row.contains("DOWNLOAD BY PACKAGE")).expect("chart title");
+            let listed: Vec<usize> = (0..chart).filter(|&y| rows[y].contains("pkg-")).collect();
+            assert!(listed.iter().any(|&y| rows[y].contains(&name)), "selection {selected} not listed");
+            assert!(!rows[chart - 1].contains("pkg-"), "chart touches the table");
+            assert!(rows.iter().any(|row| row.contains(" of 450 ")), "no position shown");
+        }
+    }
+
+    #[test]
+    fn only_real_upgrades_count_as_applied() {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        let update = |name: &str| json!({"name": name, "old": "1.0-1", "new": "2.0-1", "source": "repo", "risk": "low"});
+        app.apply(source::Event::Stage { stage: "updates".into(), data: json!({"updates": [update("kept"), update("newer"), update("gone"), update("back")]}) }, now);
+        for line in ["reinstalled kept (1.0-1)", "upgraded newer (1.0-1 -> 2.1-1)", "removed gone (1.0-1)", "downgraded back (1.0-1 -> 0.9-1)"] {
+            app.apply(source::Event::Activity { line: line.into() }, now);
+        }
+        let pending: Vec<&str> = app.updates.iter().map(|u| u.name.as_str()).collect();
+        let applied: Vec<(&str, &str)> = app.applied.iter().map(|(u, _)| (u.name.as_str(), u.new.as_str())).collect();
+        assert_eq!(pending, ["kept", "back"]);
+        assert_eq!(applied, [("newer", "2.1-1")]);
+    }
+
+    #[test]
+    fn unreadable_stage_data_fails_the_scan_with_its_reason() {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        app.apply(source::Event::Stage { stage: "updates".into(), data: json!({"updates": [{"name": "broken"}]}) }, now);
+        assert_eq!(app.verdict().0, "SCAN FAILED");
+        let error = app.error.clone().unwrap_or_default();
+        assert!(error.contains("updates"), "{error}");
+        app.error = Some("Missing required command: checkupdates".into());
+        assert!(screen(&app, 170, 50).iter().any(|row| row.contains("Missing required command: checkupdates")));
+    }
+
+    #[test]
+    fn a_later_start_moves_the_window_but_not_the_intro() {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        let start = |since: &str| source::Event::Start { last_upgrade: Some(since.into()), problems_since: since.into(), now: None };
+        app.apply(start("2026-10-01T10:00:00+02:00"), now);
+        let first = app.start_at;
+        app.apply(start("2026-10-19T12:00:00+02:00"), now + Duration::from_secs(90));
+        assert_eq!(app.start_at, first);
+        assert_eq!(app.since.as_deref(), Some("2026-10-19T12:00:00+02:00"));
+        assert_eq!(app.last_upgrade.as_deref(), Some("2026-10-19T12:00:00+02:00"));
     }
 
     fn on_omarchy(app: &mut App, mark: app::OmarchyMark) {

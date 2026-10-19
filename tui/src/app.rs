@@ -195,6 +195,8 @@ pub struct Preflight {
     pub free_ok: bool,
     pub snapper_configured: bool,
     #[serde(default)]
+    pub snapshot_before_update: bool,
+    #[serde(default)]
     pub disk_total_bytes: u64,
     #[serde(default)]
     pub disk_used_bytes: u64,
@@ -253,7 +255,9 @@ pub struct App {
     pub since: Option<String>,
     pub updates: Vec<Update>,
     pub update_errors: Vec<String>,
+    pub aur_unavailable: bool,
     pub problems: Vec<Problem>,
+    pub problem_errors: Vec<String>,
     pub activity: Vec<Activity>,
     pub news: Vec<News>,
     pub news_failed: bool,
@@ -288,6 +292,7 @@ pub struct App {
     pub selected: usize,
     pub finished_at: Option<Instant>,
     pub error: Option<String>,
+    pub live_lost: bool,
     /// Animations are shown at their final state.
     pub skipped: bool,
 }
@@ -305,6 +310,8 @@ impl App {
             since: None,
             updates: Vec::new(),
             update_errors: Vec::new(),
+            aur_unavailable: false,
+            problem_errors: Vec::new(),
             problems: Vec::new(),
             activity: Vec::new(),
             news: Vec::new(),
@@ -333,6 +340,7 @@ impl App {
             selected: 0,
             finished_at: None,
             error: None,
+            live_lost: false,
             skipped: !animate,
         }
     }
@@ -340,7 +348,7 @@ impl App {
     pub fn apply(&mut self, event: Event, now: Instant) {
         match event {
             Event::Start { last_upgrade, problems_since, now: scan_time } => {
-                self.start_at = Some(now);
+                self.start_at.get_or_insert(now);
                 self.scan_time = scan_time;
                 self.last_upgrade = last_upgrade;
                 self.since = Some(problems_since);
@@ -355,37 +363,47 @@ impl App {
                 self.steps.push(Step { label, started: now, ended: None });
             }
             Event::Stage { stage, data } => {
-                if stage == "anatomy" {
-                    self.anatomy = serde_json::from_value(data).ok();
-                    self.anatomy_at = Some(now);
-                    self.journal_at.get_or_insert(now);
-                    return;
+                if let Err(error) = self.stage(&stage, data, now) {
+                    self.error = Some(format!("rumb-scan sent unreadable {stage} data: {error}"));
+                    self.finish(now);
                 }
-                let Some(index) = stage_index(&stage) else { return };
-                match index {
-                    0 => {
-                        self.updates = field(&data, "updates");
-                        self.update_errors = field(&data, "update_check_errors");
-                    }
-                    1 => {
-                        self.problems = field(&data, "problems");
-                        self.activity = field(&data, "activity");
-                    }
-                    2 => {
-                        self.news = field(&data, "news");
-                        self.news_failed = data.get("news_check_failed").and_then(Value::as_bool).unwrap_or(false);
-                    }
-                    _ => {
-                        self.preflight = serde_json::from_value(data).ok();
-                    }
-                }
-                self.stages[index] = StageState::Done;
-                self.stage_done_at[index] = Some(now);
             }
             Event::Result {} => self.finish(now),
             Event::Activity { line } => self.activity(&line, now),
             Event::Journal { time, ident, message } => self.journal(JournalLine { time, ident, message }, now),
         }
+    }
+
+    fn stage(&mut self, stage: &str, data: Value, now: Instant) -> Result<(), serde_json::Error> {
+        if stage == "anatomy" {
+            self.anatomy = Some(serde_json::from_value(data)?);
+            self.anatomy_at = Some(now);
+            self.journal_at.get_or_insert(now);
+            return Ok(());
+        }
+        let Some(index) = stage_index(stage) else { return Ok(()) };
+        match index {
+            0 => {
+                self.updates = field(&data, "updates")?;
+                self.update_errors = field(&data, "update_check_errors")?;
+                self.aur_unavailable = field(&data, "aur_unavailable")?;
+            }
+            1 => {
+                self.problems = field(&data, "problems")?;
+                self.activity = field(&data, "activity")?;
+                self.problem_errors = field(&data, "problem_check_errors")?;
+            }
+            2 => {
+                self.news = field(&data, "news")?;
+                self.news_failed = field(&data, "news_check_failed")?;
+            }
+            _ => {
+                self.preflight = Some(serde_json::from_value(data)?);
+            }
+        }
+        self.stages[index] = StageState::Done;
+        self.stage_done_at[index] = Some(now);
+        Ok(())
     }
 
     fn journal(&mut self, line: JournalLine, now: Instant) {
@@ -438,8 +456,18 @@ impl App {
             }
             ("upgraded" | "downgraded" | "installed" | "removed" | "reinstalled", _) => {
                 if let Some(position) = self.updates.iter().position(|update| update.name == name) {
-                    let update = self.updates.remove(position);
-                    self.applied.push((update, now));
+                    let installed = versions.split_once(" -> ").map_or(versions, |(_, new)| new);
+                    match action {
+                        "upgraded" | "installed" => {
+                            let mut update = self.updates.remove(position);
+                            update.new = installed.to_string();
+                            self.applied.push((update, now));
+                        }
+                        "removed" => {
+                            self.updates.remove(position);
+                        }
+                        _ => {}
+                    }
                 }
                 shown.extend([clip(action), clip(name)]);
                 let change = match versions.split_once(" -> ") {
@@ -564,7 +592,7 @@ impl App {
     }
 
     pub fn incomplete(&self) -> bool {
-        !self.update_errors.is_empty() || self.news_failed
+        !self.update_errors.is_empty() || !self.problem_errors.is_empty() || self.news_failed
     }
 
     pub fn sorted_updates(&self) -> Vec<&Update> {
@@ -646,9 +674,9 @@ fn stage_index(stage: &str) -> Option<usize> {
     STAGES.iter().position(|name| *name == stage)
 }
 
-fn field<T: DeserializeOwned + Default>(data: &Value, key: &str) -> T {
-    data.get(key)
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
+fn field<T: DeserializeOwned + Default>(data: &Value, key: &str) -> Result<T, serde_json::Error> {
+    match data.get(key) {
+        Some(value) => serde_json::from_value(value.clone()),
+        None => Ok(T::default()),
+    }
 }

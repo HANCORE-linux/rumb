@@ -1419,6 +1419,7 @@ name = "rumb"
 version = "0.1.0"
 dependencies = [
  "image",
+ "libc",
  "ratatui",
  "ratatui-image",
  "serde",

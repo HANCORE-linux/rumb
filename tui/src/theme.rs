@@ -17,7 +17,7 @@ pub struct Theme {
 struct Live {
     colors: PathBuf,
     name: PathBuf,
-    stamp: Option<(SystemTime, String)>,
+    stamp: Option<(SystemTime, String, bool)>,
     checked: Instant,
 }
 
@@ -83,10 +83,10 @@ fn live() -> Option<Theme> {
     Some(Theme { palette, generation: 0, live: Some(live) })
 }
 
-fn stamp(live: &Live) -> Option<(SystemTime, String)> {
+fn stamp(live: &Live) -> Option<(SystemTime, String, bool)> {
     let modified = std::fs::metadata(&live.colors).and_then(|meta| meta.modified()).ok()?;
     let name = std::fs::read_to_string(&live.name).unwrap_or_default().trim().to_string();
-    Some((modified, name))
+    Some((modified, name, live.colors.with_file_name("light.mode").is_file()))
 }
 
 fn read_live(live: &Live) -> Option<Palette> {
@@ -229,6 +229,20 @@ fn legible(color: Color, against: Color, toward: Color) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn light_mode_marker_counts_as_a_change() {
+        let dir = std::env::temp_dir().join(format!("rumb-theme-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("theme")).unwrap();
+        std::fs::write(dir.join("theme/colors.toml"), "background = \"#101010\"\nforeground = \"#e0e0e0\"\n").unwrap();
+        std::fs::write(dir.join("theme.name"), "test\n").unwrap();
+        let live = Live { colors: dir.join("theme/colors.toml"), name: dir.join("theme.name"), stamp: None, checked: Instant::now() };
+        let before = stamp(&live);
+        std::fs::write(dir.join("theme/light.mode"), "").unwrap();
+        let after = stamp(&live);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_ne!(before, after);
+    }
 
     #[test]
     fn every_bundled_theme_gives_a_palette() {

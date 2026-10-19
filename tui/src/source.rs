@@ -1,9 +1,10 @@
 use std::io::{self, BufRead, BufReader, Read};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -70,13 +71,43 @@ pub fn find_script() -> Option<PathBuf> {
     })
 }
 
-pub fn spawn_script(script: &Path, args: &[String]) -> io::Result<(Child, Receiver<Msg>)> {
+pub struct Scan {
+    child: Child,
+}
+
+impl Scan {
+    pub fn exited(&mut self) -> Option<ExitStatus> {
+        self.child.try_wait().ok().flatten()
+    }
+}
+
+impl Drop for Scan {
+    fn drop(&mut self) {
+        if self.exited().is_some() {
+            return;
+        }
+        let group = -(self.child.id() as libc::pid_t);
+        unsafe { libc::kill(group, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if self.exited().is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        unsafe { libc::kill(group, libc::SIGKILL) };
+        let _ = self.child.wait();
+    }
+}
+
+pub fn spawn_script(script: &Path, args: &[String]) -> io::Result<(Scan, Receiver<Msg>)> {
     let mut child = Command::new(script)
         .arg("--stream")
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()?;
 
     let stdout = child.stdout.take().expect("stdout is piped");
@@ -108,7 +139,7 @@ pub fn spawn_script(script: &Path, args: &[String]) -> io::Result<(Child, Receiv
         let _ = tx.send(Msg::Eof { stderr });
     });
 
-    Ok((child, rx))
+    Ok((Scan { child }, rx))
 }
 
 /// Replays the bundled demo stream; each line may carry a `_delay` in ms.
