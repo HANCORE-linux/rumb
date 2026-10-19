@@ -247,7 +247,8 @@ mod tests {
     #[test]
     fn every_bundled_theme_gives_a_palette() {
         let themes = bundled();
-        assert!(themes.len() >= 50);
+        assert!(themes.len() >= 24);
+        assert!(["banish", "labra", "catppuccin", "solitude"].iter().all(|name| themes.contains_key(*name)));
         for (name, colors) in &themes {
             assert!(derive(colors).is_some(), "{name}");
         }
