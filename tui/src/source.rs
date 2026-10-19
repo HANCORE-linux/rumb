@@ -2,6 +2,7 @@ use std::io::{self, BufRead, BufReader, Read};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -71,6 +72,15 @@ pub fn find_script() -> Option<PathBuf> {
     })
 }
 
+static GROUP: AtomicI32 = AtomicI32::new(0);
+
+pub fn terminate_scan() {
+    let group = GROUP.load(Ordering::Relaxed);
+    if group != 0 {
+        unsafe { libc::kill(-group, libc::SIGTERM) };
+    }
+}
+
 pub struct Scan {
     child: Child,
 }
@@ -83,6 +93,7 @@ impl Scan {
 
 impl Drop for Scan {
     fn drop(&mut self) {
+        let _ = GROUP.compare_exchange(self.child.id() as i32, 0, Ordering::Relaxed, Ordering::Relaxed);
         if self.exited().is_some() {
             return;
         }
@@ -109,6 +120,7 @@ pub fn spawn_script(script: &Path, args: &[String]) -> io::Result<(Scan, Receive
         .stderr(Stdio::piped())
         .process_group(0)
         .spawn()?;
+    GROUP.store(child.id() as i32, Ordering::Relaxed);
 
     let stdout = child.stdout.take().expect("stdout is piped");
     let mut stderr = child.stderr.take().expect("stderr is piped");

@@ -33,6 +33,18 @@ fn catch_signals() {
     }
 }
 
+fn watch_terminal() {
+    std::thread::spawn(|| loop {
+        std::thread::sleep(Duration::from_millis(200));
+        let mut input = libc::pollfd { fd: 0, events: 0, revents: 0 };
+        let ready = unsafe { libc::poll(&mut input, 1, 0) };
+        if ready > 0 && input.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            source::terminate_scan();
+            std::process::exit(129);
+        }
+    });
+}
+
 const USAGE: &str = "rumb — Track software health. Spot trouble early.
 
 Usage: rumb [--demo] [--no-anim] [--theme <name>] [--since <time>] [--no-aur]
@@ -137,6 +149,7 @@ fn main() -> ExitCode {
 
     let mut terminal = ratatui::init();
     catch_signals();
+    watch_terminal();
     let mut pictures = pictures::Pictures::query();
     let result = run(&mut terminal, &options, script, &mut theme, &mut pictures);
     ratatui::restore();
