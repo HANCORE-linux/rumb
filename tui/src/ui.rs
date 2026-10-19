@@ -1450,7 +1450,7 @@ fn eye_spec(app: &App, layout: &Layout, picture: Rect, live: bool, now: Instant)
         ports,
         work,
         screen: if work > 0.0 { screen_lines(app, now) } else { Vec::new() },
-        cursor: ((ms(now, app.started) / 400.0) as u64).is_multiple_of(2),
+        cursor: work > 0.0 && ((ms(now, app.started) / 400.0) as u64).is_multiple_of(2),
     }
 }
 
