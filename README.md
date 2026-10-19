@@ -6,14 +6,14 @@ A terminal dashboard for Arch Linux and Omarchy: what the next update brings, an
 
 <details>
 <summary>
-<a name="overview"><img src="docs/overview.png" alt="Overview" width="31%"></a>
-<a name="updates"><img src="docs/updates.png" alt="Updates" width="31%"></a>
-<a name="live"><img src="docs/live.png" alt="Live view during an update" width="31%"></a>
+<a name="overview"><img src="docs/overview.png" alt="Overview" width="20%"></a>
+<a name="updates"><img src="docs/updates.png" alt="Updates" width="20%"></a>
+<a name="live"><img src="docs/live.png" alt="Live view during an update" width="20%"></a>
 </summary>
 
-![Overview](docs/overview.png)
-![Updates](docs/updates.png)
-![Live view during an update](docs/live.png)
+<a name="overview-large"><img src="docs/overview.png" alt="Overview"></a>
+<a name="updates-large"><img src="docs/updates.png" alt="Updates"></a>
+<a name="live-large"><img src="docs/live.png" alt="Live view during an update"></a>
 </details>
 
 ## Omarchy
