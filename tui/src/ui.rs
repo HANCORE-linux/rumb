@@ -1495,6 +1495,10 @@ pub fn draw(frame: &mut Frame, app: &App, model: &Model, pal: &Palette, now: Ins
     let buf = frame.buffer_mut();
     fill(buf, area, pal.page);
     let mut scene = Scene::default();
+    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+        draw_too_small(buf, area, pal);
+        return scene;
+    }
     let layout = layout(app, area);
     if let Some(index) = app.detail {
         let panel = layout.panels.get(index).map_or(Panel::Pending, |(panel, _)| *panel);
@@ -1521,6 +1525,23 @@ pub fn draw(frame: &mut Frame, app: &App, model: &Model, pal: &Palette, now: Ins
     draw_signals(buf, &layout, &dirs, app, pal, now);
     draw_footer(buf, layout.footer, app, pal, layout.band.is_some(), now);
     scene
+}
+
+fn draw_too_small(buf: &mut Buffer, area: Rect, pal: &Palette) {
+    let ink = Style::new().fg(pal.ink);
+    let size = |value: u16, min: u16| Span::styled(value.to_string(), if value < min { ink.fg(pal.alert) } else { ink });
+    let lines = [
+        vec![Span::styled("Terminal size too small:", ink)],
+        vec![Span::styled("Width = ", ink), size(area.width, MIN_WIDTH), Span::styled(" Height = ", ink), size(area.height, MIN_HEIGHT)],
+        vec![],
+        vec![Span::styled("Needed:", ink)],
+        vec![Span::styled(format!("Width = {MIN_WIDTH} Height = {MIN_HEIGHT}"), ink)],
+    ];
+    let top = area.y + (area.height / 2).saturating_sub(2);
+    for (y, spans) in (top..area.bottom()).zip(lines) {
+        let x = area.x + area.width.saturating_sub(width(&spans)) / 2;
+        put(buf, x, y, spans, area.right() - x);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

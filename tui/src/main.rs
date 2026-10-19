@@ -36,8 +36,9 @@ Keys: 1-5 switch views (overview, updates, problems, packages, live),
 tab / shift-tab move between tiles, enter opens details, esc goes back,
 r rescans, q quits.
 
-Without a terminal of at least 150x44 (or with NO_COLOR set) it prints the
-plain text report instead.";
+The dashboard needs a terminal of at least 150x44; a smaller one shows the
+size it needs. Without a terminal (or with NO_COLOR set) rumb prints the plain
+text report instead.";
 
 struct Options {
     demo: bool,
@@ -103,14 +104,11 @@ fn main() -> ExitCode {
     };
 
     let interactive = io::stdout().is_terminal() && io::stdin().is_terminal();
-    let fits = ratatui::crossterm::terminal::size()
-        .map(|(width, height)| width >= ui::MIN_WIDTH && height >= ui::MIN_HEIGHT)
-        .unwrap_or(false);
     let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
 
-    if !interactive || !fits || no_color {
+    if !interactive || no_color {
         if options.demo {
-            eprintln!("--demo needs an interactive terminal of at least {}x{}", ui::MIN_WIDTH, ui::MIN_HEIGHT);
+            eprintln!("--demo needs an interactive terminal without NO_COLOR");
             return ExitCode::from(1);
         }
         let script = script.expect("checked above");
@@ -348,6 +346,37 @@ mod tests {
             "images": images,
         });
         std::fs::write(dir.join(format!("{name}.json")), frame.to_string()).unwrap();
+    }
+
+    #[test]
+    fn small_terminal_shows_needed_size() {
+        let pal = palette::Palette::paper();
+        let now = Instant::now();
+        let app = App::new(true, false, now);
+        let model = ink::Model::new(&app);
+        let render = |width: u16, height: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut scene = None;
+            terminal.draw(|frame| scene = Some(ui::draw(frame, &app, &model, &pal, now))).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (buffer, scene.unwrap())
+        };
+        for (width, height) in [(100, 30), (149, 44), (150, 43)] {
+            let (buffer, scene) = render(width, height);
+            let rows: Vec<String> = (0..height).map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect()).collect();
+            let current = format!("Width = {width} Height = {height}");
+            let (y, x) = rows.iter().enumerate().find_map(|(y, row)| row.find(&current).map(|x| (y as u16, x as u16))).expect("current size shown");
+            assert!(rows.iter().any(|row| row.contains("Terminal size too small:")), "{width}x{height}");
+            assert!(rows.iter().any(|row| row.contains("Width = 150 Height = 44")), "{width}x{height}");
+            assert!(scene.placements.is_empty(), "{width}x{height}");
+            let fg = |offset: u16| buffer[(x + offset, y)].fg;
+            assert_eq!(fg(8), if width < ui::MIN_WIDTH { pal.alert } else { pal.ink }, "{width}x{height}");
+            assert_eq!(fg(21), if height < ui::MIN_HEIGHT { pal.alert } else { pal.ink }, "{width}x{height}");
+        }
+        render(20, 1);
+        render(1, 1);
+        let (buffer, _) = render(150, 44);
+        assert!(!buffer.content().iter().map(|cell| cell.symbol()).collect::<String>().contains("Terminal size too small:"));
     }
 
     fn on_omarchy(app: &mut App, mark: app::OmarchyMark) {
