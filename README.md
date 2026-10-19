@@ -4,17 +4,9 @@ Track software health. Spot trouble early.
 
 A terminal dashboard for Arch Linux and Omarchy: what the next update brings, and what is already failing. It only reads and never asks for root.
 
-<details>
-<summary>
-<a name="overview"><img src="docs/overview.png" alt="Overview" width="20%"></a>
-<a name="updates"><img src="docs/updates.png" alt="Updates" width="20%"></a>
-<a name="live"><img src="docs/live.png" alt="Live view during an update" width="20%"></a>
-</summary>
-
-<a name="overview-large"><img src="docs/overview.png" alt="Overview"></a>
-<a name="updates-large"><img src="docs/updates.png" alt="Updates"></a>
-<a name="live-large"><img src="docs/live.png" alt="Live view during an update"></a>
-</details>
+<img src="docs/overview.png" alt="Overview" width="20%">
+<img src="docs/updates.png" alt="Updates" width="20%">
+<img src="docs/live.png" alt="Live view during an update" width="20%">
 
 ## Omarchy
 
