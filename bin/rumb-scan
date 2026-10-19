@@ -1,0 +1,736 @@
+#!/bin/bash
+
+# shellcheck disable=SC2016 # jq programs are passed to emit() in single quotes
+
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: rumb-scan [--json|--stream] [--since <time>] [--no-aur]
+
+Read-only preview to run before updating.
+
+  --json          Print the forecast as JSON
+  --stream        Print one JSON event per line while the checks run, then keep
+                  following the package manager log and the journal
+  --since <time>  Look for problems since <time>, e.g. "7 days ago"
+                  (default: the last full system upgrade)
+  --no-aur        Skip the AUR update check
+EOF
+}
+
+json=0
+stream=0
+since_arg=""
+check_aur=1
+following=0
+
+while (($#)); do
+  case "$1" in
+    --json) json=1 ;;
+    --stream) stream=1 ;;
+    --since)
+      if [[ -z ${2:-} ]]; then
+        usage >&2
+        exit 1
+      fi
+      since_arg=$2
+      shift
+      ;;
+    --no-aur) check_aur=0 ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+for cmd in jq checkupdates; do
+  if ! command -v "$cmd" >/dev/null; then
+    echo "Missing required command: $cmd" >&2
+    exit 1
+  fi
+done
+
+tmp=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/rumb-scan.XXXXXX") || exit 1
+trap 'rm -rf "$tmp"' EXIT
+touch "$tmp/updates.tsv" "$tmp/problems.tsv" "$tmp/news.tsv" "$tmp/activity.tsv"
+
+# Packages whose breakage can take down the session, the boot or the shell.
+CORE_PACKAGES=(
+  linux 'linux-*' 'nvidia*' 'lib32-nvidia*' mesa lib32-mesa 'vulkan-*' 'lib32-vulkan-*'
+  qt6-base qt6-declarative qt6-wayland 'hypr*' aquamarine xdg-desktop-portal-hyprland
+  quickshell omarchy omarchy-dev systemd systemd-libs glibc lib32-glibc 'limine*'
+  mkinitcpio pacman uwsm sddm pipewire wireplumber cryptsetup btrfs-progs
+)
+
+is_core() {
+  local pattern
+  for pattern in "${CORE_PACKAGES[@]}"; do
+    # shellcheck disable=SC2053
+    [[ $1 == $pattern ]] && return 0
+  done
+  return 1
+}
+
+# Classifies a pacman version change ([epoch:]pkgver-pkgrel) as
+# epoch, major, minor, patch, rebuild or other.
+bump_kind() {
+  local old=$1 new=$2 old_epoch=0 new_epoch=0 i
+  local -a a b
+
+  if [[ $old == *:* ]]; then old_epoch=${old%%:*}; old=${old#*:}; fi
+  if [[ $new == *:* ]]; then new_epoch=${new%%:*}; new=${new#*:}; fi
+  if [[ $old_epoch != "$new_epoch" ]]; then
+    echo epoch
+    return
+  fi
+
+  old=${old%-*}
+  new=${new%-*}
+  if [[ $old == "$new" ]]; then
+    echo rebuild
+    return
+  fi
+
+  IFS='.+_~' read -ra a <<<"$old"
+  IFS='.+_~' read -ra b <<<"$new"
+  for ((i = 0; i < ${#a[@]} && i < ${#b[@]}; i++)); do
+    [[ ${a[i]} == "${b[i]}" ]] && continue
+    if [[ ${a[i]} =~ ^[0-9]+$ && ${b[i]} =~ ^[0-9]+$ ]]; then
+      case $i in
+        0) echo major ;;
+        1) echo minor ;;
+        *) echo patch ;;
+      esac
+    else
+      echo other
+    fi
+    return
+  done
+  echo patch
+}
+
+declare -A owner_cache=()
+
+# Sets REPLY to the package owning a path, or to "" when no package owns it.
+owner_of() {
+  if [[ -z ${owner_cache[$1]+set} ]]; then
+    owner_cache[$1]=$(pacman -Qoq -- "$1" 2>/dev/null | head -n 1)
+  fi
+  REPLY=${owner_cache[$1]}
+}
+
+declare -A pending=()
+update_errors=()
+
+add_update() {
+  local name=$1 old=$2 new=$3 source=$4 kind risk reason=""
+
+  kind=$(bump_kind "$old" "$new")
+  if is_core "$name"; then
+    case $kind in
+      epoch|major|minor) risk=high; reason="core package, $kind version jump" ;;
+      rebuild) risk=low; reason="core package, rebuild" ;;
+      *) risk=medium; reason="core package" ;;
+    esac
+  else
+    case $kind in
+      epoch|major) risk=medium; reason="$kind version jump" ;;
+      *) risk=low ;;
+    esac
+  fi
+  if [[ $name == omarchy || $name == omarchy-dev ]]; then
+    reason+="${reason:+, }ships Omarchy migrations"
+  fi
+
+  pending[$name]="$old -> $new"
+  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$name" "$old" "$new" "$source" "$kind" "$risk" "$reason" >>"$tmp/updates.tsv"
+}
+
+parse_updates() {
+  local source=$1 name old arrow new rest
+  while read -r name old arrow new rest; do
+    [[ $rest == *"[ignored]"* ]] && continue
+    [[ $arrow == "->" && -n $new ]] && add_update "$name" "$old" "$new" "$source"
+  done
+}
+
+add_problem() {
+  local kind=$1 subject=$2 count=$3 package=$4 status update=""
+
+  if [[ $kind == config ]]; then
+    status=config
+  elif [[ -z $package ]]; then
+    status=not-packaged
+  elif [[ -n ${pending[$package]:-} ]]; then
+    status=possibly-fixed
+    update="$package ${pending[$package]}"
+  else
+    status=no-update
+  fi
+
+  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$kind" "${subject//$'\x1f'/ }" "$count" "$package" "$status" "$update" >>"$tmp/problems.tsv"
+}
+
+tsv_json() {
+  local file=$1
+  shift
+  jq -Rn '[inputs | split("\u001f") as $row | [$ARGS.positional, $row] | transpose | map({(.[0]): .[1]}) | add]' \
+    --args "$@" <"$file"
+}
+
+to_iso() { [[ -n $1 ]] && date -d "@$1" --iso-8601=seconds; }
+
+# In --stream mode every check reports progress as one JSON object per line.
+emit() {
+  ((stream)) || return 0
+  jq -cn "$@"
+}
+
+step() {
+  ((following)) && return 0
+  emit --arg stage "$1" --arg label "$2" '{event: "step", stage: $stage, label: $label}'
+}
+
+# --- Time windows ---
+
+pacman_log=$(pacman-conf LogFile 2>/dev/null)
+[[ -n $pacman_log ]] || pacman_log=/var/log/pacman.log
+
+last_upgrade_epoch=""
+last_upgrade=$(grep -h '\[PACMAN\] starting full system upgrade' "$pacman_log" 2>/dev/null | tail -n 1 | sed -E 's/^\[([^]]+)\].*/\1/')
+if [[ -n $last_upgrade ]]; then
+  last_upgrade_epoch=$(date -d "$last_upgrade" +%s 2>/dev/null) || last_upgrade_epoch=""
+fi
+
+if [[ -n $since_arg ]]; then
+  if ! since_epoch=$(date -d "$since_arg" +%s 2>/dev/null); then
+    echo "Invalid --since time: $since_arg" >&2
+    exit 1
+  fi
+elif [[ -n $last_upgrade_epoch ]]; then
+  since_epoch=$last_upgrade_epoch
+else
+  since_epoch=$(date -d '7 days ago' +%s)
+fi
+
+news_since_epoch=${last_upgrade_epoch:-$(date -d '30 days ago' +%s)}
+
+set_window() {
+  window_start=$(date -d "$(date +%F) 14 days ago" +%s)
+  ((since_epoch < window_start)) && window_start=$since_epoch
+  local oldest
+  oldest=$(date -d "$(date +%F) 89 days ago" +%s)
+  ((window_start < oldest)) && window_start=$oldest
+}
+set_window
+
+emit --arg last_upgrade "$(to_iso "$last_upgrade_epoch")" --arg since "$(to_iso "$since_epoch")" \
+  --arg now "$(date --iso-8601=seconds)" \
+  '{event: "start", last_upgrade: (if $last_upgrade == "" then null else $last_upgrade end), problems_since: $since, now: $now}'
+
+# --- Pending updates ---
+
+check_updates() {
+  pending=()
+  update_errors=()
+  : >"$tmp/updates.tsv"
+  rm -f "$tmp/sizes.tsv"
+  step updates "checking repository updates"
+  local repo_out aur_helper aur_out checkup_db size_fields
+  local -a repo_names
+  repo_out=$(checkupdates --nocolor 2>/dev/null)
+  case $? in
+    0) parse_updates repo <<<"$repo_out" ;;
+    2) ;;
+    *) update_errors+=(repo) ;;
+  esac
+
+  if ((check_aur)) && [[ -n $(pacman -Qmq 2>/dev/null) ]]; then
+    aur_helper=$(command -v yay || command -v paru || true)
+    if [[ -n $aur_helper ]]; then
+      step updates "checking AUR updates"
+      if aur_out=$("$aur_helper" -Qua 2>"$tmp/aur.err"); then
+        parse_updates aur <<<"$aur_out"
+      elif [[ -s $tmp/aur.err ]]; then
+        update_errors+=(aur)
+      fi
+    fi
+  fi
+
+  # Download size and installed-size change of repo updates, read from the fresh
+  # database checkupdates synced (the system database still has the old versions)
+  checkup_db=${CHECKUPDATES_DB:-${TMPDIR:-/tmp}/checkup-db-${UID}/}
+  mapfile -t repo_names < <(awk -F'\x1f' '$4 == "repo" { print $1 }' "$tmp/updates.tsv")
+  if ((${#repo_names[@]})); then
+    size_fields='
+      function bytes(text,    parts, unit) {
+        split(text, parts, " ")
+        unit = parts[2]
+        return int(parts[1] * (unit == "KiB" ? 1024 : unit == "MiB" ? 1048576 : unit == "GiB" ? 1073741824 : 1))
+      }
+      /^Name / { sub(/^[^:]*: /, ""); name = $0 }
+      /^Download Size / { sub(/^[^:]*: /, ""); download[name] = bytes($0) }
+      /^Installed Size / { sub(/^[^:]*: /, ""); installed[name] = bytes($0) }'
+    LC_ALL=C pacman -Si --dbpath "$checkup_db" -- "${repo_names[@]}" 2>/dev/null |
+      awk "$size_fields"' END { for (n in installed) printf "%s\x1f%d\x1f%d\n", n, download[n], installed[n] }' >"$tmp/sizes_new.tsv"
+    LC_ALL=C pacman -Qi -- "${repo_names[@]}" 2>/dev/null |
+      awk "$size_fields"' END { for (n in installed) printf "%s\x1f%d\n", n, installed[n] }' >"$tmp/sizes_old.tsv"
+    awk -F'\x1f' 'NR == FNR { old[$1] = $2; next } { printf "%s\x1f%d\x1f%d\n", $1, $2, $3 - old[$1] }' \
+      "$tmp/sizes_old.tsv" "$tmp/sizes_new.tsv" >"$tmp/sizes.tsv"
+  fi
+  touch "$tmp/sizes.tsv"
+
+  tsv_json "$tmp/sizes.tsv" name download_bytes installed_delta_bytes |
+    jq 'map({key: .name, value: {download_bytes: (.download_bytes | tonumber), installed_delta_bytes: (.installed_delta_bytes | tonumber)}}) | from_entries' >"$tmp/sizes.json"
+  tsv_json "$tmp/updates.tsv" name old new source bump risk reason |
+    jq --slurpfile sizes "$tmp/sizes.json" 'map(. + ($sizes[0][.name] // {}))' >"$tmp/updates.json"
+  emit --slurpfile updates "$tmp/updates.json" --args \
+    '{event: "stage", stage: "updates", data: {updates: $updates[0], update_check_errors: $ARGS.positional}}' \
+    "${update_errors[@]}"
+}
+check_updates
+
+# --- Current problems ---
+
+if command -v coredumpctl >/dev/null; then
+  step problems "reading crash reports"
+  coredumpctl list --since "@$window_start" --json=short --no-pager >"$tmp/cores.json" 2>/dev/null
+  while read -r count exe; do
+    [[ -n $exe ]] || continue
+    owner_of "$exe"
+    add_problem crash "$exe" "$count" "$REPLY"
+  done < <(jq -r --argjson since "$since_epoch" '.[]? | select(.time / 1000000 >= $since) | .exe // empty' "$tmp/cores.json" 2>/dev/null | sort | uniq -c | sort -rn)
+fi
+
+owner_of "/usr/lib/modules/$(uname -r)/vmlinuz"
+kernel_package=$REPLY
+
+step problems "reading journal errors"
+journalctl -p err --since "@$window_start" -o json \
+  --output-fields=_EXE,SYSLOG_IDENTIFIER,_TRANSPORT,_COMM -q --no-pager >"$tmp/journal.json" 2>/dev/null
+
+while read -r count source; do
+  [[ -n $source ]] || continue
+  case $source in
+    kernel) add_problem journal "kernel" "$count" "$kernel_package" ;;
+    /*)
+      owner_of "$source"
+      add_problem journal "$source" "$count" "$REPLY"
+      ;;
+    *) add_problem journal "${source#ident:}" "$count" "" ;;
+  esac
+done < <(jq -r --argjson since "$since_epoch" 'def s: if type == "string" then . else null end;
+    select((.SYSLOG_IDENTIFIER | s) != "systemd-coredump" and (.__REALTIME_TIMESTAMP | tonumber / 1000000) >= $since)
+    | if (._TRANSPORT | s) == "kernel" then "kernel"
+      elif (._EXE | s) then ._EXE
+      else "ident:" + ((.SYSLOG_IDENTIFIER | s) // (._COMM | s) // "unknown") end' "$tmp/journal.json" 2>/dev/null |
+  sort | uniq -c | sort -rn)
+
+# Crashes and journal errors per day, for the activity chart
+declare -A crash_days=() error_days=()
+while read -r count day; do
+  [[ -n $day ]] && crash_days[$day]=$count
+done < <(jq -r '.[]?.time // empty | . / 1000000 | floor | strflocaltime("%F")' "$tmp/cores.json" 2>/dev/null | sort | uniq -c)
+while read -r count day; do
+  [[ -n $day ]] && error_days[$day]=$count
+done < <(jq -r 'select(.SYSLOG_IDENTIFIER != "systemd-coredump") | .__REALTIME_TIMESTAMP // empty
+    | tonumber / 1000000 | floor | strflocaltime("%F")' "$tmp/journal.json" 2>/dev/null | sort | uniq -c)
+
+day=$(date -d "@$window_start" +%F)
+today=$(date +%F)
+while [[ ! $day > $today ]]; do
+  printf '%s\x1f%s\x1f%s\n' "$day" "${crash_days[$day]:-0}" "${error_days[$day]:-0}" >>"$tmp/activity.tsv"
+  day=$(date -d "$day + 1 day" +%F)
+done
+
+step problems "checking failed units"
+for scope in system user; do
+  scope_flag=()
+  [[ $scope == user ]] && scope_flag=(--user)
+  while read -r unit _; do
+    [[ -n $unit ]] || continue
+    package=""
+    fragment=$(systemctl "${scope_flag[@]}" show -P FragmentPath -- "$unit" 2>/dev/null)
+    if [[ -n $fragment ]]; then
+      owner_of "$fragment"
+      package=$REPLY
+    fi
+    add_problem failed-unit "$unit" 1 "$package"
+  done < <(systemctl "${scope_flag[@]}" --failed --no-legend --plain 2>/dev/null)
+done
+
+if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && command -v hyprctl >/dev/null; then
+  step problems "checking Hyprland config"
+  config_errors=$(hyprctl configerrors -j 2>/dev/null | jq '[.[] | select(. != "")] | length' 2>/dev/null)
+  if [[ $config_errors =~ ^[0-9]+$ ]] && ((config_errors > 0)); then
+    add_problem config "Hyprland config errors" "$config_errors" ""
+  fi
+fi
+
+tsv_json "$tmp/problems.tsv" kind subject count package status update |
+  jq 'map(.count |= tonumber)' >"$tmp/problems.json"
+tsv_json "$tmp/activity.tsv" date crashes errors |
+  jq 'map(.crashes |= tonumber | .errors |= tonumber)' >"$tmp/activity.json"
+emit --slurpfile problems "$tmp/problems.json" --slurpfile activity "$tmp/activity.json" \
+  '{event: "stage", stage: "problems", data: {problems: $problems[0], activity: $activity[0]}}'
+
+collect_anatomy() {
+  local os desktop omarchy="" kernel_running kernel_pkg kernel_installed="" reboot_pending=false cache_dir cache_bytes=0 foreign day today upgrades_json
+  local -a names upgrades=()
+  local -A per_day=()
+
+  os=$(. /etc/os-release 2>/dev/null && printf '%s' "${NAME:-}")
+  if command -v omarchy-version >/dev/null; then
+    omarchy=$(omarchy-version 2>/dev/null)
+    omarchy=${omarchy%-*}
+    [[ $os == Omarchy ]] && os="Arch Linux"
+  fi
+  if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && command -v hyprctl >/dev/null; then
+    desktop="Hyprland $(hyprctl version -j 2>/dev/null | jq -r '.version // empty' 2>/dev/null)"
+    desktop=${desktop% }
+  else
+    desktop=${XDG_CURRENT_DESKTOP:-}
+  fi
+
+  kernel_running=$(uname -r)
+  if [[ -d /usr/lib/modules/$kernel_running ]]; then
+    kernel_pkg=$(cat "/usr/lib/modules/$kernel_running/pkgbase" 2>/dev/null)
+    [[ -n $kernel_pkg ]] && kernel_installed=$(pacman -Q "$kernel_pkg" 2>/dev/null | cut -d' ' -f2)
+  else
+    reboot_pending=true
+  fi
+
+  cache_dir=$(pacman-conf CacheDir 2>/dev/null | head -n 1)
+  [[ -n $cache_dir && -d $cache_dir ]] && cache_bytes=$(du -sb "$cache_dir" 2>/dev/null | cut -f1)
+  [[ $cache_bytes =~ ^[0-9]+$ ]] || cache_bytes=0
+
+  pacman -Sl 2>/dev/null | awk '$4 ~ /^\[installed/ { print $1 }' | sort | uniq -c |
+    awk '{ printf "%s\x1f%d\n", $2, $1 }' >"$tmp/repos.tsv"
+  foreign=$(pacman -Qqm 2>/dev/null | wc -l)
+  ((foreign > 0)) && printf 'aur\x1f%d\n' "$foreign" >>"$tmp/repos.tsv"
+
+  mapfile -t names < <(cut -d$'\x1f' -f1 "$tmp/updates.tsv")
+  : >"$tmp/deps.tsv"
+  if ((${#names[@]})); then
+    LC_ALL=C pacman -Qi -- "${names[@]}" 2>/dev/null | awk '
+      /^Name / { sub(/^[^:]*: /, ""); name = $0 }
+      /^Depends On / { sub(/^[^:]*: /, ""); depends[name] = $0 == "None" ? 0 : split($0, parts, " ") }
+      /^Required By / { sub(/^[^:]*: /, ""); required[name] = $0 == "None" ? 0 : split($0, parts, " ") }
+      END { for (n in depends) printf "%s\x1f%d\x1f%d\n", n, depends[n], required[n] }' >"$tmp/deps.tsv"
+  fi
+
+  while IFS=$'\x1f' read -r day count; do
+    per_day[$day]=$count
+  done < <(awk -v start="$(date -d "@$window_start" +%F)" '
+    /\[ALPM\] upgraded / { day = substr($1, 2, 10); if (day >= start) count[day]++ }
+    END { for (d in count) printf "%s\x1f%d\n", d, count[d] }' "$pacman_log" 2>/dev/null)
+  day=$(date -d "@$window_start" +%F)
+  today=$(date +%F)
+  while [[ ! $day > $today ]]; do
+    upgrades+=("${per_day[$day]:-0}")
+    day=$(date -d "$day + 1 day" +%F)
+  done
+  upgrades_json=$(printf '%s\n' "${upgrades[@]}" | jq -sc .)
+
+  journalctl -p err --since "@$since_epoch" -n 50 -o json \
+    --output-fields=SYSLOG_IDENTIFIER,_COMM,MESSAGE,_TRANSPORT -q --no-pager 2>/dev/null |
+    jq -c "$journal_line" 2>/dev/null | jq -sc . >"$tmp/journal_lines.json"
+  [[ -s $tmp/journal_lines.json ]] || echo '[]' >"$tmp/journal_lines.json"
+
+  jq -Rn '[inputs | split("\u001f") | {(.[0]): (.[1] | tonumber)}] | add // {}' <"$tmp/repos.tsv" >"$tmp/repos.json"
+  jq -Rn '[inputs | split("\u001f") | {(.[0]): {depends: (.[1] | tonumber), required_by: (.[2] | tonumber)}}] | add // {}' \
+    <"$tmp/deps.tsv" >"$tmp/deps.json"
+  emit --arg hostname "$(uname -n)" --arg os "$os" --arg desktop "$desktop" --arg omarchy "$omarchy" \
+    --arg kernel_running "$kernel_running" --arg kernel_installed "$kernel_installed" \
+    --argjson reboot_pending "$reboot_pending" --argjson cache_bytes "$cache_bytes" \
+    --argjson packages "$(pacman -Qq 2>/dev/null | wc -l)" --argjson explicit "$(pacman -Qqe 2>/dev/null | wc -l)" \
+    --argjson orphans "$(pacman -Qqdt 2>/dev/null | wc -l)" --argjson upgrades_per_day "$upgrades_json" \
+    --slurpfile repos "$tmp/repos.json" --slurpfile deps "$tmp/deps.json" --slurpfile journal "$tmp/journal_lines.json" \
+    '{event: "stage", stage: "anatomy", data: {hostname: $hostname, os: $os, desktop: $desktop, omarchy: $omarchy,
+      packages: $packages, explicit: $explicit, orphans: $orphans, cache_bytes: $cache_bytes,
+      kernel_running: $kernel_running, kernel_installed: $kernel_installed, reboot_pending: $reboot_pending,
+      upgrades_per_day: $upgrades_per_day, repos: $repos[0], deps: $deps[0], journal: $journal[0]}}'
+}
+
+journal_line='def s: if type == "string" then . else null end;
+  select((.SYSLOG_IDENTIFIER | s) != "systemd-coredump")
+  | {time: (.__REALTIME_TIMESTAMP | tonumber / 1000000 | floor | strflocaltime("%H:%M:%S")),
+     ident: (if (._TRANSPORT | s) == "kernel" then "kernel" else ((.SYSLOG_IDENTIFIER | s) // (._COMM | s) // "unknown") end),
+     message: ((.MESSAGE | s) // "binary message")}'
+
+((stream)) && collect_anatomy
+
+# --- Arch news ---
+
+step news "fetching Arch news"
+news_error=0
+if command -v xmllint >/dev/null &&
+  curl -fsS --max-time 10 https://archlinux.org/feeds/news/ -o "$tmp/news.xml" 2>/dev/null; then
+  news_count=$(xmllint --nonet --xpath 'count(//item)' "$tmp/news.xml" 2>/dev/null)
+  [[ $news_count =~ ^[0-9]+$ ]] || news_count=0
+  for ((i = 1; i <= news_count; i++)); do
+    pub=$(xmllint --nonet --xpath "string(//item[$i]/pubDate)" "$tmp/news.xml" 2>/dev/null)
+    pub_epoch=$(date -d "$pub" +%s 2>/dev/null) || continue
+    ((pub_epoch > news_since_epoch)) || continue
+    title=$(xmllint --nonet --xpath "string(//item[$i]/title)" "$tmp/news.xml" 2>/dev/null)
+    link=$(xmllint --nonet --xpath "string(//item[$i]/link)" "$tmp/news.xml" 2>/dev/null)
+    manual=false
+    [[ ${title,,} == *"manual intervention"* ]] && manual=true
+    printf '%s\x1f%s\x1f%s\x1f%s\n' "$(date -d "@$pub_epoch" +%F)" "${title//$'\x1f'/ }" "$link" "$manual" >>"$tmp/news.tsv"
+  done
+else
+  news_error=1
+fi
+
+tsv_json "$tmp/news.tsv" date title link manual_intervention |
+  jq 'map(.manual_intervention |= (. == "true"))' >"$tmp/news.json"
+emit --slurpfile news "$tmp/news.json" --argjson news_error "$news_error" \
+  '{event: "stage", stage: "news", data: {news: $news[0], news_check_failed: ($news_error == 1)}}'
+
+# --- Preflight ---
+
+step preflight "checking disk space and snapshots"
+read -r disk_total_bytes disk_used_bytes free_bytes < <(df --output=size,used,avail --block-size=1 / 2>/dev/null | tail -n 1)
+[[ $free_bytes =~ ^[0-9]+$ ]] || free_bytes=0
+[[ $disk_total_bytes =~ ^[0-9]+$ ]] || disk_total_bytes=0
+[[ $disk_used_bytes =~ ^[0-9]+$ ]] || disk_used_bytes=0
+free_ok=false
+((free_bytes >= 10 * 1024 * 1024 * 1024)) && free_ok=true
+
+snapper_configured=false
+if command -v snapper >/dev/null && [[ -n $(ls -A /etc/snapper/configs 2>/dev/null) ]]; then
+  snapper_configured=true
+fi
+
+emit --argjson free_bytes "$free_bytes" --argjson free_ok "$free_ok" --argjson snapper "$snapper_configured" \
+  --argjson total "$disk_total_bytes" --argjson used "$disk_used_bytes" \
+  '{event: "stage", stage: "preflight", data: {free_bytes: $free_bytes, free_ok: $free_ok, snapper_configured: $snapper,
+    disk_total_bytes: $total, disk_used_bytes: $used}}'
+
+recheck() {
+  tmp=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/rumb-scan.XXXXXX") || return
+  last_upgrade=$(grep -h '\[PACMAN\] starting full system upgrade' "$pacman_log" 2>/dev/null | tail -n 1 | sed -E 's/^\[([^]]+)\].*/\1/')
+  [[ -n $last_upgrade && -z $since_arg ]] && since_epoch=$(date -d "$last_upgrade" +%s 2>/dev/null)
+  set_window
+  check_updates
+  collect_anatomy
+  rm -rf "$tmp"
+}
+
+follow_sources() {
+  local journal_pid=""
+  tail -F -n0 --pid=$$ "$pacman_log" 2>/dev/null | sed -u 's/^/L /' &
+  if command -v journalctl >/dev/null; then
+    journalctl -f -n0 -q -p err -o json --output-fields=SYSLOG_IDENTIFIER,_COMM,MESSAGE,_TRANSPORT 2>/dev/null > >(sed -u 's/^/J /') &
+    journal_pid=$!
+  fi
+  tail -f --pid=$$ /dev/null 2>/dev/null
+  [[ -n $journal_pid ]] && kill "$journal_pid" 2>/dev/null
+  wait
+}
+
+follow_events() {
+  local line status message settled=1
+  while true; do
+    IFS= read -r -t 3 line
+    status=$?
+    if ((status > 128)); then
+      ((settled)) || { settled=1; recheck; }
+      continue
+    fi
+    ((status == 0)) || break
+    case ${line:0:2} in
+      'L ')
+        [[ ${line:2} =~ ^\[[^]]*\]\ \[(ALPM|PACMAN)\]\ (.*)$ ]] || continue
+        message=${BASH_REMATCH[2]}
+        [[ ${BASH_REMATCH[1]} == PACMAN && $message == Running* ]] && continue
+        emit --arg line "$message" '{event: "activity", line: $line}'
+        [[ $message == "transaction completed" ]] && settled=0
+        ;;
+      'J ')
+        jq -c "$journal_line"' | {event: "journal"} + .' <<<"${line:2}" 2>/dev/null
+        ;;
+    esac
+  done
+}
+
+follow() {
+  rm -rf "$tmp"
+  following=1
+  local parent=$PPID
+  follow_sources | follow_events &
+  while kill -0 "$parent" 2>/dev/null; do
+    sleep 15
+  done
+}
+
+# --- Output ---
+
+jq -n \
+  --arg generated "$(date --iso-8601=seconds)" \
+  --arg last_upgrade "$(to_iso "$last_upgrade_epoch")" \
+  --arg since "$(to_iso "$since_epoch")" \
+  --arg news_since "$(to_iso "$news_since_epoch")" \
+  --slurpfile updates "$tmp/updates.json" \
+  --slurpfile problems "$tmp/problems.json" \
+  --slurpfile news "$tmp/news.json" \
+  --slurpfile activity "$tmp/activity.json" \
+  --argjson news_error "$news_error" \
+  --argjson free_bytes "$free_bytes" \
+  --argjson free_ok "$free_ok" \
+  --argjson snapper "$snapper_configured" \
+  --argjson disk_total "$disk_total_bytes" \
+  --argjson disk_used "$disk_used_bytes" \
+  --args '
+  ($updates[0]) as $u
+  | ($problems[0]) as $p
+  | ($news[0]) as $n
+  | {
+      generated_at: $generated,
+      last_upgrade: (if $last_upgrade == "" then null else $last_upgrade end),
+      problems_since: $since,
+      news_since: $news_since,
+      updates: $u,
+      update_check_errors: $ARGS.positional,
+      news: $n,
+      news_check_failed: ($news_error == 1),
+      problems: $p,
+      activity: $activity[0],
+      preflight: {
+        free_bytes: $free_bytes, free_ok: $free_ok, snapper_configured: $snapper,
+        disk_total_bytes: $disk_total, disk_used_bytes: $disk_used
+      },
+      summary: {
+        updates: ($u | length),
+        download_bytes: ($u | map(.download_bytes // 0) | add // 0),
+        high_risk: ($u | map(select(.risk == "high")) | length),
+        medium_risk: ($u | map(select(.risk == "medium")) | length),
+        possibly_fixed: ($p | map(select(.status == "possibly-fixed")) | length),
+        problems: ($p | length),
+        news: ($n | length),
+        manual_intervention: ($n | map(select(.manual_intervention)) | length)
+      }
+    }' "${update_errors[@]}" >"$tmp/forecast.json"
+
+if ((stream)); then
+  jq -c '{event: "result", forecast: .}' "$tmp/forecast.json"
+  follow
+  exit 0
+fi
+
+if ((json)); then
+  cat "$tmp/forecast.json"
+  exit 0
+fi
+
+if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
+  bold=$'\e[1m' dim=$'\e[2m' red=$'\e[31m' yellow=$'\e[33m' green=$'\e[32m' reset=$'\e[0m'
+else
+  bold="" dim="" red="" yellow="" green="" reset=""
+fi
+
+short_path() { printf '%s' "${1/#$HOME/\~}"; }
+
+echo "${bold}rumb${reset}  ${dim}update forecast${reset}"
+echo
+
+# Pending updates, riskiest first
+read -r total high medium < <(jq -r '.summary | "\(.updates) \(.high_risk) \(.medium_risk)"' "$tmp/forecast.json")
+echo "${bold}Pending updates${reset} ${dim}($total: $high high, $medium medium risk)${reset}"
+if ((total == 0 && ${#update_errors[@]} == 0)); then
+  echo "  none"
+fi
+name_width=$(awk -F'\x1f' '{ n = length($1) + ($4 == "aur" ? 6 : 0); if (n > max) max = n } END { print max + 0 }' "$tmp/updates.tsv")
+for risk in high medium low; do
+  case $risk in
+    high) color=$red label="HIGH  " ;;
+    medium) color=$yellow label="MEDIUM" ;;
+    low) color=$dim label="low   " ;;
+  esac
+  while IFS=$'\x1f' read -r name old new source _ row_risk reason; do
+    [[ $row_risk == "$risk" ]] || continue
+    suffix=""
+    [[ $source == aur ]] && suffix=" (AUR)"
+    printf '  %s%s%s  %-*s  %s -> %s%s%s\n' "$color" "$label" "$reset" "$name_width" "$name$suffix" "$old" "$new" \
+      "${reason:+  $dim}" "${reason:+$reason$reset}"
+  done <"$tmp/updates.tsv"
+done
+for source in "${update_errors[@]}"; do
+  case $source in
+    repo) source_label="repository" ;;
+    aur) source_label="AUR" ;;
+  esac
+  echo "  ${red}Could not check $source_label updates${reset}"
+done
+echo
+
+# Arch news
+if [[ -n $last_upgrade_epoch ]]; then
+  echo "${bold}Arch news since your last upgrade${reset} ${dim}($(date -d "@$last_upgrade_epoch" '+%F'))${reset}"
+else
+  echo "${bold}Arch news from the last 30 days${reset}"
+fi
+if ((news_error)); then
+  echo "  ${red}Could not fetch Arch news${reset}"
+elif [[ ! -s $tmp/news.tsv ]]; then
+  echo "  none"
+else
+  while IFS=$'\x1f' read -r date title link manual; do
+    marker="  "
+    [[ $manual == true ]] && marker="${red}! ${reset}"
+    echo "  $marker$date  $title"
+    echo "      ${dim}$link${reset}"
+  done <"$tmp/news.tsv"
+fi
+echo
+
+# Current problems: possibly fixed first, then config errors, failed units,
+# crashes and journal errors, each by count
+echo "${bold}Current problems since $(date -d "@$since_epoch" '+%F %H:%M')${reset}"
+if [[ ! -s $tmp/problems.tsv ]]; then
+  echo "  none found"
+else
+  shown=0
+  limit=15
+  while IFS=$'\x1f' read -r kind subject count package status update; do
+    ((shown < limit)) || continue
+    shown=$((shown + 1))
+    case $status in
+      possibly-fixed) tag="${green}possibly fixed${reset}" detail="by $update" ;;
+      config) tag="${yellow}fix in config ${reset}" detail="run: hyprctl configerrors" ;;
+      no-update) tag="${dim}no update     ${reset}" detail="($package)" ;;
+      not-packaged) tag="${dim}not packaged  ${reset}" detail="(not fixable by an update)" ;;
+    esac
+    printf '  %s  %-11s %5sx  %s  %s%s%s\n' "$tag" "$kind" "$count" "$(short_path "$subject")" "$dim" "$detail" "$reset"
+  done < <(awk -F'\x1f' -v OFS='\x1f' '{
+      rank = $5 == "possibly-fixed" ? 0 : $5 == "config" ? 1 : $1 == "failed-unit" ? 2 : $1 == "crash" ? 3 : 4
+      print rank, $0
+    }' "$tmp/problems.tsv" | sort -t$'\x1f' -k1,1n -k4,4nr | cut -d$'\x1f' -f2-)
+  total_problems=$(wc -l <"$tmp/problems.tsv")
+  if ((total_problems > shown)); then
+    echo "  ${dim}... $((total_problems - shown)) more, see --json${reset}"
+  fi
+fi
+echo
+
+# Preflight
+echo "${bold}Before you update${reset}"
+free_gib=$((free_bytes / 1024 / 1024 / 1024))
+if [[ $free_ok == true ]]; then
+  echo "  ${green}ok${reset}  $free_gib GiB free on /"
+else
+  echo "  ${red}!!${reset}  only $free_gib GiB free on / (under 10 GiB)"
+fi
+if [[ $snapper_configured == true ]]; then
+  echo "  ${green}ok${reset}  Snapper is configured, so the update takes a snapshot first"
+else
+  echo "  ${yellow}!!${reset}  No Snapper config, so there is no snapshot to roll back to"
+fi

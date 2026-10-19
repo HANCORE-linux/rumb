@@ -1,0 +1,34 @@
+#!/bin/bash
+
+set -uo pipefail
+
+keys=(mode background foreground accent muted selection lighter_background dark_foreground light_foreground bright_foreground red green yellow blue magenta cyan)
+out=${1:-"$(dirname "$0")/themes.json"}
+
+declare -A taken=()
+published=(banish batou blackgold blackmoney blackturq demon dos-moos greek-noir harbor harbordark inkypinky kanso labra lasthorizon mechanoonna moodpeak oxford oxocarbon roseofdune ryu saga sapphire shadesofjade soft-echoes solitude thegreek turbonite velvetnight whitegold)
+entries=()
+add() {
+  local name=$1 dir=$2
+  [[ -f $dir/colors.toml ]] || return 0
+  [[ -n ${taken[$name]:-} ]] && name="omarchy-$name"
+  taken[$name]=1
+  entries+=("$name"$'\t'"$dir")
+}
+
+for name in "${published[@]}"; do
+  add "$name" "$HOME/Projects/custom-themes/$name"
+done
+for dir in /usr/share/omarchy/themes/*/; do
+  add "$(basename "$dir")" "${dir%/}"
+done
+
+for entry in "${entries[@]}"; do
+  name=${entry%%$'\t'*}
+  dir=${entry#*$'\t'}
+  omarchy-theme-color --file "$dir/colors.toml" --all 2>/dev/null |
+    jq -Rn --arg name "$name" --args '
+      [inputs | split("\t") | select(length == 2) | {(.[0]): .[1]}] | add
+      | {(($name)): with_entries(select(.key as $k | $ARGS.positional | index($k)) | .value |= ascii_downcase)}' "${keys[@]}"
+done | jq -s 'add' >"$out"
+echo "$(jq length "$out") themes written to $out"

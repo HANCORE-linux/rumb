@@ -1,0 +1,156 @@
+.TH RUMB 1 2026-10-19 rumb "User Commands"
+.SH NAME
+rumb, rumb\-scan \- track software health and spot trouble early
+.SH SYNOPSIS
+.B rumb
+.RB [ \-\-demo ]
+.RB [ \-\-no\-anim ]
+.RB [ \-\-theme
+.IR name ]
+.RB [ \-\-since
+.IR time ]
+.RB [ \-\-no\-aur ]
+.br
+.B rumb
+.BR \-\-themes " | " \-\-version " | " \-\-help
+.br
+.B rumb\-scan
+.RB [ \-\-json " | " \-\-stream ]
+.RB [ \-\-since
+.IR time ]
+.RB [ \-\-no\-aur ]
+.SH DESCRIPTION
+.B rumb
+is a terminal dashboard for Arch Linux and Omarchy.
+It shows what the next update brings and what is already failing:
+pending repository and AUR updates ranked by risk,
+and the crashes, failed units, journal errors and Hyprland config errors
+since the last full system upgrade,
+each tied to the package that owns it,
+together with the Arch news published since then.
+.PP
+rumb only reads.
+It never runs
+.B sudo
+or asks for root.
+Pending repository updates come from
+.BR checkupdates (8),
+which syncs a temporary copy of the package databases
+and never touches the system's own.
+.PP
+After the scan rumb keeps following the pacman log and the journal,
+and checks again when a package transaction completes.
+.PP
+When output is not a terminal, the terminal is smaller than 150x44,
+or
+.B NO_COLOR
+is set,
+rumb prints the plain text report of
+.B rumb\-scan
+instead.
+.SH OPTIONS
+.TP
+.B \-\-demo
+Play bundled demo data instead of checking this system.
+.TP
+.B \-\-no\-anim
+Show the results without animation.
+.TP
+.BI \-\-theme " name"
+Colors to use.
+By default rumb uses the current Omarchy theme and follows it when it changes;
+without Omarchy it uses labra.
+.B omarchy
+selects the current Omarchy theme explicitly.
+.TP
+.B \-\-themes
+List the theme names.
+.TP
+.BI \-\-since " time"
+Look for problems since
+.IR time ,
+for example
+.RB \(dq "7 days ago" \(dq.
+The default is the last full system upgrade.
+.TP
+.B \-\-no\-aur
+Skip the AUR update check.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.TP
+.BR \-h ", " \-\-help
+Print a short help.
+.SH VIEWS AND KEYS
+.TP
+.B 1\(en5
+Switch views: overview, updates, problems, packages, live.
+.TP
+.BR tab ", " shift\-tab
+Move between tiles.
+.TP
+.B enter
+Open the details of a tile.
+.TP
+.B esc
+Go back.
+.TP
+.B r
+Scan again.
+.TP
+.B q
+Quit.
+.SH RUMB\-SCAN
+.B rumb\-scan
+runs the checks that rumb shows and prints them as a text report.
+rumb starts it on its own; it can also be run directly, for example from a script.
+.TP
+.B \-\-json
+Print the forecast as JSON.
+.TP
+.B \-\-stream
+Print one JSON event per line while the checks run,
+then keep following the package manager log and the journal.
+.PP
+.BR \-\-since " and " \-\-no\-aur
+work as for rumb.
+AUR updates are checked with
+.B yay
+or
+.B paru
+when one of them is installed.
+The Arch news needs
+.BR xmllint .
+.SH ENVIRONMENT
+.TP
+.B RUMB_THEME
+Theme to use when
+.B \-\-theme
+is not given.
+.TP
+.B RUMB_SCAN
+Path of the
+.B rumb\-scan
+to run.
+.TP
+.B NO_COLOR
+When set and not empty, print the plain text report.
+.SH FILES
+.TP
+.I ~/.local/state/omarchy/current/theme/colors.toml
+The current Omarchy theme
+.RI ( ~/.config/omarchy/current/theme/colors.toml
+on older Omarchy).
+.TP
+.I /var/log/pacman.log
+The package manager log, or the
+.B LogFile
+that
+.BR pacman.conf (5)
+names.
+.SH SEE ALSO
+.BR pacman (8),
+.BR checkupdates (8),
+.BR journalctl (1),
+.BR coredumpctl (1),
+.BR systemctl (1)
