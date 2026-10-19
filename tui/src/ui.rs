@@ -43,9 +43,9 @@ pub struct Scene {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn paint(picture: &Picture, scene: &Scene, model: &Model, anim: &crate::ink::Anim, pal: &Palette, width: u32, height: u32, cell_height: f32) -> Option<tiny_skia::Pixmap> {
+pub fn paint(picture: &Picture, callouts: &[Callout], model: &Model, anim: &crate::ink::Anim, pal: &Palette, width: u32, height: u32, cell_height: f32) -> Option<tiny_skia::Pixmap> {
     match picture {
-        Picture::Astrolabe => crate::ink::astrolabe(model, anim, &scene.callouts, pal, width, height, cell_height),
+        Picture::Astrolabe => crate::ink::astrolabe(model, anim, callouts, pal, width, height, cell_height),
         Picture::Eye(spec) => crate::ink::eye(spec, pal, width, height, cell_height),
         Picture::Mark(kind) => {
             let file = match kind {

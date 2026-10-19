@@ -9,6 +9,7 @@ mod ui;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -218,12 +219,14 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
         theme.refresh(now);
         terminal.draw(|frame| {
             let model = ink::Model::new(&app);
-            let scene = ui::draw(frame, &app, &model, &theme.palette, now);
+            let mut scene = ui::draw(frame, &app, &model, &theme.palette, now);
             if let Some(pictures) = pictures.as_mut() {
                 let anim = ui::astrolabe_anim(&app, &model, now);
                 let astrolabe = format!("{anim:?}{:?}{}", scene.callouts, model.nodes.len());
-                pictures.draw(frame, &scene, (theme.generation, &astrolabe), now, |picture, width, height, cell_height| {
-                    ui::paint(picture, &scene, &model, &anim, &theme.palette, width, height, cell_height)
+                let (model, anim, callouts, pal) = (Arc::new(model), Arc::new(anim), Arc::new(std::mem::take(&mut scene.callouts)), theme.palette);
+                pictures.draw(frame, scene, (theme.generation, &astrolabe), now, |picture| {
+                    let (model, anim, callouts) = (model.clone(), anim.clone(), callouts.clone());
+                    Box::new(move |width, height, cell_height| ui::paint(&picture, &callouts, &model, &anim, &pal, width, height, cell_height))
                 });
             }
         })?;
@@ -359,7 +362,7 @@ mod tests {
         let mut images = Vec::new();
         for (index, placement) in scene.placements.iter().enumerate() {
             let (w, h) = (u32::from(placement.rect.width) * cell_w, u32::from(placement.rect.height) * cell_h);
-            let pixmap = ui::paint(&placement.picture, &scene, &model, &anim, &pal, w, h, cell_h as f32).or_else(|| tiny_skia::Pixmap::new(w, h));
+            let pixmap = ui::paint(&placement.picture, &scene.callouts, &model, &anim, &pal, w, h, cell_h as f32).or_else(|| tiny_skia::Pixmap::new(w, h));
             let file = format!("{name}-image-{index}.png");
             pixmap.unwrap().save_png(dir.join(&file)).unwrap();
             images.push(json!({"x": placement.rect.x, "y": placement.rect.y, "png": file}));
