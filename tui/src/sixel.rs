@@ -6,7 +6,7 @@ use tiny_skia::Pixmap;
 use crate::palette::{Palette, mix};
 
 pub struct Encoder {
-    key: [u32; 15],
+    key: [u32; 16],
     colors: Vec<[u8; 3]>,
     lookup: Vec<u16>,
 }
@@ -18,18 +18,18 @@ fn rgb(color: Color) -> [u8; 3] {
     }
 }
 
-fn key_of(pal: &Palette) -> [u32; 15] {
+fn key_of(pal: &Palette) -> [u32; 16] {
     let pack = |color: Color| {
         let [r, g, b] = rgb(color);
         u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
     };
-    [pal.page, pal.panel, pal.kpi, pal.bar, pal.bar_text, pal.ink, pal.ink2, pal.label, pal.faint, pal.rule, pal.grid, pal.teal, pal.select, pal.alert, pal.warn].map(pack)
+    [pal.page, pal.panel, pal.kpi, pal.bar, pal.bar_text, pal.ink, pal.ink2, pal.label, pal.faint, pal.rule, pal.grid, pal.teal, pal.select, pal.alert, pal.warn, pal.relation].map(pack)
 }
 
 impl Encoder {
     pub fn new(pal: &Palette) -> Self {
         let grounds = [pal.page, mix(pal.page, pal.ink, 0.04), mix(pal.page, pal.ink, 0.09), pal.ink];
-        let inks = [pal.ink, pal.ink2, pal.label, pal.faint, pal.rule, pal.grid, pal.alert, pal.warn, pal.teal];
+        let inks = [pal.ink, pal.ink2, pal.label, pal.faint, pal.rule, pal.grid, pal.alert, pal.warn, pal.teal, pal.relation];
         let mut colors: Vec<[u8; 3]> = Vec::new();
         let mut add = |color: Color| {
             let value = rgb(color);
@@ -104,6 +104,7 @@ impl Encoder {
         let mut bits = vec![0u8; 256 * width];
         let mut present: Vec<usize> = Vec::with_capacity(64);
         let mut seen = [false; 256];
+        let mut spans = [(0usize, 0usize); 256];
         for band in (0..height).step_by(6) {
             if band > 0 {
                 out.push('-');
@@ -115,9 +116,14 @@ impl Encoder {
                 let line = &indices[(band + row) * width..(band + row + 1) * width];
                 for (x, index) in line.iter().enumerate() {
                     let color = usize::from(*index);
-                    if !seen[color] {
+                    if seen[color] {
+                        let span = &mut spans[color];
+                        span.0 = span.0.min(x);
+                        span.1 = span.1.max(x);
+                    } else {
                         seen[color] = true;
                         present.push(color);
+                        spans[color] = (x, x);
                     }
                     bits[color * width + x] |= 1 << row;
                 }
@@ -126,31 +132,55 @@ impl Encoder {
                 if number > 0 {
                     out.push('$');
                 }
-                let _ = write!(out, "#{color}");
+                out.push('#');
+                decimal(&mut out, *color);
+                let (first, last) = spans[*color];
                 let row = &mut bits[color * width..(color + 1) * width];
-                let last = row.iter().rposition(|value| *value != 0).map_or(0, |at| at + 1);
-                let mut x = 0;
-                while x < last {
+                run(&mut out, first, 0);
+                let mut x = first;
+                while x <= last {
                     let value = row[x];
-                    let mut run = 1;
-                    while x + run < last && row[x + run] == value {
-                        run += 1;
+                    let mut count = 1;
+                    while x + count <= last && row[x + count] == value {
+                        count += 1;
                     }
-                    let symbol = char::from(63 + value);
-                    if run > 3 {
-                        let _ = write!(out, "!{run}{symbol}");
-                    } else {
-                        for _ in 0..run {
-                            out.push(symbol);
-                        }
-                    }
-                    x += run;
+                    run(&mut out, count, value);
+                    x += count;
                 }
-                row.fill(0);
+                row[first..=last].fill(0);
             }
         }
         out.push_str("\x1b\\");
         out
+    }
+}
+
+fn run(out: &mut String, count: usize, value: u8) {
+    let symbol = char::from(63 + value);
+    if count > 3 {
+        out.push('!');
+        decimal(out, count);
+        out.push(symbol);
+    } else {
+        for _ in 0..count {
+            out.push(symbol);
+        }
+    }
+}
+
+fn decimal(out: &mut String, mut value: usize) {
+    let mut digits = [0u8; 20];
+    let mut length = 0;
+    loop {
+        digits[length] = b'0' + (value % 10) as u8;
+        length += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    for digit in digits[..length].iter().rev() {
+        out.push(char::from(*digit));
     }
 }
 
@@ -172,11 +202,98 @@ mod tests {
         assert_eq!(text, again);
     }
 
+    fn decode(text: &str, width: usize, height: usize) -> Vec<u8> {
+        let mut out = vec![u8::MAX; width * height];
+        let bytes = text.as_bytes();
+        let mut i = text.find('#').unwrap();
+        let (mut x, mut band, mut color) = (0usize, 0usize, 0usize);
+        let number = |i: &mut usize| {
+            let start = *i;
+            while *i < bytes.len() && bytes[*i].is_ascii_digit() {
+                *i += 1;
+            }
+            text[start..*i].parse::<usize>().unwrap_or(0)
+        };
+        let mut paint = |x: usize, band: usize, color: usize, value: u8| {
+            for bit in 0..6 {
+                let y = band * 6 + bit;
+                if value & (1 << bit) != 0 && x < width && y < height {
+                    out[y * width + x] = color as u8;
+                }
+            }
+        };
+        while i < bytes.len() {
+            match bytes[i] {
+                0x1b => break,
+                b'#' => {
+                    i += 1;
+                    color = number(&mut i);
+                    while i < bytes.len() && (bytes[i] == b';' || bytes[i].is_ascii_digit()) {
+                        i += 1;
+                    }
+                }
+                b'!' => {
+                    i += 1;
+                    let count = number(&mut i);
+                    for _ in 0..count {
+                        paint(x, band, color, bytes[i] - 63);
+                        x += 1;
+                    }
+                    i += 1;
+                }
+                b'$' => {
+                    x = 0;
+                    i += 1;
+                }
+                b'-' => {
+                    x = 0;
+                    band += 1;
+                    i += 1;
+                }
+                value @ b'?'..=b'~' => {
+                    paint(x, band, color, value - 63);
+                    x += 1;
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_pixel_decodes_to_its_palette_entry() {
+        let pal = Palette::labra();
+        let mut encoder = Encoder::new(&pal);
+        let (width, height) = (41usize, 23usize);
+        let mut pixmap = Pixmap::new(width as u32, height as u32).unwrap();
+        let tones = [pal.page, pal.ink, pal.alert, pal.warn, pal.teal, mix(pal.page, pal.ink, 0.3)];
+        for (i, pixel) in pixmap.pixels_mut().iter_mut().enumerate() {
+            let (x, y) = (i % width, i / width);
+            let tone = if x == 0 || x == width - 1 {
+                tones[(y / 4) % tones.len()]
+            } else if (5..9).contains(&x) && (2..11).contains(&y) {
+                tones[2]
+            } else if (30..33).contains(&x) && y > 12 {
+                tones[3 + (y % 3)]
+            } else {
+                tones[0]
+            };
+            let [r, g, b] = rgb(tone);
+            *pixel = tiny_skia::PremultipliedColorU8::from_rgba(r, g, b, 255).unwrap();
+        }
+        let text = encoder.encode(&pixmap);
+        let decoded = decode(&text, width, height);
+        for (i, pixel) in pixmap.pixels().iter().enumerate() {
+            assert_eq!(decoded[i], encoder.index(pixel.red(), pixel.green(), pixel.blue()), "pixel {i}");
+        }
+    }
+
     #[test]
     fn palette_holds_the_theme_colors() {
         let pal = Palette::labra();
         let mut encoder = Encoder::new(&pal);
-        for color in [pal.page, pal.ink, pal.alert, pal.warn, pal.teal] {
+        for color in [pal.page, pal.ink, pal.alert, pal.warn, pal.teal, pal.relation] {
             let [r, g, b] = rgb(color);
             let index = encoder.index(r, g, b);
             let [pr, pg, pb] = encoder.colors[usize::from(index)];

@@ -1,4 +1,4 @@
-.TH RUMB 1 2026-10-19 rumb "User Commands"
+.TH RUMB 1 2026-10-20 rumb "User Commands"
 .SH NAME
 rumb, rumb\-scan \- track software health and spot trouble early
 .SH SYNOPSIS
@@ -28,6 +28,7 @@ and the crashes, failed units, journal errors and Hyprland config errors
 since the last completed full system upgrade,
 each tied to the package that owns it,
 together with the Arch news published since then.
+On Omarchy, a pending Omarchy update also shows what its release notes fix.
 .PP
 rumb only reads.
 It never runs
@@ -94,15 +95,21 @@ Print a short help.
 .TP
 .B 1\(en5
 Show or hide the instruments, the subsystems with the eye, the updates, the problems and the live events.
+When the updates panel is large enough, 3 switches it between the map, the rows and hidden.
+The map shows every pending update by risk and subsystem,
+with the dependencies of the selected update.
 .TP
-.BR tab ", " left ", " right
-Move the focus between the lists.
+.B tab
+Move the focus between the instruments and the lists.
+.TP
+.BR left ", " right
+Move the focus between the lists, or between the instruments when they have it.
 .TP
 .BR up ", " down ", " PgUp ", " PgDn ", " Home ", " End
-Select a row.
+Select a row. Up on the first row moves the focus to the instruments, down moves it back.
 .TP
 .B enter
-Open the selected row.
+Open the selected row or instrument.
 .TP
 .BR / ", " f
 Filter the focused list.
@@ -115,7 +122,7 @@ Export a Markdown report to
 .IR ~/rumb\-exports .
 .TP
 .B esc
-Close or clear.
+Close, clear or leave the instruments.
 .TP
 .B r
 Scan again.
@@ -144,6 +151,8 @@ when one of them is installed,
 and reported as not checked otherwise.
 The Arch news needs
 .BR xmllint .
+The Omarchy release notes are read from the GitHub API,
+only when an Omarchy update is pending.
 .SH ENVIRONMENT
 .TP
 .B RUMB_THEME

@@ -111,6 +111,8 @@ pub struct Motion {
     glows: Vec<(u8, Instant, u8)>,
     flashes: Vec<(u8, Instant, u8)>,
     last_activity: Instant,
+    omarchy: bool,
+    attention: Option<(Instant, Target)>,
     last_step: Instant,
     clock: f32,
     level: f32,
@@ -159,6 +161,7 @@ pub fn command_of(label: &str) -> &str {
         "listing installed packages" => "pacman -Q",
         "measuring the package cache" => "paccache -dk1",
         "fetching Arch news" => "curl archlinux.org/feeds/news",
+        "fetching Omarchy release notes" => "curl omacom/omarchy/releases",
         "checking disk space and snapshots" => "df /",
         other => other,
     }
@@ -166,13 +169,13 @@ pub fn command_of(label: &str) -> &str {
 
 pub fn result_of(label: &str, value: &Value) -> String {
     let number = value.as_u64();
-    let count = |word: &str| number.map_or_else(|| "failed".to_string(), |n| format!("{} {word}", crate::page::apos(n)));
+    let count = |one: &str, many: &str| number.map_or_else(|| "failed".to_string(), |n| format!("{} {}", crate::page::apos(n), if n == 1 { one } else { many }));
     match label {
-        "checking repository updates" => count("updates"),
-        "checking AUR updates" => count("aur"),
+        "checking repository updates" => count("update", "updates"),
+        "checking AUR updates" => count("aur", "aur"),
         "reading crash reports" => number.map_or_else(|| "failed".to_string(), |n| format!("{} {}", crate::page::apos(n), if n == 1 { "crash" } else { "crashes" })),
-        "reading journal errors" => count("errors"),
-        "checking failed units" => count("units"),
+        "reading journal errors" => count("error", "errors"),
+        "checking failed units" => count("unit", "units"),
         "checking Hyprland config" => number.map_or_else(|| "failed".to_string(), |n| n.to_string()),
         "reading the running kernel" => value["running"].as_str().unwrap_or_default().to_string(),
         "reading the loaded nvidia module" => value["loaded"].as_str().unwrap_or_default().to_string(),
@@ -184,6 +187,7 @@ pub fn result_of(label: &str, value: &Value) -> String {
             Some(0) => "none new".to_string(),
             Some(n) => format!("{n} new"),
         },
+        "fetching Omarchy release notes" => number.map_or_else(|| "failed".to_string(), |n| format!("{n} {}", if n == 1 { "release" } else { "releases" })),
         "checking disk space and snapshots" => number.map_or_else(String::new, |bytes| format!("{} free", crate::page::bytes(bytes))),
         _ => match value {
             Value::String(text) => text.clone(),
@@ -219,6 +223,8 @@ impl Motion {
             glows: Vec::new(),
             flashes: Vec::new(),
             last_activity: now,
+            omarchy: false,
+            attention: None,
             last_step: now,
             clock: 0.0,
             level: 0.2,
@@ -300,7 +306,8 @@ impl Motion {
         }
         self.last_activity = now;
         match event {
-            Event::Start { ref last_upgrade, .. } => {
+            Event::Start { ref last_upgrade, omarchy, .. } => {
+                self.omarchy = omarchy;
                 let tail = upgrade_tail(last_upgrade.as_deref());
                 let start = self.free(now);
                 let head = "› pacman.log".to_string();
@@ -431,7 +438,9 @@ impl Motion {
             }
             "problems" => {
                 let arrival = self.send(at, Target::Tile(1), 1, 720, true);
-                self.send(at, Target::Tile(3), 0, 760, true);
+                if !self.omarchy {
+                    self.send(at, Target::Tile(3), 0, 760, true);
+                }
                 self.send(at, Target::List(1), 2, 700, true);
                 let mut hit = [false; 7];
                 for name in data["problems"].as_array().into_iter().flatten().filter_map(|problem| problem["package"].as_str()).filter(|name| !name.is_empty()) {
@@ -449,7 +458,12 @@ impl Motion {
                 self.send(at, Target::List(2), 1, 700, true);
                 None
             }
-            "news" => Some((2, self.send(at, Target::Tile(5), 0, 760, true))),
+            "news" => {
+                if self.omarchy {
+                    self.send(at, Target::Tile(3), 0, 760, true);
+                }
+                Some((2, self.send(at, Target::Tile(5), 0, 760, true)))
+            }
             "preflight" => {
                 self.send(at, Target::Tile(4), 0, 760, false);
                 Some((3, self.send(at, Target::Tile(5), 0, 760, false)))
@@ -461,6 +475,16 @@ impl Motion {
     pub fn select(&mut self, app: &App, now: Instant) {
         if !self.enabled {
             return;
+        }
+        if let Some(tile) = app.tile {
+            self.pending_select = None;
+            self.attention = Some((now, Target::Tile(tile as u8)));
+            self.last_activity = now;
+            return;
+        }
+        if matches!(self.attention, Some((_, Target::Tile(_)))) {
+            self.attention = Some((now, Target::List(app.focus.index() as u8)));
+            self.last_activity = now;
         }
         let pane = app.focus;
         let row = app.lists[pane.index()].selected;
@@ -486,7 +510,15 @@ impl Motion {
                 None => return,
             },
             Pane::Problems => match app.visible_problems().get(row) {
-                Some(problem) => (format!("▸ {}", short(problem.subject.rsplit('/').next().unwrap_or(&problem.subject))), format!("{} {}", crate::page::apos(problem.count), problem.kind)),
+                Some(problem) => {
+                    let (one, many) = match problem.kind.as_str() {
+                        "crash" => ("crash", "crashes"),
+                        "failed-unit" => ("failed unit", "failed units"),
+                        "config" => ("config error", "config errors"),
+                        _ => ("error", "errors"),
+                    };
+                    (format!("▸ {}", short(problem.subject.rsplit('/').next().unwrap_or(&problem.subject))), format!("{} {}", crate::page::apos(problem.count), if problem.count == 1 { one } else { many }))
+                }
                 None => return,
             },
             Pane::Events => match app.visible_events().get(row) {
@@ -495,8 +527,8 @@ impl Motion {
             },
         };
         self.last_activity = now;
-        let seen = self.receive(now, Target::List(pane.index() as u8), 0, 520);
-        self.line(seen, head, tail, Some(seen), ms(1));
+        self.attention = Some((now, Target::List(pane.index() as u8)));
+        self.line(now, head, tail, Some(now), ms(1));
     }
 
     pub fn step(&mut self, app: &mut App, now: Instant, dt: f32) {
@@ -626,7 +658,7 @@ impl Motion {
     }
 
     pub fn look(&self, now: Instant) -> Option<Target> {
-        let mut look: Option<(Instant, Target)> = None;
+        let mut look: Option<(Instant, Target)> = self.attention.filter(|(start, _)| now >= *start);
         for comet in &self.comets {
             if now >= comet.start && now <= comet.end() + LOOK && look.is_none_or(|(start, _)| comet.start > start) {
                 look = Some((comet.start, comet.target));

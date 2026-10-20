@@ -47,6 +47,13 @@ impl Pen<'_> {
         self.stroke(builder, color, width, None);
     }
 
+    fn dashed(&mut self, from: (f32, f32), to: (f32, f32), color: SkColor, width: f32, dash: (f32, f32)) {
+        let mut builder = PathBuilder::new();
+        builder.move_to(from.0, from.1);
+        builder.line_to(to.0, to.1);
+        self.stroke(builder, color, width, Some(dash));
+    }
+
     fn polyline(&mut self, points: &[(f32, f32)], color: SkColor, width: f32) {
         let mut builder = PathBuilder::new();
         for (index, (x, y)) in points.iter().enumerate() {
@@ -110,6 +117,248 @@ impl Pen<'_> {
         }
         self.stroke(builder, color, width, dash);
     }
+}
+
+#[derive(Debug, Hash)]
+pub struct FanSpec {
+    pub left: Vec<u8>,
+    pub right: Vec<u8>,
+    pub panel: bool,
+}
+
+pub const DIAL: f32 = 0.84;
+
+#[derive(Debug, Hash)]
+pub struct OrbitNode {
+    pub ring: u8,
+    pub sector: u8,
+    pub slot: u16,
+    pub count: u16,
+    pub fixes: bool,
+    pub selected: bool,
+    pub related: bool,
+}
+
+#[derive(Debug, Hash)]
+pub struct OrbitLink {
+    pub left: bool,
+    pub row: u16,
+    pub kind: u8,
+}
+
+#[derive(Debug, Hash)]
+pub struct OrbitSpec {
+    pub nodes: Vec<OrbitNode>,
+    pub links: Vec<OrbitLink>,
+    pub sectors: Vec<(String, u16)>,
+}
+
+fn sector_spans(sectors: &[(String, u16)]) -> Vec<(f32, f32)> {
+    let total: f32 = sectors.iter().map(|(_, count)| f32::from(*count)).sum::<f32>().max(1.0);
+    let shown = sectors.iter().filter(|(_, count)| *count > 0).count().max(1) as f32;
+    let floor = 0.045f32;
+    let free = (1.0 - floor * shown).max(0.0);
+    let share = |count: u16| if count == 0 { 0.0 } else { floor + free * f32::from(count) / total };
+    let last = sectors.last().map_or(0.0, |(_, count)| share(*count) * TAU);
+    let mut start = TAU / 4.0 + last / 2.0;
+    sectors
+        .iter()
+        .map(|(_, count)| {
+            let span = share(*count) * TAU;
+            let range = (start, span);
+            start += span;
+            range
+        })
+        .collect()
+}
+
+fn ring_position(node: &OrbitNode, spans: &[(f32, f32)]) -> (f32, f32) {
+    let (start, span) = spans.get(usize::from(node.sector)).copied().unwrap_or((0.0, TAU));
+    let gap = 0.035f32.min(span * 0.2);
+    let (start, span) = (start + gap, (span - 2.0 * gap).max(0.001));
+    let count = f32::from(node.count.max(1));
+    let slot = f32::from(node.slot);
+    let (angle, radius) = match node.ring {
+        0 => (start + (slot + 0.5) / count * span, 0.3),
+        1 => (start + (slot + 0.5) / count * span, 0.52),
+        _ => {
+            let capacity = (span * 0.79 / 0.022).max(1.0);
+            let rows = (count / capacity).ceil().max(1.0);
+            let row = (slot % rows).floor();
+            let column = (slot / rows).floor();
+            let columns = (count / rows).ceil().max(1.0);
+            (start + (column + 0.5) / columns * span, 0.7 + (row + 0.5) / rows * 0.18)
+        }
+    };
+    (angle.cos() * radius, angle.sin() * radius)
+}
+
+pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_height: f32) -> Option<Pixmap> {
+    let ground = pal.page;
+    let (mut pixmap, unit) = canvas(width, height, ground, cell_height)?;
+    let (w, h) = (width as f32, height as f32);
+    let c = (w / 2.0, h / 2.0);
+    let r = w.min(h) / 2.0 * DIAL;
+    let at = |x: f32, y: f32| (c.0 + x * r, c.1 + y * r);
+    let ink = |alpha: f32| sk(pal.ink, alpha);
+    let spans = sector_spans(&spec.sectors);
+    {
+        let mut pen = Pen { pixmap: &mut pixmap, unit, mask: None };
+        for i in 0..170u32 {
+            let angle = noise(i * 3) * TAU;
+            let distance = 0.45 + noise(i * 3 + 1) * 0.75;
+            let (x, y) = at(angle.cos() * distance * 1.25, angle.sin() * distance * 0.8);
+            pen.disc(x, y, (0.5 + noise(i * 3 + 2) * 1.4) * unit, ink(0.12 + noise(i * 7) * 0.45));
+        }
+        for radius in [0.3f32, 0.52, 0.7, 0.88] {
+            pen.circle(c.0, c.1, r * radius, ink(0.12), 0.7, Some((2.0, 3.0)));
+        }
+        for k in 0..24 {
+            let angle = k as f32 * TAU / 24.0;
+            let (sin, cos) = angle.sin_cos();
+            pen.line((c.0 + cos * r * 0.18, c.1 + sin * r * 0.18), (c.0 + cos * r * 0.22, c.1 + sin * r * 0.22), ink(0.3), 0.6);
+        }
+        pen.circle(c.0, c.1, r, ink(0.85), 1.0, None);
+        pen.circle(c.0, c.1, r * 1.035, ink(0.85), 1.0, None);
+        pen.circle(c.0, c.1, r * 0.93, ink(0.3), 0.7, None);
+        for k in 0..180 {
+            let angle = -TAU / 4.0 + k as f32 * TAU / 180.0;
+            let (sin, cos) = angle.sin_cos();
+            let (from, to, alpha) = if k % 15 == 0 {
+                (0.93, 1.08, 0.9)
+            } else if k % 5 == 0 {
+                (1.0, 1.06, 0.75)
+            } else {
+                (1.0, 1.035, 0.55)
+            };
+            pen.line((c.0 + cos * r * from, c.1 + sin * r * from), (c.0 + cos * r * to, c.1 + sin * r * to), ink(alpha), 0.7);
+        }
+        for (dx, dy) in [(0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)] {
+            let (x, y) = (c.0 + dx * r * 1.15, c.1 + dy * r * 1.15);
+            let arm = 5.0 * unit;
+            pen.line((x - arm, y), (x + arm, y), ink(0.7), 0.8);
+            pen.line((x, y - arm), (x, y + arm), ink(0.7), 0.8);
+        }
+        for (start, span) in spans.iter().filter(|(_, span)| *span > 0.0) {
+            for angle in [*start, start + span] {
+                let (sin, cos) = angle.sin_cos();
+                pen.line((c.0 + cos * r * 0.24, c.1 + sin * r * 0.24), (c.0 + cos * r * 0.93, c.1 + sin * r * 0.93), ink(0.22), 0.7);
+            }
+        }
+        let core = r * 0.07;
+        for k in -6..=6 {
+            let offset = k as f32 / 7.0 * core;
+            let half = (core * core - offset * offset).max(0.0).sqrt();
+            pen.line((c.0 - half + offset * 0.4, c.1 + offset), (c.0 + half + offset * 0.4, c.1 + offset), ink(0.55), 0.6);
+        }
+        pen.circle(c.0, c.1, core, ink(0.9), 1.0, None);
+        let place = |node: &OrbitNode| ring_position(node, &spans);
+        for node in spec.nodes.iter().filter(|node| node.fixes) {
+            let (x, y) = place(node);
+            let length = (x * x + y * y).sqrt().max(0.001);
+            pen.dashed(at(x, y), at(x / length * 1.08, y / length * 1.08), sk(pal.teal, 1.0), 1.1, (3.0, 2.5));
+        }
+        if let Some(chosen) = spec.nodes.iter().find(|node| node.selected) {
+            let (sx, sy) = place(chosen);
+            let target = at(sx, sy);
+            for link in &spec.links {
+                let y = (f32::from(link.row) + 0.5) * cell_height;
+                let x = if link.left { 4.0 * unit } else { w - 4.0 * unit };
+                let side = if link.left { 1.0 } else { -1.0 };
+                let (color, alpha) = match link.kind {
+                    2 => (pal.teal, 0.9),
+                    3 => (pal.relation, 0.35),
+                    _ => (pal.relation, 0.85),
+                };
+                let mut path = PathBuilder::new();
+                path.move_to(x, y);
+                path.cubic_to(x + side * w * 0.22, y, target.0 - side * w * 0.12, target.1, target.0, target.1);
+                pen.stroke(path, sk(color, alpha), if link.kind == 3 { 0.6 } else { 0.9 }, None);
+                let dot = match link.kind {
+                    2 => pal.teal,
+                    1 => pal.ink,
+                    3 => pal.faint,
+                    _ => pal.ink2,
+                };
+                pen.disc(x, y, if link.kind == 3 { 1.2 } else { 2.0 } * unit, sk(dot, 0.95));
+            }
+        }
+        for node in &spec.nodes {
+            let (x, y) = at(place(node).0, place(node).1);
+            match node.ring {
+                0 => {
+                    pen.disc(x, y, 6.5 * unit, sk(ground, 1.0));
+                    pen.disc(x, y, 4.2 * unit, ink(1.0));
+                    pen.circle(x, y, 7.5 * unit, ink(0.8), 0.9, None);
+                }
+                1 => {
+                    pen.disc(x, y, 4.6 * unit, sk(ground, 1.0));
+                    pen.disc(x, y, 3.4 * unit, sk(pal.ink2, 1.0));
+                    pen.disc(x, y, 1.2 * unit, sk(ground, 1.0));
+                }
+                _ => pen.disc(x, y, 1.3 * unit, sk(pal.label, 0.95)),
+            }
+            if node.fixes {
+                pen.circle(x, y, 15.0 * unit, sk(pal.teal, 0.8), 0.9, Some((2.0, 2.0)));
+            }
+            if node.related {
+                let ring = match node.ring {
+                    0 => 9.5,
+                    1 => 6.5,
+                    _ => 3.2,
+                };
+                pen.circle(x, y, ring * unit, sk(pal.relation, 1.0), 1.0, None);
+            }
+            if node.selected {
+                pen.circle(x, y, 11.0 * unit, ink(1.0), 1.6, None);
+            }
+        }
+    }
+    if let Some(atlas) = atlas(cell_height) {
+        let advance = atlas.advance as f32;
+        for ((name, count), (start, span)) in spec.sectors.iter().zip(&spans) {
+            if *count == 0 {
+                continue;
+            }
+            let (sin, cos) = (start + span / 2.0).sin_cos();
+            let (x, y) = (c.0 + cos * r * 1.2, c.1 + sin * r * 1.2);
+            let line: Vec<(char, SkColor)> = name.chars().map(|ch| (ch, sk(pal.label, 1.0))).collect();
+            let length = line.len() as f32 * advance;
+            let left = (x - length / 2.0).clamp(2.0, (w - length - 2.0).max(2.0));
+            type_line(&mut pixmap, atlas, left, y + atlas.ascent as f32 / 2.0, &line, &|_, _| 1.0);
+        }
+    }
+    Some(pixmap)
+}
+
+pub fn fan(spec: &FanSpec, pal: &Palette, width: u32, height: u32, cell_height: f32) -> Option<Pixmap> {
+    let (mut pixmap, unit) = canvas(width, height, if spec.panel { pal.panel } else { pal.page }, cell_height)?;
+    let (w, h) = (width as f32, height as f32);
+    let rows = spec.left.len().max(spec.right.len()).max(1);
+    let cell = h / rows as f32;
+    let mut pen = Pen { pixmap: &mut pixmap, unit, mask: None };
+    let (cx, cy) = (w / 2.0, h / 2.0);
+    for (leaves, side) in [(&spec.left, -1.0f32), (&spec.right, 1.0)] {
+        let offset = (rows - leaves.len()) / 2;
+        for (index, kind) in leaves.iter().enumerate() {
+            let y = (offset + index) as f32 * cell + cell / 2.0;
+            let x = if side < 0.0 { 5.0 * unit } else { w - 5.0 * unit };
+            let (color, line) = match kind {
+                2 => (pal.teal, 0.75),
+                1 => (pal.ink, 0.6),
+                3 => (pal.faint, 0.3),
+                _ => (pal.ink2, 0.4),
+            };
+            let mut path = PathBuilder::new();
+            path.move_to(cx + side * 9.0 * unit, cy);
+            path.cubic_to(cx + side * w * 0.2, cy, x - side * w * 0.2, y, x, y);
+            pen.stroke(path, sk(color, line), 0.7, None);
+            pen.disc(x, y, if *kind == 3 { 1.2 } else { 2.0 } * unit, sk(color, 0.95));
+        }
+    }
+    pen.disc(cx, cy, 4.5 * unit, sk(pal.ink, 1.0));
+    pen.circle(cx, cy, 8.5 * unit, sk(pal.ink, 0.5), 0.8, None);
+    Some(pixmap)
 }
 
 fn canvas(width: u32, height: u32, background: Color, cell_height: f32) -> Option<(Pixmap, f32)> {
@@ -332,6 +581,70 @@ fn atlases() -> &'static [Atlas] {
 fn atlas(cell_height: f32) -> Option<&'static Atlas> {
     let target = 10.0 * cell_height / 21.0;
     atlases().iter().min_by(|a, b| (a.size as f32 - target).abs().total_cmp(&(b.size as f32 - target).abs()))
+}
+
+type Glyphs = Vec<(char, SkColor)>;
+
+struct Break {
+    end: usize,
+    next: usize,
+    level: u8,
+}
+
+fn breaks(chars: &[(char, SkColor)], split: Option<usize>) -> Vec<Break> {
+    let mut out = Vec::new();
+    for (i, (ch, _)) in chars.iter().enumerate() {
+        if *ch == ' ' {
+            if i > 0 && chars[i - 1].0 == ' ' {
+                continue;
+            }
+            let next = chars[i..].iter().position(|(other, _)| *other != ' ').map_or(chars.len(), |gap| i + gap);
+            let level = if Some(i) == split {
+                0
+            } else if i > 0 && chars[i - 1].0 == '›' {
+                3
+            } else if split.is_some_and(|split| i > split) {
+                2
+            } else {
+                1
+            };
+            out.push(Break { end: i, next, level });
+        } else if *ch == '/' && i > 0 && chars.get(i + 1).is_some_and(|(other, _)| *other != ' ') {
+            out.push(Break { end: i + 1, next: i + 1, level: 1 });
+        }
+    }
+    out
+}
+
+fn wrap(chars: &[(char, SkColor)], rooms: &[usize], breaks: &[Break], level: u8) -> (Vec<(usize, usize)>, bool) {
+    let skip = |mut at: usize| {
+        while at < chars.len() && chars[at].0 == ' ' {
+            at += 1;
+        }
+        at
+    };
+    let mut spans = Vec::new();
+    let mut start = skip(0);
+    for &room in rooms {
+        if start >= chars.len() {
+            break;
+        }
+        if chars.len() - start <= room {
+            spans.push((start, chars.len()));
+            start = chars.len();
+            break;
+        }
+        let limit = start + room;
+        let best = breaks.iter().filter(|candidate| candidate.level <= level && candidate.end > start && candidate.end <= limit).map(|candidate| (candidate.end, candidate.next)).next_back();
+        let (end, next) = match best {
+            Some(found) => found,
+            None if level >= 4 => (limit, limit),
+            None => return (spans, false),
+        };
+        spans.push((start, end));
+        start = skip(next);
+    }
+    (spans, start >= chars.len())
 }
 
 fn type_line(pixmap: &mut Pixmap, atlas: &Atlas, x: f32, baseline: f32, line: &[(char, SkColor)], clip: &dyn Fn(f32, f32) -> f32) {
@@ -635,24 +948,25 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
     if let Some(atlas) = glyphs {
         let line_height = atlas.height as f32 - 1.0;
         let advance = atlas.advance as f32;
-        let pad = (5.0 * unit).round();
-        let mut rows: Vec<(f32, f32, usize)> = Vec::new();
+        let pad = (8.0 * unit).round();
+        let mut rows: Vec<(f32, usize)> = Vec::new();
         let mut baseline = ic.1 + rp * 0.56;
         while baseline - atlas.ascent as f32 > ic.1 - rp + 3.0 * unit {
             let middle = baseline - atlas.ascent as f32 / 2.0;
             let chord = (rp * rp - (middle - ic.1).powi(2)).max(0.0).sqrt();
             let room = ((2.0 * chord - 2.0 * pad) / advance).floor().max(0.0) as usize;
             if room >= 3 {
-                rows.push((ic.0 - chord + pad, baseline, room));
+                rows.push((baseline, room));
             }
             baseline -= line_height;
         }
         let count = spec.code.len();
-        let mut entries: Vec<Vec<(char, SkColor)>> = Vec::new();
+        let mut entries: Vec<(Glyphs, Option<usize>, Option<usize>)> = Vec::new();
         for (index, (head, tail, shown)) in spec.code.iter().enumerate() {
             let age = count - 1 - index;
             let fade = if age == 0 { 1.0 } else { (0.82 - 0.12 * age as f32).max(0.26) };
             let mut chars: Vec<(char, SkColor)> = head.chars().map(|ch| (ch, sk(pal.ink2, fade))).collect();
+            let split = (!tail.is_empty()).then_some(chars.len());
             if !tail.is_empty() {
                 chars.extend("  ".chars().map(|ch| (ch, sk(pal.ink, fade))));
                 chars.extend(tail.chars().map(|ch| (ch, sk(pal.ink, fade))));
@@ -666,44 +980,48 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
             for item in chars.iter_mut().skip(visible) {
                 item.1 = sk(pal.ink, 0.0);
             }
-            if age == 0 && spec.typing {
-                if visible < chars.len() {
-                    chars[visible] = ('▌', sk(pal.ink, 1.0));
-                } else {
-                    chars.push(('▌', sk(pal.ink, 1.0)));
-                }
-            }
-            entries.push(chars);
+            entries.push((chars, (age == 0 && spec.typing).then_some(visible), split));
         }
-        let mut placed: Vec<(usize, Vec<(char, SkColor)>)> = Vec::new();
+        let mut placed: Vec<(usize, usize, Glyphs)> = Vec::new();
         let mut slot = 0usize;
         let mut newest_rows = 1usize;
-        for chars in entries.iter().rev() {
+        for (index, (chars, cursor, split)) in entries.iter().rev().enumerate() {
             if slot >= rows.len() {
                 break;
             }
-            let (mut used, mut room) = (0usize, 0usize);
-            while slot + used < rows.len() && room < chars.len() {
-                room += rows[slot + used].2;
-                used += 1;
+            let breaks = breaks(chars, *split);
+            let top = if index == 0 { 4 } else { 2 };
+            let mut fitted = None;
+            'fit: for used in 1..=rows.len() - slot {
+                let rooms: Vec<usize> = (slot..slot + used).rev().map(|k| rows[k].1).collect();
+                for level in 0..=top {
+                    let (spans, complete) = wrap(chars, &rooms, &breaks, level);
+                    if complete || (level == 4 && slot + used == rows.len()) {
+                        fitted = Some((used, spans));
+                        break 'fit;
+                    }
+                }
             }
-            let mut rest = chars.as_slice();
-            let mut block = Vec::new();
-            for k in (slot..slot + used).rev() {
-                let take = rest.len().min(rows[k].2);
-                block.push((k, rest[..take].to_vec()));
-                rest = &rest[take..];
+            let Some((used, spans)) = fitted else { break };
+            for (k, (start, end)) in (slot..slot + used).rev().zip(spans.iter().copied()) {
+                let mut line: Vec<(char, SkColor)> = chars[start..end].to_vec();
+                match cursor {
+                    Some(at) if (start..end).contains(at) => line[at - start] = ('▌', sk(pal.ink, 1.0)),
+                    Some(at) if *at == chars.len() && end == chars.len() => line.push(('▌', sk(pal.ink, 1.0))),
+                    _ => {}
+                }
+                placed.push((k, end - start, line));
             }
-            placed.extend(block);
             if slot == 0 {
-                newest_rows = used.max(1);
+                newest_rows = used;
             }
             slot += used;
         }
         let shift = spec.scroll.clamp(0.0, 1.0) * newest_rows as f32 * line_height;
         let clip = |px: f32, py: f32| (((rp - 2.0 * unit) - ((px - ic.0).powi(2) + (py - ic.1).powi(2)).sqrt()) / (5.0 * unit)).clamp(0.0, 1.0);
-        for (row, line) in &placed {
-            let (x, y, _) = rows[*row];
+        for (row, span, line) in &placed {
+            let (y, _) = rows[*row];
+            let x = (ic.0 - *span as f32 * advance / 2.0).round();
             type_line(pen.pixmap, atlas, x, y + shift, line, &clip);
         }
     }
@@ -797,5 +1115,46 @@ impl EyeSpec {
             (side, column, reach.to_bits()).hash(hasher);
         }
         format!("{:?}", self.rain).hash(hasher);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(text: &str, split: Option<usize>, rooms: &[usize]) -> Vec<String> {
+        let chars: Vec<(char, SkColor)> = text.chars().map(|ch| (ch, SkColor::BLACK)).collect();
+        let breaks = breaks(&chars, split);
+        for level in 0..=4 {
+            let (spans, complete) = wrap(&chars, rooms, &breaks, level);
+            if complete {
+                return spans.iter().map(|(start, end)| chars[*start..*end].iter().map(|(ch, _)| *ch).collect()).collect();
+            }
+        }
+        Vec::new()
+    }
+
+    #[test]
+    fn sectors_fill_the_circle_and_nodes_stay_inside() {
+        let sectors: Vec<(String, u16)> = [("kernel", 20u16), ("graphics", 12), ("compositor", 0), ("apps", 429)].into_iter().map(|(name, count)| (name.to_string(), count)).collect();
+        let spans = sector_spans(&sectors);
+        let total: f32 = spans.iter().map(|(_, span)| span).sum();
+        assert!((total - TAU).abs() < 1e-3, "{total}");
+        assert_eq!(spans[2].1, 0.0);
+        for (ring, count) in [(0u8, 3u16), (1, 40), (2, 400)] {
+            for slot in 0..count {
+                let (x, y) = ring_position(&OrbitNode { ring, sector: 3, slot, count, fixes: false, selected: false, related: false }, &spans);
+                let radius = x.hypot(y);
+                assert!((0.25..0.9).contains(&radius), "{ring} {slot} {radius}");
+            }
+        }
+    }
+
+    #[test]
+    fn pupil_lines_break_between_words() {
+        assert_eq!(lines("› systemctl --failed  1 units", Some(20), &[12, 12, 12]), ["› systemctl", "--failed", "1 units"]);
+        assert_eq!(lines("› yay -Qua  2 aur", Some(10), &[12, 12]), ["› yay -Qua", "2 aur"]);
+        assert_eq!(lines("› /sys/module/nvidia/version", None, &[16, 16]), ["› /sys/module/", "nvidia/version"]);
+        assert_eq!(lines("› uname -r  7.2.5-3-omarchy", Some(10), &[30]), ["› uname -r  7.2.5-3-omarchy"]);
     }
 }

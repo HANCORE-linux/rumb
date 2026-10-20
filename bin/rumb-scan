@@ -175,8 +175,39 @@ parse_updates() {
   done
 }
 
+crash_details() {
+  local exe=$1 pid="" epoch="" info
+  crash_signal="" crash_frames="" crash_last=""
+  read -r pid epoch < <(jq -r --arg exe "$exe" --argjson since "$since_epoch" \
+    '[.[]? | select(.exe == $exe and .time / 1000000 >= $since)] | max_by(.time) // empty | "\(.pid) \(.time / 1000000 | floor)"' "$tmp/cores.json" 2>/dev/null)
+  [[ $pid =~ ^[0-9]+$ ]] || return 0
+  crash_last=$(LC_ALL=C date -d "@$epoch" '+%a %-d %b %H:%M' 2>/dev/null)
+  info=$(LC_ALL=C timeout 5 coredumpctl info "$pid" --no-pager 2>/dev/null) || true
+  crash_signal=$(sed -n 's/^ *Signal: [0-9]* (\([A-Z0-9]*\)).*/SIG\1/p' <<<"$info" | head -n 1)
+  crash_frames=$(awk '
+    /Stack trace of thread/ { thread++; next }
+    thread == 1 && /^ *#[0-9]+ / {
+      name = $3
+      module = $0
+      sub(/^[^(]*\(/, "", module)
+      sub(/ \+ .*/, "", module)
+      sub(/\)$/, "", module)
+      if (!started && (module ~ /^libc\.so/ || name ~ /panicking|panic_fmt|process5abort|abort_internal|rust_begin_unwind|backtrace/)) next
+      started = 1
+      if (name == "n/a") {
+        offset = $0
+        sub(/^.*\+ /, "", offset)
+        sub(/\)$/, "", offset)
+        print module " + " offset
+      } else {
+        print name " (" module ")"
+      }
+      if (++shown == 3) exit
+    }' <<<"$info" | paste -sd '|')
+}
+
 add_problem() {
-  local kind=$1 subject=$2 count=$3 package=$4 path=${5:-} status update=""
+  local kind=$1 subject=$2 count=$3 package=$4 path=${5:-} signal=${6:-} frames=${7:-} last=${8:-} status update=""
 
   if [[ $kind == config ]]; then
     status=config
@@ -191,7 +222,7 @@ add_problem() {
     status=no-update
   fi
 
-  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$kind" "${subject//[[:cntrl:]]/ }" "$count" "$package" "$status" "$update" >>"$tmp/problems.tsv"
+  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$kind" "${subject//[[:cntrl:]]/ }" "$count" "$package" "$status" "$update" "$signal" "${frames//[[:cntrl:]]/ }" "$last" >>"$tmp/problems.tsv"
 }
 
 tsv_json() {
@@ -270,9 +301,21 @@ set_window() {
 set_window
 
 emit_start() {
+  local omarchy=false upgraded='[]'
+  command -v omarchy-version >/dev/null && omarchy=true
+  if [[ -n $last_upgrade ]]; then
+    upgraded=$(awk -v day="[${last_upgrade:0:10}" '
+      index($0, day) == 1 && / \[ALPM\] upgraded / {
+        line = $0
+        sub(/^.*\[ALPM\] upgraded /, "", line)
+        sub(/ \(/, " ", line)
+        sub(/\)$/, "", line)
+        print line
+      }' "$pacman_log" 2>/dev/null | head -n 60 | jq -Rsc 'split("\n") | map(select(length > 0))') || upgraded='[]'
+  fi
   emit --arg last_upgrade "$(to_iso "$last_upgrade_epoch")" --arg since "$(to_iso "$since_epoch")" \
-    --arg now "$(date --iso-8601=seconds)" \
-    '{event: "start", last_upgrade: (if $last_upgrade == "" then null else $last_upgrade end), problems_since: $since, now: $now}'
+    --arg now "$(date --iso-8601=seconds)" --argjson omarchy "$omarchy" --argjson upgraded "${upgraded:-[]}" \
+    '{event: "start", last_upgrade: (if $last_upgrade == "" then null else $last_upgrade end), problems_since: $since, now: $now, omarchy: $omarchy, last_upgraded: $upgraded}'
 }
 emit_start
 
@@ -370,7 +413,9 @@ collect_problems() {
     while read -r count exe; do
       [[ -n $exe ]] || continue
       owner_of "$exe"
-      add_problem crash "$exe" "$count" "$REPLY" "$exe"
+      package=$REPLY
+      crash_details "$exe"
+      add_problem crash "$exe" "$count" "$package" "$exe" "$crash_signal" "$crash_frames" "$crash_last"
     done < <(jq -r --argjson since "$since_epoch" '.[]? | select(.time / 1000000 >= $since) | .exe // empty | gsub("[[:cntrl:]]"; " ")' "$tmp/cores.json" 2>/dev/null | sort | uniq -c | sort -rn)
     if [[ " ${problem_errors[*]} " == *" crashes "* ]]; then
       done_step problems "reading crash reports" null
@@ -466,7 +511,7 @@ collect_problems() {
     done_step problems "checking Hyprland config" "$config_errors"
   fi
 
-  tsv_json "$tmp/problems.tsv" kind subject count package status update |
+  tsv_json "$tmp/problems.tsv" kind subject count package status update signal frames last |
     jq 'map(.count |= tonumber)' >"$tmp/problems.json"
   tsv_json "$tmp/activity.tsv" date crashes errors |
     jq 'map(.crashes |= tonumber | .errors |= tonumber)' >"$tmp/activity.json"
@@ -528,7 +573,8 @@ collect_anatomy() {
   step anatomy "listing installed packages"
   packages=$(pacman -Qq 2>/dev/null | wc -l)
   explicit=$(pacman -Qqe 2>/dev/null | wc -l)
-  orphans=$(pacman -Qqdt 2>/dev/null | wc -l)
+  orphan_names=$(pacman -Qqdt 2>/dev/null)
+  orphans=$(grep -c . <<<"$orphan_names")
   done_step anatomy "listing installed packages" "$(jq -cn --argjson packages "$packages" --argjson orphans "$orphans" \
     '{packages: $packages, orphans: $orphans}')"
 
@@ -561,10 +607,24 @@ collect_anatomy() {
   : >"$tmp/deps.tsv"
   if ((${#names[@]})); then
     LC_ALL=C COLUMNS=0 pacman -Qi -- "${names[@]}" 2>/dev/null | awk '
+      function names(text,   count, parts, i, out, item) {
+        kept = 0
+        out = ""
+        if (text == "None") return ""
+        count = split(text, parts, " ")
+        for (i = 1; i <= count; i++) {
+          item = parts[i]
+          sub(/[<>=:].*/, "", item)
+          if (item == "" || item ~ /\.so$/) continue
+          out = out (out == "" ? "" : ",") item
+          kept++
+        }
+        return out
+      }
       /^Name / { sub(/^[^:]*: /, ""); name = $0 }
-      /^Depends On / { sub(/^[^:]*: /, ""); depends[name] = $0 == "None" ? 0 : split($0, parts, " ") }
-      /^Required By / { sub(/^[^:]*: /, ""); required[name] = $0 == "None" ? 0 : split($0, parts, " ") }
-      END { for (n in depends) printf "%s\x1f%d\x1f%d\n", n, depends[n], required[n] }' >"$tmp/deps.tsv"
+      /^Depends On / { sub(/^[^:]*: /, ""); depends_on[name] = names($0); depends[name] = kept }
+      /^Required By / { sub(/^[^:]*: /, ""); required_names[name] = names($0); required[name] = kept }
+      END { for (n in depends) printf "%s\x1f%d\x1f%d\x1f%s\x1f%s\n", n, depends[n], required[n], depends_on[n], required_names[n] }' >"$tmp/deps.tsv"
   fi
 
   while IFS=$'\x1f' read -r day count; do
@@ -586,18 +646,18 @@ collect_anatomy() {
   [[ -s $tmp/journal_lines.json ]] || echo '[]' >"$tmp/journal_lines.json"
 
   jq -Rn '[inputs | split("\u001f") | {(.[0]): (.[1] | tonumber)}] | add // {}' <"$tmp/repos.tsv" >"$tmp/repos.json"
-  jq -Rn '[inputs | split("\u001f") | {(.[0]): {depends: (.[1] | tonumber), required_by: (.[2] | tonumber)}}] | add // {}' \
+  jq -Rn '[inputs | split("\u001f") | {(.[0]): {depends: (.[1] | tonumber), required_by: (.[2] | tonumber), depends_on: (.[3] // "" | split(",") | map(select(. != ""))), required_names: (.[4] // "" | split(",") | map(select(. != "")))}}] | add // {}' \
     <"$tmp/deps.tsv" >"$tmp/deps.json"
   emit --arg hostname "$(uname -n)" --arg os "$os" --arg desktop "$desktop" --arg omarchy "$omarchy" \
     --arg kernel_running "$kernel_running" --arg kernel_installed "$kernel_installed" \
     --argjson reboot_pending "$reboot_pending" --argjson cache_bytes "$cache_bytes" --argjson cache_freeable "$cache_freeable" \
     --argjson packages "$packages" --argjson explicit "$explicit" \
-    --argjson orphans "$orphans" --argjson upgrades_per_day "$upgrades_json" \
+    --argjson orphans "$orphans" --arg orphan_names "$orphan_names" --argjson upgrades_per_day "$upgrades_json" \
     --argjson uptime_seconds "$uptime_seconds" --arg nvidia_loaded "$nvidia_loaded" --arg nvidia_installed "$nvidia_installed" \
     --arg hyprland_running "$hyprland_running" --arg hyprland_installed "$hyprland_installed" \
     --slurpfile repos "$tmp/repos.json" --slurpfile deps "$tmp/deps.json" --slurpfile journal "$tmp/journal_lines.json" \
     '{event: "stage", stage: "anatomy", data: {hostname: $hostname, os: $os, desktop: $desktop, omarchy: $omarchy,
-      packages: $packages, explicit: $explicit, orphans: $orphans, cache_bytes: $cache_bytes, cache_freeable_bytes: $cache_freeable,
+      packages: $packages, explicit: $explicit, orphans: $orphans, orphan_names: ($orphan_names | split("\n") | map(select(length > 0)) | .[:40]), cache_bytes: $cache_bytes, cache_freeable_bytes: $cache_freeable,
       kernel_running: $kernel_running, kernel_installed: $kernel_installed, reboot_pending: $reboot_pending,
       uptime_seconds: $uptime_seconds, nvidia_loaded: $nvidia_loaded, nvidia_installed: $nvidia_installed,
       hyprland_running: $hyprland_running, hyprland_installed: $hyprland_installed,
@@ -643,10 +703,54 @@ collect_news() {
     done_step news "fetching Arch news" "$(wc -l <"$tmp/news.tsv")"
   fi
 
+  collect_omarchy_notes
+
   tsv_json "$tmp/news.tsv" date title link manual_intervention |
     jq 'map(.manual_intervention |= (. == "true"))' >"$tmp/news.json"
-  emit --slurpfile news "$tmp/news.json" --argjson news_error "$news_error" \
-    '{event: "stage", stage: "news", data: {news: $news[0], news_check_failed: ($news_error == 1)}}'
+  emit --slurpfile news "$tmp/news.json" --argjson news_error "$news_error" --argjson omarchy_notes "$omarchy_notes" \
+    '{event: "stage", stage: "news", data: {news: $news[0], news_check_failed: ($news_error == 1), omarchy_notes: $omarchy_notes}}'
+}
+
+omarchy_notes_filter='def ver: ltrimstr("v") | split(".") | map(try tonumber catch -1);
+  def notes: (.tag_name | ltrimstr("v")) as $tag | reduce ((.body // "") | gsub("\r"; "") | split("\n")[]) as $line ({tag: $tag, section: "", counts: {}, fixes: []};
+    if ($line | startswith("## ")) then .section = ($line[3:] | ascii_downcase)
+    elif ($line | startswith("- ")) and .section != "" then
+      .counts[.section] += 1 | if .section == "fixes" then .fixes += [$line[2:] | sub(" by @.*$"; "")] else . end
+    else . end);
+  [.[]? | select((.draft | not) and (.prerelease | not) and (.tag_name | type) == "string")
+    | select((.tag_name | ver) > ($old | ver) and (.tag_name | ver) <= ($new | ver))]
+  | sort_by(.tag_name | ver) | reverse | map(notes)
+  | if length == 0 then null else
+      {from: $old, to: $new, releases: length,
+       fixes: (map(.counts.fixes // 0) | add), improvements: (map(.counts.improvements // 0) | add),
+       security: (map(.counts.security // 0) | add),
+       per_release: map({tag, fixes: (.counts.fixes // 0), improvements: (.counts.improvements // 0), security: (.counts.security // 0)}),
+       titles: ([.[].fixes[]] | .[:12])} end'
+
+collect_omarchy_notes() {
+  local name spec="" old new
+  omarchy_notes=null
+  for name in omarchy omarchy-dev; do
+    spec=${pending[$name]:-}
+    [[ -n $spec ]] && break
+  done
+  [[ -n $spec ]] || return 0
+  old=${spec%% -> *}
+  new=${spec##* -> }
+  old=${old#*:}
+  new=${new#*:}
+  old=${old%-*}
+  new=${new%-*}
+  step news "fetching Omarchy release notes"
+  if curl -fsS --max-time 10 -H 'Accept: application/vnd.github+json' \
+    'https://api.github.com/repos/omacom/omarchy/releases?per_page=30' -o "$tmp/omarchy.json" 2>/dev/null &&
+    omarchy_notes=$(jq -c --arg old "$old" --arg new "$new" "$omarchy_notes_filter" "$tmp/omarchy.json" 2>/dev/null) &&
+    [[ -n $omarchy_notes ]]; then
+    done_step news "fetching Omarchy release notes" "$(jq '.releases // 0' <<<"$omarchy_notes")"
+  else
+    omarchy_notes=null
+    done_step news "fetching Omarchy release notes" null
+  fi
 }
 collect_news
 
@@ -758,6 +862,7 @@ jq -n \
   --slurpfile news "$tmp/news.json" \
   --slurpfile activity "$tmp/activity.json" \
   --argjson news_error "$news_error" \
+  --argjson omarchy_notes "${omarchy_notes:-null}" \
   --argjson free_bytes "$free_bytes" \
   --argjson free_ok "$free_ok" \
   --argjson snapper "$snapper_configured" \
@@ -780,6 +885,7 @@ jq -n \
       aur_unavailable: $aur_unavailable,
       news: $n,
       news_check_failed: ($news_error == 1),
+      omarchy_notes: $omarchy_notes,
       problems: $p,
       problem_check_errors: $problem_errors,
       activity: $activity[0],
@@ -891,7 +997,7 @@ if [[ ! -s $tmp/problems.tsv ]]; then
 else
   shown=0
   limit=15
-  while IFS=$'\x1f' read -r kind subject count package status update; do
+  while IFS=$'\x1f' read -r kind subject count package status update _; do
     ((shown < limit)) || continue
     shown=$((shown + 1))
     case $status in

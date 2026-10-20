@@ -19,6 +19,7 @@ pub struct Palette {
     pub select: Color,
     pub alert: Color,
     pub warn: Color,
+    pub relation: Color,
 }
 
 const fn rgb(hex: u32) -> Color {
@@ -43,6 +44,7 @@ impl Palette {
             select: rgb(0xc8c8c4),
             alert: rgb(0xa8463c),
             warn: rgb(0x8a6d12),
+            relation: rgb(0x5f6a12),
         }
     }
 
@@ -65,6 +67,7 @@ impl Palette {
             select: rgb(0x1e211b),
             alert: rgb(0xee585d),
             warn: rgb(0xd3dd2c),
+            relation: rgb(0x747f11),
         }
     }
 }

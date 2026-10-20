@@ -95,6 +95,10 @@ impl Subsystem {
 pub struct Deps {
     pub depends: u64,
     pub required_by: u64,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub required_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,6 +139,8 @@ pub struct Anatomy {
     #[serde(default)]
     pub omarchy: String,
     #[serde(default)]
+    pub orphan_names: Vec<String>,
+    #[serde(default)]
     pub uptime_seconds: Option<u64>,
     #[serde(default)]
     pub nvidia_loaded: String,
@@ -172,6 +178,12 @@ pub struct Problem {
     pub status: String,
     #[serde(default)]
     pub update: String,
+    #[serde(default)]
+    pub signal: String,
+    #[serde(default)]
+    pub frames: String,
+    #[serde(default)]
+    pub last: String,
 }
 
 impl Problem {
@@ -189,6 +201,28 @@ impl Problem {
     pub fn fix_version(&self) -> &str {
         self.update.rsplit("-> ").next().unwrap_or("")
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OmarchyNotes {
+    pub from: String,
+    pub to: String,
+    pub releases: u64,
+    pub fixes: u64,
+    pub improvements: u64,
+    pub security: u64,
+    #[serde(default)]
+    pub per_release: Vec<OmarchyRelease>,
+    #[serde(default)]
+    pub titles: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OmarchyRelease {
+    pub tag: String,
+    pub fixes: u64,
+    pub improvements: u64,
+    pub security: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -301,6 +335,8 @@ pub struct App {
     pub steps: Vec<Step>,
     pub scan_time: Option<String>,
     pub last_upgrade: Option<String>,
+    pub last_upgraded: Vec<String>,
+    pub omarchy: bool,
     pub since: Option<String>,
     pub updates: Vec<Update>,
     pub update_errors: Vec<String>,
@@ -310,6 +346,7 @@ pub struct App {
     pub activity: Vec<Activity>,
     pub news: Vec<News>,
     pub news_failed: bool,
+    pub omarchy_notes: Option<OmarchyNotes>,
     pub preflight: Option<Preflight>,
     pub anatomy: Option<Anatomy>,
     pub anatomy_at: Option<Instant>,
@@ -327,6 +364,10 @@ pub struct App {
     pub lists: [ListState; 3],
     pub editing: bool,
     pub overlay: bool,
+    pub tile: Option<usize>,
+    pub last_tile: usize,
+    pub updates_map: bool,
+    pub map_fits: bool,
     pub follow: bool,
     pub status: Option<(String, bool, Instant)>,
     pub finished_at: Option<Instant>,
@@ -346,6 +387,8 @@ impl App {
             steps: Vec::new(),
             scan_time: None,
             last_upgrade: None,
+            last_upgraded: Vec::new(),
+            omarchy: false,
             since: None,
             updates: Vec::new(),
             update_errors: Vec::new(),
@@ -355,6 +398,7 @@ impl App {
             activity: Vec::new(),
             news: Vec::new(),
             news_failed: false,
+            omarchy_notes: None,
             preflight: None,
             anatomy: None,
             anatomy_at: None,
@@ -372,6 +416,10 @@ impl App {
             lists: Default::default(),
             editing: false,
             overlay: false,
+            tile: None,
+            last_tile: 0,
+            updates_map: true,
+            map_fits: false,
             follow: true,
             status: None,
             finished_at: None,
@@ -384,8 +432,10 @@ impl App {
 
     pub fn apply(&mut self, event: Event, now: Instant) {
         match event {
-            Event::Start { last_upgrade, problems_since, now: scan_time } => {
+            Event::Start { last_upgrade, problems_since, now: scan_time, omarchy, last_upgraded } => {
                 self.start_at.get_or_insert(now);
+                self.omarchy = omarchy;
+                self.last_upgraded = last_upgraded;
                 self.scan_time = scan_time;
                 self.last_upgrade = last_upgrade;
                 self.since = Some(problems_since);
@@ -465,6 +515,7 @@ impl App {
             2 => {
                 self.news = field(&data, "news")?;
                 self.news_failed = field(&data, "news_check_failed")?;
+                self.omarchy_notes = data.get("omarchy_notes").cloned().and_then(|notes| serde_json::from_value(notes).ok());
             }
             _ => {
                 self.preflight = Some(serde_json::from_value(data)?);
@@ -661,6 +712,9 @@ impl App {
 
     pub fn toggle(&mut self, panel: usize) {
         self.visible[panel] = !self.visible[panel];
+        if panel == 0 && !self.visible[0] {
+            self.leave_tiles();
+        }
         if !self.visible[self.focus.panel()]
             && let Some(next) = Pane::ALL.into_iter().find(|pane| self.visible[pane.panel()])
         {
@@ -668,17 +722,65 @@ impl App {
         }
     }
 
-    pub fn cycle_focus(&mut self, forward: bool) {
+    pub fn cycle_focus(&mut self, forward: bool, tiles: bool) {
         let visible: Vec<Pane> = Pane::ALL.into_iter().filter(|pane| self.visible[pane.panel()]).collect();
+        let tiles = tiles && self.visible[0];
+        self.overlay = false;
+        if self.tile.is_some() {
+            self.leave_tiles();
+            if let Some(pane) = if forward { visible.first() } else { visible.last() } {
+                self.focus = *pane;
+            }
+            return;
+        }
         let Some(position) = visible.iter().position(|pane| *pane == self.focus) else {
             if let Some(first) = visible.first() {
                 self.focus = *first;
+            } else if tiles {
+                self.enter_tiles();
             }
             return;
         };
+        let at_edge = if forward { position + 1 == visible.len() } else { position == 0 };
+        if tiles && at_edge {
+            self.enter_tiles();
+            return;
+        }
         let step = if forward { 1 } else { visible.len() - 1 };
         self.focus = visible[(position + step) % visible.len()];
+    }
+
+    pub fn press_panel(&mut self, panel: usize) {
+        let updates = Pane::Updates.panel();
+        if panel == updates && self.visible[panel] && self.updates_map && self.map_fits {
+            self.updates_map = false;
+            return;
+        }
+        let hiding = self.visible[panel];
+        self.toggle(panel);
+        if panel == updates && hiding {
+            self.updates_map = true;
+        }
+    }
+
+    pub fn enter_tiles(&mut self) {
+        if self.visible[0] {
+            self.tile = Some(self.last_tile);
+            self.overlay = false;
+        }
+    }
+
+    pub fn leave_tiles(&mut self) {
+        if let Some(tile) = self.tile.take() {
+            self.last_tile = tile;
+        }
         self.overlay = false;
+    }
+
+    pub fn move_tile(&mut self, forward: bool) {
+        if let Some(tile) = self.tile {
+            self.tile = Some(if forward { (tile + 1) % 6 } else { (tile + 5) % 6 });
+        }
     }
 }
 

@@ -9,7 +9,7 @@ mod sixel;
 mod source;
 mod theme;
 
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -155,12 +155,17 @@ fn main() -> ExitCode {
         };
     }
 
+    let default_hook = std::panic::take_hook();
     let mut terminal = ratatui::init();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = ratatui::try_restore();
+        default_hook(info);
+    }));
     catch_signals();
     watch_terminal();
     let mut pictures = pictures::Pictures::query();
     let result = run(&mut terminal, &options, script, &mut theme, &mut pictures);
-    ratatui::restore();
+    let _ = ratatui::try_restore();
 
     let signal = SIGNAL.load(Ordering::Relaxed);
     if signal != 0 {
@@ -170,7 +175,7 @@ fn main() -> ExitCode {
         Ok(true) => ExitCode::from(1),
         Ok(false) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("{error}");
+            let _ = writeln!(io::stderr(), "{error}");
             ExitCode::from(1)
         }
     }
@@ -215,6 +220,26 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3]) -> Action {
         app.select(focus, 0);
         return Action::Nothing;
     }
+    if app.tile.is_some() {
+        match key.code {
+            KeyCode::Char('q') => return Action::Quit,
+            KeyCode::Char('e') => return Action::Export,
+            KeyCode::Char('r') if app.finished_at.is_some() => return Action::Rescan,
+            KeyCode::Esc if app.overlay => app.overlay = false,
+            KeyCode::Left => app.move_tile(false),
+            KeyCode::Right => app.move_tile(true),
+            KeyCode::Tab => app.cycle_focus(true, true),
+            KeyCode::BackTab => app.cycle_focus(false, true),
+            KeyCode::Down | KeyCode::Esc if !app.overlay => app.leave_tiles(),
+            KeyCode::Enter => app.overlay = true,
+            KeyCode::Char(digit @ '1'..='5') => {
+                app.press_panel(digit as usize - '1' as usize);
+                app.overlay = false;
+            }
+            _ => {}
+        }
+        return Action::Nothing;
+    }
     let selected = app.lists[list].selected as isize;
     let step = page[list].max(1) as isize;
     let shown = app.visible[focus.panel()];
@@ -227,13 +252,16 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3]) -> Action {
             app.lists[list].filter.clear();
             app.select(focus, 0);
         }
-        KeyCode::Tab | KeyCode::Right => app.cycle_focus(true),
-        KeyCode::BackTab | KeyCode::Left => app.cycle_focus(false),
+        KeyCode::Tab => app.cycle_focus(true, true),
+        KeyCode::BackTab => app.cycle_focus(false, true),
+        KeyCode::Right => app.cycle_focus(true, false),
+        KeyCode::Left => app.cycle_focus(false, false),
         KeyCode::Char(digit @ '1'..='5') => {
-            app.toggle(digit as usize - '1' as usize);
+            app.press_panel(digit as usize - '1' as usize);
             app.overlay = false;
         }
         KeyCode::Down => app.select(focus, selected + 1),
+        KeyCode::Up if selected == 0 && !app.overlay && app.visible[0] => app.enter_tiles(),
         KeyCode::Up => app.select(focus, selected - 1),
         KeyCode::PageDown => app.select(focus, selected + step),
         KeyCode::PageUp => app.select(focus, selected - step),
@@ -272,6 +300,7 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
     let mut motion = Motion::new(!options.no_anim, Instant::now());
     let mut source_open = true;
     let mut rows = [10; 3];
+    let mut map_fits = false;
     let mut last_frame = Instant::now();
 
     loop {
@@ -315,6 +344,7 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
         let drawn = terminal.draw(|frame| {
             let scene = page::draw(frame, &app, &motion, &theme.palette, now, cell);
             rows = scene.rows;
+            map_fits = scene.map_fits;
             if let Some(pictures) = pictures.as_mut() {
                 let pal = theme.palette;
                 pictures.draw(frame, scene, &pal, theme.generation, now, |picture| Box::new(move |width, height, cell_height| page::paint(&picture, &pal, width, height, cell_height)));
@@ -322,9 +352,10 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
         });
         execute!(io::stdout(), EndSynchronizedUpdate)?;
         drawn?;
+        app.map_fits = map_fits;
 
         let timeout = if page::moving(&app, &motion, now) {
-            Duration::from_millis(33)
+            pictures::FRAME
         } else if app.finished_at.is_none() {
             Duration::from_millis(100)
         } else {
@@ -334,11 +365,11 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
         if !event::poll(timeout)? {
             continue;
         }
-        let before = (app.focus, app.lists[app.focus.index()].selected);
+        let before = (app.focus, app.lists[app.focus.index()].selected, app.tile);
         match event::read()? {
             TermEvent::Key(key) if key.kind == KeyEventKind::Press => match on_key(&mut app, key, rows) {
                 Action::Nothing => {
-                    if (app.focus, app.lists[app.focus.index()].selected) != before {
+                    if (app.focus, app.lists[app.focus.index()].selected, app.tile) != before {
                         motion.select(&app, Instant::now());
                     }
                 }
@@ -519,14 +550,30 @@ mod tests {
             assert!(rows.iter().any(|row| row.contains("Width = 150 Height = 44")), "{width}x{height}");
             assert!(scene.placements.is_empty(), "{width}x{height}");
             let fg = |offset: u16| buffer[(x + offset, y)].fg;
-            assert_eq!(fg(8), if width < page::MIN_WIDTH { pal.alert } else { pal.ink }, "{width}x{height}");
-            assert_eq!(fg(21), if height < page::MIN_HEIGHT { pal.alert } else { pal.ink }, "{width}x{height}");
+            assert_eq!(fg(8), if width < 150 { pal.alert } else { pal.ink }, "{width}x{height}");
+            assert_eq!(fg(21), if height < 44 { pal.alert } else { pal.ink }, "{width}x{height}");
         }
         render(&app, 20, 1, now);
         render(&app, 1, 1, now);
         let (buffer, scene) = render(&app, 150, 44, now);
         assert!(!buffer.content().iter().map(|cell| cell.symbol()).collect::<String>().contains("Terminal size too small:"));
         assert_eq!(scene.placements.len(), 8);
+    }
+
+    #[test]
+    fn hidden_panels_lower_the_needed_size() {
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        assert_eq!(page::min_size(&app), (150, 44));
+        app.visible = [false, true, false, false, false];
+        assert_eq!(page::min_size(&app), (150, 17));
+        let (buffer, scene) = render(&app, 150, 17, now);
+        assert!(!buffer.content().iter().map(|cell| cell.symbol()).collect::<String>().contains("Terminal size too small:"));
+        assert_eq!(scene.placements.len(), 8);
+        app.visible = [true, false, false, false, false];
+        assert_eq!(page::min_size(&app), (150, 16));
+        app.visible = [false, false, true, true, false];
+        assert_eq!(page::min_size(&app), (100, 13));
     }
 
     fn crowded_app(now: Instant) -> App {
@@ -620,6 +667,9 @@ mod tests {
         assert_eq!(app.lists[0].selected, 449);
         press(&mut app, &[KeyCode::Down, KeyCode::Home, KeyCode::Up]);
         assert_eq!(app.lists[0].selected, 0);
+        assert_eq!(app.tile, Some(0));
+        press(&mut app, &[KeyCode::Down]);
+        assert_eq!(app.tile, None);
 
         press(&mut app, &[KeyCode::Char('/')]);
         assert!(app.editing);
@@ -656,6 +706,74 @@ mod tests {
         assert_eq!(press(&mut app, &[KeyCode::Char('r')]), Action::Rescan);
         assert_eq!(press(&mut app, &[KeyCode::Char('q')]), Action::Quit);
         assert_eq!(on_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), [10; 3]), Action::Quit);
+    }
+
+    #[test]
+    fn update_details_put_facts_left_and_dependencies_right() {
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        for (_, event) in demo_events() {
+            app.apply(event, now);
+        }
+        app.focus = Pane::Updates;
+        app.overlay = true;
+        let (buffer, scene) = render(&app, 170, 50, now);
+        assert!(scene.placements.iter().any(|placement| matches!(placement.picture, page::Picture::Fan(_))));
+        assert!((0..50).filter(|y| buffer[(59, *y)].symbol() == "│").count() >= 3);
+        assert!((0..50).any(|y| (12..20).map(|x| buffer[(x, y)].symbol()).collect::<String>() == "version "));
+    }
+
+    #[test]
+    fn three_switches_the_updates_between_map_rows_and_hidden() {
+        let now = Instant::now();
+        let mut app = crowded_app(now);
+        let (_, scene) = render(&app, 358, 85, now);
+        assert!(scene.map_fits);
+        assert!(scene.placements.iter().any(|placement| matches!(placement.picture, page::Picture::Orbit(_))));
+        app.map_fits = scene.map_fits;
+        press(&mut app, &[KeyCode::Char('3')]);
+        assert!(app.visible[2] && !app.updates_map);
+        let (_, scene) = render(&app, 358, 85, now);
+        assert!(!scene.placements.iter().any(|placement| matches!(placement.picture, page::Picture::Orbit(_))));
+        press(&mut app, &[KeyCode::Char('3')]);
+        assert!(!app.visible[2]);
+        press(&mut app, &[KeyCode::Char('3')]);
+        assert!(app.visible[2] && app.updates_map);
+        let (_, scene) = render(&app, 170, 50, now);
+        assert!(!scene.map_fits);
+        app.map_fits = scene.map_fits;
+        press(&mut app, &[KeyCode::Char('3')]);
+        assert!(!app.visible[2]);
+    }
+
+    #[test]
+    fn keys_reach_the_instrument_tiles() {
+        let mut app = crowded_app(Instant::now());
+        press(&mut app, &[KeyCode::Up]);
+        assert_eq!(app.tile, Some(0));
+        press(&mut app, &[KeyCode::Right, KeyCode::Right]);
+        assert_eq!(app.tile, Some(2));
+        press(&mut app, &[KeyCode::Left, KeyCode::Left, KeyCode::Left]);
+        assert_eq!(app.tile, Some(5));
+        press(&mut app, &[KeyCode::Enter]);
+        assert!(app.overlay);
+        assert!(screen(&app, 150, 44).iter().any(|row| row.contains(":: BEFORE YOU UPDATE")));
+        press(&mut app, &[KeyCode::Esc]);
+        assert!(!app.overlay);
+        assert_eq!(app.tile, Some(5));
+        press(&mut app, &[KeyCode::Esc]);
+        assert_eq!(app.tile, None);
+        assert_eq!(app.focus, Pane::Updates);
+        press(&mut app, &[KeyCode::Tab, KeyCode::Tab, KeyCode::Tab]);
+        assert_eq!(app.tile, Some(5));
+        press(&mut app, &[KeyCode::Tab]);
+        assert_eq!((app.tile, app.focus), (None, Pane::Updates));
+        press(&mut app, &[KeyCode::BackTab]);
+        assert_eq!(app.tile, Some(5));
+        press(&mut app, &[KeyCode::Char('1')]);
+        assert_eq!(app.tile, None);
+        press(&mut app, &[KeyCode::Up]);
+        assert_eq!(app.tile, None);
     }
 
     #[test]
@@ -746,7 +864,7 @@ mod tests {
     fn a_later_start_moves_the_window_but_not_the_intro() {
         let now = Instant::now();
         let mut app = App::new(false, false, now);
-        let start = |since: &str| source::Event::Start { last_upgrade: Some(since.into()), problems_since: since.into(), now: None };
+        let start = |since: &str| source::Event::Start { last_upgrade: Some(since.into()), problems_since: since.into(), now: None, omarchy: false, last_upgraded: Vec::new() };
         app.apply(start("2026-10-01T10:00:00+02:00"), now);
         let first = app.start_at;
         app.apply(start("2026-10-19T12:00:00+02:00"), now + Duration::from_secs(90));

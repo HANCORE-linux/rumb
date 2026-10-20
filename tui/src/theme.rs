@@ -200,6 +200,7 @@ fn derive(c: &HashMap<String, String>) -> Option<Palette> {
         select: mix(page, ink, 0.12),
         alert: legible(red, panel, ink),
         warn: legible(yellow, panel, ink),
+        relation: legible(color("green").unwrap_or(ink), panel, ink),
     })
 }
 

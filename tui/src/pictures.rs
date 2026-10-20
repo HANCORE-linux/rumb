@@ -19,6 +19,7 @@ use crate::palette::Palette;
 use crate::sixel::Encoder;
 
 const MAX_PENDING: usize = 4;
+pub const FRAME: Duration = Duration::from_millis(33);
 
 pub type Paint = Box<dyn FnOnce(u32, u32, f32) -> Option<Pixmap> + Send>;
 
@@ -94,7 +95,7 @@ impl Pictures {
         while let Ok(done) = self.done.try_recv() {
             self.pending.remove(&done.rect);
             if let Some(protocol) = done.protocol {
-                self.slots.insert(done.rect, Slot { key: done.key, next: now + done.cost, protocol });
+                self.slots.insert(done.rect, Slot { key: done.key, next: now + done.cost.saturating_sub(FRAME), protocol });
             }
         }
         let font = self.picker.font_size();
@@ -154,6 +155,14 @@ fn fingerprint(picture: &Picture, generation: u64) -> u64 {
         Picture::Eye(spec) => {
             1u8.hash(&mut hasher);
             spec.fingerprint(&mut hasher);
+        }
+        Picture::Fan(spec) => {
+            3u8.hash(&mut hasher);
+            spec.hash(&mut hasher);
+        }
+        Picture::Orbit(spec) => {
+            4u8.hash(&mut hasher);
+            spec.hash(&mut hasher);
         }
         Picture::Specimen { subsystem, signal, glow, aim } => {
             (2u8, subsystem.label(), signal, glow.map(|(color, strength)| (format!("{color:?}"), strength.to_bits())), aim.to_bits()).hash(&mut hasher);

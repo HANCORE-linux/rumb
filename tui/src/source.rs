@@ -21,6 +21,10 @@ pub enum Event {
         problems_since: String,
         #[serde(default)]
         now: Option<String>,
+        #[serde(default)]
+        omarchy: bool,
+        #[serde(default)]
+        last_upgraded: Vec<String>,
     },
     Step {
         stage: String,
