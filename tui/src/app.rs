@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -113,6 +113,10 @@ pub struct Anatomy {
     pub cache_bytes: u64,
     pub kernel_running: String,
     #[serde(default)]
+    pub kernel_installed: String,
+    #[serde(default)]
+    pub cache_freeable_bytes: Option<u64>,
+    #[serde(default)]
     pub reboot_pending: bool,
     #[serde(default)]
     pub upgrades_per_day: Vec<u64>,
@@ -130,6 +134,32 @@ pub struct Anatomy {
     pub desktop: String,
     #[serde(default)]
     pub omarchy: String,
+    #[serde(default)]
+    pub uptime_seconds: Option<u64>,
+    #[serde(default)]
+    pub nvidia_loaded: String,
+    #[serde(default)]
+    pub nvidia_installed: String,
+    #[serde(default)]
+    pub hyprland_running: String,
+    #[serde(default)]
+    pub hyprland_installed: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Health {
+    pub kernel: Option<KernelHealth>,
+    pub nvidia: Option<(String, String)>,
+    pub hyprland: Option<(String, String)>,
+    pub config_errors: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct KernelHealth {
+    pub running: String,
+    pub installed: String,
+    pub uptime_seconds: Option<u64>,
+    pub reboot_pending: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -155,20 +185,6 @@ impl Problem {
         self.subject.rsplit('/').next().unwrap_or(&self.subject)
     }
 
-    pub fn rank(&self) -> (u8, u8) {
-        let status = match self.status.as_str() {
-            "possibly-fixed" => 0,
-            "config" => 1,
-            _ => 2,
-        };
-        let kind = match self.kind.as_str() {
-            "failed-unit" => 0,
-            "crash" => 1,
-            _ => 2,
-        };
-        (status, kind)
-    }
-
     /// The version the fixing update brings, from "pkg old -> new".
     pub fn fix_version(&self) -> &str {
         self.update.rsplit("-> ").next().unwrap_or("")
@@ -179,6 +195,8 @@ impl Problem {
 pub struct News {
     pub date: String,
     pub title: String,
+    #[serde(default)]
+    pub link: String,
     pub manual_intervention: bool,
 }
 
@@ -225,19 +243,50 @@ pub struct Step {
     pub ended: Option<Instant>,
 }
 
-/// A line shown inside the eye while the system changes.
-pub struct LogLine {
-    pub text: String,
-    pub at: Instant,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pane {
+    Updates,
+    Problems,
+    Events,
 }
 
-/// How Omarchy is shown when the system runs it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OmarchyMark {
-    Logo,
-    #[allow(dead_code)]
-    Wordmark,
+impl Pane {
+    pub const ALL: [Pane; 3] = [Pane::Updates, Pane::Problems, Pane::Events];
+
+    pub fn index(self) -> usize {
+        match self {
+            Pane::Updates => 0,
+            Pane::Problems => 1,
+            Pane::Events => 2,
+        }
+    }
+
+    pub fn panel(self) -> usize {
+        self.index() + 2
+    }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Journal,
+    Pacman,
+}
+
+pub struct EventLine {
+    pub at: Instant,
+    pub clock: String,
+    pub source: Source,
+    pub ident: String,
+    pub message: String,
+}
+
+#[derive(Default)]
+pub struct ListState {
+    pub selected: usize,
+    pub filter: String,
+}
+
+pub const MAX_EVENTS: usize = 10_000;
 
 pub fn ease_out_cubic(t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
@@ -264,37 +313,27 @@ pub struct App {
     pub preflight: Option<Preflight>,
     pub anatomy: Option<Anatomy>,
     pub anatomy_at: Option<Instant>,
-    pub journal_at: Option<Instant>,
     pub journal_live: usize,
-    pub journal_last: Option<Instant>,
-    pub journal_feed: Vec<(Instant, String)>,
-    /// Tile that has keyboard focus, and the tile opened in detail view.
-    pub focus: usize,
-    /// The tile focused before, and when focus moved on from it.
-    pub focus_prev: usize,
-    pub focus_since: Option<Instant>,
-    pub detail: Option<usize>,
+    pub events: Vec<EventLine>,
+    pub event_at: Option<Instant>,
     pub start_at: Option<Instant>,
-    /// The package manager at work: when its transaction began and ended.
     pub transaction: Option<(Instant, Option<Instant>)>,
-    /// Updates applied during the current transaction, and when.
     pub applied: Vec<(Update, Instant)>,
-    /// How many updates were pending when the transaction began.
     pub applied_total: usize,
     pub full_upgrade: bool,
     pub full_upgrade_at: Option<Instant>,
-    pub log: Vec<LogLine>,
-    /// Package manager lines as they came in, for the ticker and the log.
-    pub feed: Vec<(Instant, String)>,
-    pub omarchy_mark: OmarchyMark,
-    /// Which view is shown, like the presets in btop.
-    pub view: usize,
-    pub selected: usize,
+    pub visible: [bool; 5],
+    pub focus: Pane,
+    pub lists: [ListState; 3],
+    pub editing: bool,
+    pub overlay: bool,
+    pub follow: bool,
+    pub status: Option<(String, bool, Instant)>,
     pub finished_at: Option<Instant>,
     pub error: Option<String>,
     pub live_lost: bool,
-    /// Animations are shown at their final state.
     pub skipped: bool,
+    pub health: Health,
 }
 
 impl App {
@@ -319,29 +358,27 @@ impl App {
             preflight: None,
             anatomy: None,
             anatomy_at: None,
-            journal_at: None,
             journal_live: 0,
-            journal_last: None,
-            journal_feed: Vec::new(),
-            focus: 0,
-            focus_prev: 0,
-            focus_since: None,
-            detail: None,
+            events: Vec::new(),
+            event_at: None,
             start_at: None,
             transaction: None,
             applied: Vec::new(),
             applied_total: 0,
             full_upgrade: false,
             full_upgrade_at: None,
-            log: Vec::new(),
-            feed: Vec::new(),
-            omarchy_mark: OmarchyMark::Logo,
-            view: 0,
-            selected: 0,
+            visible: [true; 5],
+            focus: Pane::Updates,
+            lists: Default::default(),
+            editing: false,
+            overlay: false,
+            follow: true,
+            status: None,
             finished_at: None,
             error: None,
             live_lost: false,
             skipped: !animate,
+            health: Health::default(),
         }
     }
 
@@ -368,17 +405,45 @@ impl App {
                     self.finish(now);
                 }
             }
+            Event::Done { label, value, .. } => self.done(&label, &value),
             Event::Result {} => self.finish(now),
             Event::Activity { line } => self.activity(&line, now),
             Event::Journal { time, ident, message } => self.journal(JournalLine { time, ident, message }, now),
         }
     }
 
+    fn done(&mut self, label: &str, value: &Value) {
+        let text = |key: &str| value[key].as_str().unwrap_or_default().to_string();
+        match label {
+            "reading the running kernel" => {
+                self.health.kernel = Some(KernelHealth { running: text("running"), installed: text("installed"), uptime_seconds: value["uptime_seconds"].as_u64(), reboot_pending: value["reboot_pending"].as_bool().unwrap_or(false) });
+            }
+            "reading the loaded nvidia module" => self.health.nvidia = Some((text("loaded"), text("installed"))),
+            "reading the running Hyprland" => self.health.hyprland = Some((text("running"), text("installed"))),
+            "checking Hyprland config" => self.health.config_errors = value.as_u64(),
+            _ => {}
+        }
+    }
+
     fn stage(&mut self, stage: &str, data: Value, now: Instant) -> Result<(), serde_json::Error> {
         if stage == "anatomy" {
-            self.anatomy = Some(serde_json::from_value(data)?);
+            let anatomy: Anatomy = serde_json::from_value(data)?;
+            if self.health.kernel.is_none() && !anatomy.kernel_running.is_empty() {
+                self.health.kernel = Some(KernelHealth { running: anatomy.kernel_running.clone(), installed: anatomy.kernel_installed.clone(), uptime_seconds: anatomy.uptime_seconds, reboot_pending: anatomy.reboot_pending });
+            }
+            if self.health.nvidia.is_none() && !anatomy.nvidia_loaded.is_empty() {
+                self.health.nvidia = Some((anatomy.nvidia_loaded.clone(), anatomy.nvidia_installed.clone()));
+            }
+            if self.health.hyprland.is_none() && !anatomy.hyprland_running.is_empty() {
+                self.health.hyprland = Some((anatomy.hyprland_running.clone(), anatomy.hyprland_installed.clone()));
+            }
+            if self.events.is_empty() {
+                for line in &anatomy.journal {
+                    self.events.push(EventLine { at: now, clock: line.time.clone(), source: Source::Journal, ident: line.ident.clone(), message: line.message.trim().to_string() });
+                }
+            }
+            self.anatomy = Some(anatomy);
             self.anatomy_at = Some(now);
-            self.journal_at.get_or_insert(now);
             return Ok(());
         }
         let Some(index) = stage_index(stage) else { return Ok(()) };
@@ -392,6 +457,10 @@ impl App {
                 self.problems = field(&data, "problems")?;
                 self.activity = field(&data, "activity")?;
                 self.problem_errors = field(&data, "problem_check_errors")?;
+                if let Some(errors) = data.get("config_errors").and_then(Value::as_u64) {
+                    self.health.config_errors = Some(errors);
+                }
+                self.journal_live = 0;
             }
             2 => {
                 self.news = field(&data, "news")?;
@@ -407,44 +476,39 @@ impl App {
     }
 
     fn journal(&mut self, line: JournalLine, now: Instant) {
-        let Some(anatomy) = &mut self.anatomy else { return };
-        self.journal_feed.push((now, format!("{}: {}", line.ident, line.message)));
-        let excess = self.journal_feed.len().saturating_sub(200);
-        self.journal_feed.drain(..excess);
-        anatomy.journal.push(line);
-        let excess = anatomy.journal.len().saturating_sub(200);
-        anatomy.journal.drain(..excess);
         if self.finished_at.is_some() {
             self.journal_live += 1;
         }
-        self.journal_last = Some(now);
+        self.push_event(EventLine { at: now, clock: line.time, source: Source::Journal, ident: line.ident, message: line.message.trim().to_string() }, now);
     }
 
-    /// Follows the package manager's log: a transaction starts, packages get
-    /// upgraded one by one, hooks run, the transaction completes.
+    fn push_event(&mut self, event: EventLine, now: Instant) {
+        if !self.follow && self.shows_event(&event) {
+            self.lists[Pane::Events.index()].selected += 1;
+        }
+        self.events.push(event);
+        let excess = self.events.len().saturating_sub(MAX_EVENTS);
+        self.events.drain(..excess);
+        self.event_at = Some(now);
+    }
+
+    fn shows_event(&self, event: &EventLine) -> bool {
+        let filter = self.lists[Pane::Events.index()].filter.to_lowercase();
+        filter.is_empty() || format!("{} {}", event.ident, event.message).to_lowercase().contains(&filter)
+    }
+
     fn activity(&mut self, line: &str, now: Instant) {
         let line = line.trim();
-        self.feed.push((now, line.to_string()));
-        let excess = self.feed.len().saturating_sub(200);
-        self.feed.drain(..excess);
         let mut words = line.splitn(3, ' ');
         let (action, name, rest) = (words.next().unwrap_or(""), words.next().unwrap_or(""), words.next().unwrap_or(""));
         let versions = rest.trim_matches(|c| c == '(' || c == ')');
-        let short = |version: &str| version.rsplit_once('-').map_or(version, |(v, _)| v).to_string();
-        // Lines stay short enough to fit across the pupil
-        let clip = |text: &str| text.to_uppercase().chars().take(13).collect::<String>();
-        let mut shown = Vec::new();
         match (action, name) {
             ("transaction", "started") => {
                 self.transaction = Some((now, None));
                 self.applied.clear();
                 self.applied_total = self.updates.len();
-                shown.extend(["TRANSACTION".to_string(), "STARTED".to_string()]);
             }
-            ("starting", "full") => {
-                self.full_upgrade = true;
-                shown.extend(["FULL SYSTEM".to_string(), "UPGRADE".to_string()]);
-            }
+            ("starting", "full") => self.full_upgrade = true,
             ("transaction", "completed") => {
                 if let Some((_, end)) = &mut self.transaction {
                     *end = Some(now);
@@ -452,7 +516,6 @@ impl App {
                 if std::mem::take(&mut self.full_upgrade) {
                     self.full_upgrade_at = Some(now);
                 }
-                shown.extend(["TRANSACTION".to_string(), "COMPLETED".to_string()]);
             }
             ("upgraded" | "downgraded" | "installed" | "removed" | "reinstalled", _) => {
                 if let Some(position) = self.updates.iter().position(|update| update.name == name) {
@@ -469,63 +532,15 @@ impl App {
                         _ => {}
                     }
                 }
-                shown.extend([clip(action), clip(name)]);
-                let change = match versions.split_once(" -> ") {
-                    Some((old, new)) if short(old) == short(new) => new.to_string(),
-                    Some((old, new)) if short(old).len() + short(new).len() < 13 => format!("{}>{}", short(old), short(new)),
-                    Some((_, new)) => short(new),
-                    None => short(versions),
-                };
-                if !change.is_empty() {
-                    shown.push(clip(&change));
-                }
             }
-            ("running", hook) => {
-                let hook = hook.trim_matches(|c| c == '\'' || c == '.').trim_end_matches(".hook");
-                let hook = hook.trim_start_matches(|c: char| c.is_ascii_digit() || c == '-');
-                shown.extend(["HOOK".to_string(), clip(hook)]);
-            }
-            _ => shown.push(clip(line)),
+            _ => {}
         }
-        for text in shown {
-            self.log.push(LogLine { text, at: now });
-        }
-        let excess = self.log.len().saturating_sub(40);
-        self.log.drain(..excess);
+        let clock = clock_now();
+        self.push_event(EventLine { at: now, clock, source: Source::Pacman, ident: "pacman".into(), message: line.to_string() }, now);
     }
 
-    /// 0 idle, 1 working: the package manager is busy, easing in and out.
-    pub fn working(&self, now: Instant) -> f64 {
-        let Some((began, ended)) = self.transaction else { return 0.0 };
-        if self.skipped {
-            return if ended.is_some() { 0.0 } else { 1.0 };
-        }
-        let rise = ease_out_cubic(now.saturating_duration_since(began).as_secs_f64() / 0.45);
-        match ended {
-            None => rise,
-            Some(end) => {
-                let held = now.saturating_duration_since(end).as_secs_f64();
-                rise * (1.0 - ease_out_cubic((held - 1.2) / 0.45))
-            }
-        }
-    }
-
-    pub fn set_view(&mut self, view: usize, now: Instant) {
-        if view != self.view {
-            self.view = view;
-            self.detail = None;
-            self.focus_prev = 0;
-            self.focus = 0;
-            self.focus_since = Some(now);
-        }
-    }
-
-    pub fn set_focus(&mut self, index: usize, now: Instant) {
-        if index != self.focus {
-            self.focus_prev = self.focus;
-            self.focus = index;
-            self.focus_since = Some(now);
-        }
+    pub fn transacting(&self) -> bool {
+        self.transaction.is_some_and(|(_, end)| end.is_none())
     }
 
     fn end_step(&mut self, now: Instant) {
@@ -551,32 +566,12 @@ impl App {
         self.finished_at = Some(now);
     }
 
-    /// Jumps every animation to its final state.
-    pub fn skip(&mut self) {
-        self.skipped = true;
-    }
-
-    pub fn animating(&self, now: Instant) -> bool {
-        if self.skipped {
-            return false;
-        }
-        let recent = |at: Instant| now.saturating_duration_since(at) < Duration::from_millis(3000);
-        let spotlight_moving = self.spotlight_since(now).is_some_and(|at| now.saturating_duration_since(at) < Duration::from_millis(700));
-        spotlight_moving
-            || self.finished_at.is_none_or(recent)
-            || self.stage_done_at.iter().flatten().any(|done| recent(*done))
-    }
-
     pub fn high(&self) -> usize {
         self.updates.iter().filter(|update| update.risk == "high").count()
     }
 
     pub fn medium(&self) -> usize {
         self.updates.iter().filter(|update| update.risk == "medium").count()
-    }
-
-    pub fn fixes(&self) -> usize {
-        self.problems.iter().filter(|problem| problem.status == "possibly-fixed").count()
     }
 
     pub fn manual(&self) -> usize {
@@ -601,12 +596,6 @@ impl App {
         updates
     }
 
-    pub fn sorted_problems(&self) -> Vec<&Problem> {
-        let mut problems: Vec<&Problem> = self.problems.iter().collect();
-        problems.sort_by(|a, b| a.rank().cmp(&b.rank()).then_with(|| b.count.cmp(&a.count)));
-        problems
-    }
-
     /// Verdict headline and its severity.
     pub fn verdict(&self) -> (String, Severity) {
         if self.error.is_some() {
@@ -627,47 +616,87 @@ impl App {
 }
 
 impl App {
-    pub fn subsystem_updates(&self, subsystem: Subsystem) -> Vec<&Update> {
-        self.sorted_updates().into_iter().filter(|update| Subsystem::of(&update.name) == subsystem).collect()
-    }
-
-    pub fn subsystem_problems(&self, subsystem: Subsystem) -> Vec<&Problem> {
-        self.sorted_problems()
+    pub fn visible_updates(&self) -> Vec<&Update> {
+        let filter = self.lists[0].filter.to_lowercase();
+        self.sorted_updates()
             .into_iter()
-            .filter(|problem| {
-                let name = if problem.package.is_empty() { problem.name() } else { &problem.package };
-                Subsystem::of(name) == subsystem
-            })
+            .filter(|update| filter.is_empty() || format!("{} {} {} {} {} {} {}", update.name, update.old, update.new, update.risk, update.bump, update.source, Subsystem::of(&update.name).label()).to_lowercase().contains(&filter))
             .collect()
     }
 
-    /// Subsystems that have something to show, in display order.
-    pub fn active_subsystems(&self) -> Vec<Subsystem> {
-        let active: Vec<Subsystem> = Subsystem::ALL
+    pub fn problems_by_count(&self) -> Vec<&Problem> {
+        let mut problems: Vec<&Problem> = self.problems.iter().collect();
+        problems.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.subject.cmp(&b.subject)));
+        problems
+    }
+
+    pub fn visible_problems(&self) -> Vec<&Problem> {
+        let filter = self.lists[1].filter.to_lowercase();
+        self.problems_by_count()
             .into_iter()
-            .filter(|s| !self.subsystem_updates(*s).is_empty() || !self.subsystem_problems(*s).is_empty())
-            .collect();
-        if active.is_empty() { Subsystem::ALL[..4].to_vec() } else { active }
+            .filter(|problem| filter.is_empty() || format!("{} {} {} {} {}", problem.kind, problem.subject, problem.package, problem.status, problem.update).to_lowercase().contains(&filter))
+            .collect()
     }
 
-    /// The subsystem in the spotlight; it moves on every few seconds once the
-    /// scan has finished, like an instrument stepping through its channels.
-    pub fn spotlight(&self, now: Instant) -> Subsystem {
-        let active = self.active_subsystems();
-        let Some(done) = self.finished_at else { return active[0] };
-        let step = (now.saturating_duration_since(done).as_millis() / 5000) as usize;
-        active[step % active.len()]
+    pub fn visible_events(&self) -> Vec<&EventLine> {
+        self.events.iter().rev().filter(|event| self.shows_event(event)).collect()
     }
 
-    pub fn spotlight_since(&self, now: Instant) -> Option<Instant> {
-        let done = self.finished_at?;
-        let step = now.saturating_duration_since(done).as_millis() / 5000;
-        Some(done + Duration::from_millis((step * 5000) as u64))
+    pub fn rows(&self, pane: Pane) -> usize {
+        match pane {
+            Pane::Updates => self.visible_updates().len(),
+            Pane::Problems => self.visible_problems().len(),
+            Pane::Events => self.visible_events().len(),
+        }
+    }
+
+    pub fn select(&mut self, pane: Pane, target: isize) {
+        let rows = self.rows(pane);
+        let selected = target.clamp(0, rows.saturating_sub(1) as isize) as usize;
+        self.lists[pane.index()].selected = selected;
+        if pane == Pane::Events {
+            self.follow = selected == 0;
+        }
+    }
+
+    pub fn toggle(&mut self, panel: usize) {
+        self.visible[panel] = !self.visible[panel];
+        if !self.visible[self.focus.panel()]
+            && let Some(next) = Pane::ALL.into_iter().find(|pane| self.visible[pane.panel()])
+        {
+            self.focus = next;
+        }
+    }
+
+    pub fn cycle_focus(&mut self, forward: bool) {
+        let visible: Vec<Pane> = Pane::ALL.into_iter().filter(|pane| self.visible[pane.panel()]).collect();
+        let Some(position) = visible.iter().position(|pane| *pane == self.focus) else {
+            if let Some(first) = visible.first() {
+                self.focus = *first;
+            }
+            return;
+        };
+        let step = if forward { 1 } else { visible.len() - 1 };
+        self.focus = visible[(position + step) % visible.len()];
+        self.overlay = false;
     }
 }
 
-pub fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
-    if count == 1 { one } else { many }
+fn local_now() -> libc::tm {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&secs, &mut tm) };
+    tm
+}
+
+pub fn clock_now() -> String {
+    let tm = local_now();
+    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+}
+
+pub fn local_stamp() -> String {
+    let tm = local_now();
+    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec)
 }
 
 fn stage_index(stage: &str) -> Option<usize> {

@@ -214,6 +214,15 @@ step() {
   emit --arg stage "$1" --arg label "$2" '{event: "step", stage: $stage, label: $label}'
 }
 
+done_step() {
+  ((following)) && return 0
+  emit --arg stage "$1" --arg label "$2" --argjson value "$3" '{event: "done", stage: $stage, label: $label, value: $value}'
+}
+
+count_source() {
+  awk -F'\x1f' -v source="$1" '$4 == source { n++ } END { print n + 0 }' "$tmp/updates.tsv"
+}
+
 # --- Time windows ---
 
 pacman_log=$(pacman-conf LogFile 2>/dev/null)
@@ -285,6 +294,11 @@ check_updates() {
     2) ;;
     *) update_errors+=(repo) ;;
   esac
+  if [[ " ${update_errors[*]} " == *" repo "* ]]; then
+    done_step updates "checking repository updates" null
+  else
+    done_step updates "checking repository updates" "$(count_source repo)"
+  fi
 
   if ((check_aur)) && [[ -n $(pacman -Qmq 2>/dev/null) ]]; then
     aur_helper=$(command -v yay || command -v paru || true)
@@ -292,8 +306,12 @@ check_updates() {
       step updates "checking AUR updates"
       if aur_out=$("$aur_helper" -Qua 2>"$tmp/aur.err"); then
         parse_updates aur <<<"$aur_out"
+        done_step updates "checking AUR updates" "$(count_source aur)"
       elif [[ -s $tmp/aur.err ]]; then
         update_errors+=(aur)
+        done_step updates "checking AUR updates" null
+      else
+        done_step updates "checking AUR updates" 0
       fi
     else
       aur_unavailable=true
@@ -335,7 +353,7 @@ check_updates
 # --- Current problems ---
 
 collect_problems() {
-  local count exe source scope unit fragment package units config_errors day today
+  local count exe source scope unit fragment package units config_errors day today journal_total failed_total
   local -a scope_flag
   local -A crash_days=() error_days=()
   problem_errors=()
@@ -354,6 +372,11 @@ collect_problems() {
       owner_of "$exe"
       add_problem crash "$exe" "$count" "$REPLY" "$exe"
     done < <(jq -r --argjson since "$since_epoch" '.[]? | select(.time / 1000000 >= $since) | .exe // empty | gsub("[[:cntrl:]]"; " ")' "$tmp/cores.json" 2>/dev/null | sort | uniq -c | sort -rn)
+    if [[ " ${problem_errors[*]} " == *" crashes "* ]]; then
+      done_step problems "reading crash reports" null
+    else
+      done_step problems "reading crash reports" "$(jq --argjson since "$since_epoch" '[.[]? | select(.time / 1000000 >= $since)] | length' "$tmp/cores.json" 2>/dev/null || echo 0)"
+    fi
   fi
 
   owner_of "/usr/lib/modules/$(uname -r)/vmlinuz"
@@ -363,8 +386,10 @@ collect_problems() {
   journalctl -p err --since "@$query_start" -o json \
     --output-fields=_EXE,SYSLOG_IDENTIFIER,_TRANSPORT,_COMM -q --no-pager >"$tmp/journal.json" 2>/dev/null || problem_errors+=(journal)
 
+  journal_total=0
   while read -r count source; do
     [[ -n $source ]] || continue
+    journal_total=$((journal_total + count))
     case $source in
       kernel) add_problem journal "kernel" "$count" "$kernel_package" ;;
       /*)
@@ -379,6 +404,11 @@ collect_problems() {
         elif (._EXE | s) then ._EXE
         else "ident:" + ((.SYSLOG_IDENTIFIER | s) // (._COMM | s) // "unknown") end) | gsub("[[:cntrl:]]"; " ")' "$tmp/journal.json" 2>/dev/null |
     sort | uniq -c | sort -rn)
+  if [[ " ${problem_errors[*]} " == *" journal "* ]]; then
+    done_step problems "reading journal errors" null
+  else
+    done_step problems "reading journal errors" "$journal_total"
+  fi
 
   # Crashes and journal errors per day, for the activity chart
   while read -r count day; do
@@ -397,6 +427,7 @@ collect_problems() {
   done
 
   step problems "checking failed units"
+  failed_total=0
   for scope in system user; do
     scope_flag=()
     [[ $scope == user ]] && scope_flag=(--user)
@@ -413,31 +444,41 @@ collect_problems() {
         package=$REPLY
       fi
       add_problem failed-unit "$unit" 1 "$package" "$fragment"
+      failed_total=$((failed_total + 1))
     done <<<"$units"
   done
+  if [[ " ${problem_errors[*]} " == *" units "* ]]; then
+    done_step problems "checking failed units" null
+  else
+    done_step problems "checking failed units" "$failed_total"
+  fi
 
+  config_errors=null
   if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && command -v hyprctl >/dev/null; then
     step problems "checking Hyprland config"
     config_errors=$(hyprctl configerrors -j 2>/dev/null | jq '[.[] | select(. != "")] | length' 2>/dev/null)
     if ! [[ $config_errors =~ ^[0-9]+$ ]]; then
       problem_errors+=(hyprland)
+      config_errors=null
     elif ((config_errors > 0)); then
       add_problem config "Hyprland config errors" "$config_errors" ""
     fi
+    done_step problems "checking Hyprland config" "$config_errors"
   fi
 
   tsv_json "$tmp/problems.tsv" kind subject count package status update |
     jq 'map(.count |= tonumber)' >"$tmp/problems.json"
   tsv_json "$tmp/activity.tsv" date crashes errors |
     jq 'map(.crashes |= tonumber | .errors |= tonumber)' >"$tmp/activity.json"
-  emit --slurpfile problems "$tmp/problems.json" --slurpfile activity "$tmp/activity.json" --args \
-    '{event: "stage", stage: "problems", data: {problems: $problems[0], activity: $activity[0], problem_check_errors: $ARGS.positional}}' \
+  emit --slurpfile problems "$tmp/problems.json" --slurpfile activity "$tmp/activity.json" --argjson config_errors "$config_errors" --args \
+    '{event: "stage", stage: "problems", data: {problems: $problems[0], activity: $activity[0], problem_check_errors: $ARGS.positional, config_errors: $config_errors}}' \
     "${problem_errors[@]}"
 }
 collect_problems
 
 collect_anatomy() {
-  local os desktop omarchy="" kernel_running kernel_pkg kernel_installed="" reboot_pending=false cache_dir cache_bytes=0 foreign day today upgrades_json
+  local os desktop omarchy="" kernel_running kernel_pkg kernel_installed="" reboot_pending=false cache_dir cache_bytes=0 cache_freeable paccache_out paccache_bytes foreign day today upgrades_json
+  local uptime_seconds nvidia_loaded="" nvidia_installed="" hyprland_running="" hyprland_installed="" hyprland_bin packages explicit orphans
   local -a names upgrades=()
   local -A per_day=()
 
@@ -447,13 +488,8 @@ collect_anatomy() {
     omarchy=${omarchy%-*}
     [[ $os == Omarchy ]] && os="Arch Linux"
   fi
-  if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && command -v hyprctl >/dev/null; then
-    desktop="Hyprland $(hyprctl version -j 2>/dev/null | jq -r '.version // empty' 2>/dev/null)"
-    desktop=${desktop% }
-  else
-    desktop=${XDG_CURRENT_DESKTOP:-}
-  fi
 
+  step anatomy "reading the running kernel"
   kernel_running=$(uname -r)
   if [[ -d /usr/lib/modules/$kernel_running ]]; then
     kernel_pkg=$(cat "/usr/lib/modules/$kernel_running/pkgbase" 2>/dev/null)
@@ -461,10 +497,60 @@ collect_anatomy() {
   else
     reboot_pending=true
   fi
+  uptime_seconds=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
+  uptime_seconds=${uptime_seconds%.*}
+  [[ $uptime_seconds =~ ^[0-9]+$ ]] || uptime_seconds=null
+  done_step anatomy "reading the running kernel" "$(jq -cn --arg running "$kernel_running" --arg installed "$kernel_installed" \
+    --argjson uptime "$uptime_seconds" --argjson reboot "$reboot_pending" \
+    '{running: $running, installed: $installed, uptime_seconds: $uptime, reboot_pending: $reboot}')"
 
+  if [[ -r /sys/module/nvidia/version ]]; then
+    step anatomy "reading the loaded nvidia module"
+    nvidia_loaded=$(tr -d '[:space:]' </sys/module/nvidia/version 2>/dev/null)
+    nvidia_installed=$(pacman -Q nvidia-utils 2>/dev/null | cut -d' ' -f2)
+    done_step anatomy "reading the loaded nvidia module" "$(jq -cn --arg loaded "$nvidia_loaded" --arg installed "$nvidia_installed" \
+      '{loaded: $loaded, installed: $installed}')"
+  fi
+
+  if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && command -v hyprctl >/dev/null; then
+    step anatomy "reading the running Hyprland"
+    hyprland_running=$(hyprctl version -j 2>/dev/null | jq -r '.version // empty' 2>/dev/null)
+    hyprland_bin=$(command -v Hyprland || command -v hyprland || true)
+    [[ -n $hyprland_bin ]] && hyprland_installed=$(pacman -Qo "$hyprland_bin" 2>/dev/null | awk '{ print $NF }')
+    desktop="Hyprland $hyprland_running"
+    desktop=${desktop% }
+    done_step anatomy "reading the running Hyprland" "$(jq -cn --arg running "$hyprland_running" --arg installed "$hyprland_installed" \
+      '{running: $running, installed: $installed}')"
+  else
+    desktop=${XDG_CURRENT_DESKTOP:-}
+  fi
+
+  step anatomy "listing installed packages"
+  packages=$(pacman -Qq 2>/dev/null | wc -l)
+  explicit=$(pacman -Qqe 2>/dev/null | wc -l)
+  orphans=$(pacman -Qqdt 2>/dev/null | wc -l)
+  done_step anatomy "listing installed packages" "$(jq -cn --argjson packages "$packages" --argjson orphans "$orphans" \
+    '{packages: $packages, orphans: $orphans}')"
+
+  step anatomy "measuring the package cache"
   cache_dir=$(pacman-conf CacheDir 2>/dev/null | head -n 1)
   [[ -n $cache_dir && -d $cache_dir ]] && cache_bytes=$(du -sb "$cache_dir" 2>/dev/null | cut -f1)
   [[ $cache_bytes =~ ^[0-9]+$ ]] || cache_bytes=0
+  cache_freeable=null
+  if command -v paccache >/dev/null && paccache_out=$(LC_ALL=C paccache -dk1 2>/dev/null); then
+    paccache_bytes=$(awk '
+      /no candidate packages found/ { print 0; exit }
+      /disk space saved:/ {
+        match($0, /saved: [0-9.]+ [KMGT]?i?B/)
+        split(substr($0, RSTART + 7, RLENGTH - 7), part, " ")
+        unit = part[2]
+        scale = unit == "KiB" ? 1024 : unit == "MiB" ? 1048576 : unit == "GiB" ? 1073741824 : unit == "TiB" ? 1099511627776 : 1
+        printf "%d\n", part[1] * scale
+        exit
+      }' <<<"$paccache_out")
+    [[ $paccache_bytes =~ ^[0-9]+$ ]] && cache_freeable=$paccache_bytes
+  fi
+  done_step anatomy "measuring the package cache" "$cache_freeable"
 
   pacman -Sl 2>/dev/null | awk '$4 ~ /^\[installed/ { print $1 }' | sort | uniq -c |
     awk '{ printf "%s\x1f%d\n", $2, $1 }' >"$tmp/repos.tsv"
@@ -504,13 +590,17 @@ collect_anatomy() {
     <"$tmp/deps.tsv" >"$tmp/deps.json"
   emit --arg hostname "$(uname -n)" --arg os "$os" --arg desktop "$desktop" --arg omarchy "$omarchy" \
     --arg kernel_running "$kernel_running" --arg kernel_installed "$kernel_installed" \
-    --argjson reboot_pending "$reboot_pending" --argjson cache_bytes "$cache_bytes" \
-    --argjson packages "$(pacman -Qq 2>/dev/null | wc -l)" --argjson explicit "$(pacman -Qqe 2>/dev/null | wc -l)" \
-    --argjson orphans "$(pacman -Qqdt 2>/dev/null | wc -l)" --argjson upgrades_per_day "$upgrades_json" \
+    --argjson reboot_pending "$reboot_pending" --argjson cache_bytes "$cache_bytes" --argjson cache_freeable "$cache_freeable" \
+    --argjson packages "$packages" --argjson explicit "$explicit" \
+    --argjson orphans "$orphans" --argjson upgrades_per_day "$upgrades_json" \
+    --argjson uptime_seconds "$uptime_seconds" --arg nvidia_loaded "$nvidia_loaded" --arg nvidia_installed "$nvidia_installed" \
+    --arg hyprland_running "$hyprland_running" --arg hyprland_installed "$hyprland_installed" \
     --slurpfile repos "$tmp/repos.json" --slurpfile deps "$tmp/deps.json" --slurpfile journal "$tmp/journal_lines.json" \
     '{event: "stage", stage: "anatomy", data: {hostname: $hostname, os: $os, desktop: $desktop, omarchy: $omarchy,
-      packages: $packages, explicit: $explicit, orphans: $orphans, cache_bytes: $cache_bytes,
+      packages: $packages, explicit: $explicit, orphans: $orphans, cache_bytes: $cache_bytes, cache_freeable_bytes: $cache_freeable,
       kernel_running: $kernel_running, kernel_installed: $kernel_installed, reboot_pending: $reboot_pending,
+      uptime_seconds: $uptime_seconds, nvidia_loaded: $nvidia_loaded, nvidia_installed: $nvidia_installed,
+      hyprland_running: $hyprland_running, hyprland_installed: $hyprland_installed,
       upgrades_per_day: $upgrades_per_day, repos: $repos[0], deps: $deps[0], journal: $journal[0]}}'
 }
 
@@ -547,6 +637,11 @@ collect_news() {
   else
     news_error=1
   fi
+  if ((news_error)); then
+    done_step news "fetching Arch news" null
+  else
+    done_step news "fetching Arch news" "$(wc -l <"$tmp/news.tsv")"
+  fi
 
   tsv_json "$tmp/news.tsv" date title link manual_intervention |
     jq 'map(.manual_intervention |= (. == "true"))' >"$tmp/news.json"
@@ -574,6 +669,7 @@ collect_preflight() {
       snapshot_before_update=true
     fi
   fi
+  done_step preflight "checking disk space and snapshots" "$free_bytes"
 
   emit --argjson free_bytes "$free_bytes" --argjson free_ok "$free_ok" --argjson snapper "$snapper_configured" \
     --argjson snapshot "$snapshot_before_update" --argjson total "$disk_total_bytes" --argjson used "$disk_used_bytes" \

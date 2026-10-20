@@ -38,6 +38,14 @@ Pending repository updates come from
 which syncs a temporary copy of the package databases
 and never touches the system's own.
 .PP
+In the middle an eye reads the scan.
+Its pupil types each command that
+.B rumb\-scan
+runs and the answer it gets,
+the raw data runs through the white of the eye,
+and signals carry each result to its tile.
+The eye looks at the tile it is reading.
+.PP
 After the scan rumb keeps following the pacman log and the journal,
 and checks again when a package transaction completes.
 .PP
@@ -82,19 +90,32 @@ Print the version.
 .TP
 .BR \-h ", " \-\-help
 Print a short help.
-.SH VIEWS AND KEYS
+.SH KEYS
 .TP
 .B 1\(en5
-Switch views: overview, updates, problems, packages, live.
+Show or hide the instruments, the subsystems with the eye, the updates, the problems and the live events.
 .TP
-.BR tab ", " shift\-tab
-Move between tiles.
+.BR tab ", " left ", " right
+Move the focus between the lists.
+.TP
+.BR up ", " down ", " PgUp ", " PgDn ", " Home ", " End
+Select a row.
 .TP
 .B enter
-Open the details of a tile.
+Open the selected row.
+.TP
+.BR / ", " f
+Filter the focused list.
+.TP
+.B j
+Show the journal of the selected problem.
+.TP
+.B e
+Export a Markdown report to
+.IR ~/rumb\-exports .
 .TP
 .B esc
-Go back.
+Close or clear.
 .TP
 .B r
 Scan again.

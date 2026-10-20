@@ -1,10 +1,15 @@
-# rumb
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.png">
+    <img src="docs/logo-light.png" alt="rumb" width="320">
+  </picture>
+</h1>
 
 Track software health. Spot trouble early.
 
 A terminal dashboard for Arch Linux and Omarchy: what the next update brings, and what is already failing. It only reads and never asks for root.
 
-<img src="docs/overview.png" alt="Overview" width="20%"> <img src="docs/updates.png" alt="Updates" width="20%"> <img src="docs/live.png" alt="Live view during an update" width="20%">
+<img src="docs/overview.png" alt="The eye reads the scan and signals each tile" width="20%"> <img src="docs/updates.png" alt="The eye follows the selected update" width="20%"> <img src="docs/live.png" alt="Live view during an update" width="20%">
 
 ## Omarchy
 

@@ -30,6 +30,11 @@ pub enum Event {
         stage: String,
         data: Value,
     },
+    Done {
+        label: String,
+        #[serde(default)]
+        value: Value,
+    },
     Result {},
     /// A line from the package manager's log while it changes the system,
     /// e.g. "upgraded hyprland (0.55.2-1 -> 0.56.0-1)".
@@ -44,7 +49,7 @@ pub enum Event {
 }
 
 pub enum Msg {
-    Event(Event),
+    Event(Event, String),
     Invalid,
     Eof { stderr: String },
 }
@@ -140,7 +145,7 @@ pub fn spawn_script(script: &Path, args: &[String]) -> io::Result<(Scan, Receive
                 continue;
             }
             let msg = match serde_json::from_str::<Event>(&line) {
-                Ok(event) => Msg::Event(event),
+                Ok(event) => Msg::Event(event, line),
                 Err(_) => Msg::Invalid,
             };
             if tx.send(msg).is_err() {
@@ -165,7 +170,7 @@ pub fn spawn_demo() -> Receiver<Msg> {
                 .unwrap_or(0);
             thread::sleep(Duration::from_millis(delay));
             let msg = match serde_json::from_str::<Event>(line) {
-                Ok(event) => Msg::Event(event),
+                Ok(event) => Msg::Event(event, line.to_string()),
                 Err(_) => Msg::Invalid,
             };
             if tx.send(msg).is_err() {

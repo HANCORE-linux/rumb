@@ -4,8 +4,6 @@ use ratatui::style::Color;
 /// single teal signal.
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
-    /// Light ink on a dark page.
-    pub dark: bool,
     pub page: Color,
     pub panel: Color,
     pub kpi: Color,
@@ -18,10 +16,9 @@ pub struct Palette {
     pub rule: Color,
     pub grid: Color,
     pub teal: Color,
-    pub teal_mid: Color,
-    pub teal_light: Color,
-    pub teal_fill: Color,
+    pub select: Color,
     pub alert: Color,
+    pub warn: Color,
 }
 
 const fn rgb(hex: u32) -> Color {
@@ -31,7 +28,6 @@ const fn rgb(hex: u32) -> Color {
 impl Palette {
     pub const fn paper() -> Self {
         Palette {
-            dark: false,
             page: rgb(0xe4e4df),
             panel: rgb(0xebebe6),
             kpi: rgb(0xdbe0da),
@@ -44,10 +40,9 @@ impl Palette {
             rule: rgb(0xb4b5af),
             grid: rgb(0xd3d4ce),
             teal: rgb(0x3a7778),
-            teal_mid: rgb(0x65a2a1),
-            teal_light: rgb(0xbde5e6),
-            teal_fill: rgb(0xb8c8c6),
+            select: rgb(0xc8c8c4),
             alert: rgb(0xa8463c),
+            warn: rgb(0x8a6d12),
         }
     }
 
@@ -55,7 +50,6 @@ impl Palette {
     /// pink highlight, olive and cream on near black.
     pub const fn labra() -> Self {
         Palette {
-            dark: true,
             page: rgb(0x040704),
             panel: rgb(0x0a0e0a),
             kpi: rgb(0x141814),
@@ -68,10 +62,9 @@ impl Palette {
             rule: rgb(0x3b403b),
             grid: rgb(0x1d201d),
             teal: rgb(0xe33d84),
-            teal_mid: rgb(0xd54a8e),
-            teal_light: rgb(0x2c111b),
-            teal_fill: rgb(0x4a5226),
+            select: rgb(0x1e211b),
             alert: rgb(0xee585d),
+            warn: rgb(0xd3dd2c),
         }
     }
 }

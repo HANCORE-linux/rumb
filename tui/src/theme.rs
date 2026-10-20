@@ -177,9 +177,14 @@ fn derive(c: &HashMap<String, String>) -> Option<Palette> {
     let dark = c.get("mode").is_none_or(|mode| mode != "light");
     let panel = if dark { mix(page, ink, 0.035) } else { mix(page, Color::Rgb(255, 255, 255), 0.35) };
     let ramp = |t: f64| mix(panel, ink, t);
-    let accent = legible(color("accent").or(color("blue")).unwrap_or(ink), panel, ink);
+    let theme_accent = color("accent").or(color("blue")).unwrap_or(ink);
+    let (red, yellow) = (color("red").unwrap_or(theme_accent), color("yellow").unwrap_or(theme_accent));
+    let signal = std::iter::once(theme_accent)
+        .chain(["magenta", "blue", "cyan", "green"].into_iter().filter_map(color))
+        .find(|candidate| apart(*candidate, red) && apart(*candidate, yellow))
+        .unwrap_or(theme_accent);
+    let accent = legible(signal, panel, ink);
     Some(Palette {
-        dark,
         page,
         panel,
         kpi: ramp(0.05),
@@ -192,10 +197,9 @@ fn derive(c: &HashMap<String, String>) -> Option<Palette> {
         rule: ramp(0.24),
         grid: ramp(0.095),
         teal: accent,
-        teal_mid: mix(accent, page, 0.1),
-        teal_light: mix(panel, accent, 0.2),
-        teal_fill: mix(panel, color("green").unwrap_or(accent), 0.45),
-        alert: legible(color("red").unwrap_or(accent), panel, ink),
+        select: mix(page, ink, 0.12),
+        alert: legible(red, panel, ink),
+        warn: legible(yellow, panel, ink),
     })
 }
 
@@ -215,6 +219,31 @@ fn luminance(color: Color) -> f64 {
         if s <= 0.03928 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
     };
     0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+}
+
+fn hue_saturation(color: Color) -> (f64, f64) {
+    let Color::Rgb(r, g, b) = color else { return (0.0, 0.0) };
+    let (r, g, b) = (f64::from(r) / 255.0, f64::from(g) / 255.0, f64::from(b) / 255.0);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let delta = max - min;
+    if delta == 0.0 {
+        return (0.0, 0.0);
+    }
+    let saturation = delta / (1.0 - (max + min - 1.0).abs());
+    let sector = if max == r {
+        ((g - b) / delta).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    (sector * 60.0, saturation)
+}
+
+fn apart(a: Color, b: Color) -> bool {
+    let ((hue_a, saturation_a), (hue_b, saturation_b)) = (hue_saturation(a), hue_saturation(b));
+    let distance = (hue_a - hue_b).abs() % 360.0;
+    saturation_a < 0.2 || saturation_b < 0.2 || distance.min(360.0 - distance) >= 20.0
 }
 
 fn contrast(a: Color, b: Color) -> f64 {
@@ -238,13 +267,15 @@ fn readable(color: Color, backgrounds: &[Color], target: f64, toward: Color) -> 
 }
 
 fn readable_text(mut pal: Palette) -> Palette {
+    pal.select = mix(pal.page, pal.ink, 0.12);
     let tiles = [pal.page, pal.panel, pal.kpi];
-    let rows = [pal.page, pal.panel, pal.kpi, pal.teal_light];
+    let rows = [pal.page, pal.panel, pal.kpi, pal.select];
     pal.faint = readable(pal.faint, &tiles, TEXT_CONTRAST, pal.ink);
-    pal.label = readable(pal.label, &rows, (worst_contrast(pal.faint, &tiles) * TEXT_STEP).max(TEXT_CONTRAST), pal.ink);
-    pal.ink2 = readable(pal.ink2, &rows, (worst_contrast(pal.label, &rows) * TEXT_STEP).max(TEXT_CONTRAST), pal.ink);
-    pal.teal = readable(pal.teal, &tiles, TEXT_CONTRAST, pal.ink);
-    pal.alert = readable(pal.alert, &tiles, TEXT_CONTRAST, pal.ink);
+    pal.label = readable(pal.label, &tiles, (worst_contrast(pal.faint, &tiles) * TEXT_STEP).max(TEXT_CONTRAST), pal.ink);
+    pal.ink2 = readable(pal.ink2, &tiles, (worst_contrast(pal.label, &tiles) * TEXT_STEP).max(TEXT_CONTRAST), pal.ink);
+    pal.teal = readable(pal.teal, &rows, TEXT_CONTRAST, pal.ink);
+    pal.alert = readable(pal.alert, &rows, TEXT_CONTRAST, pal.ink);
+    pal.warn = readable(pal.warn, &rows, TEXT_CONTRAST, pal.ink);
     let (white, black) = (Color::Rgb(255, 255, 255), Color::Rgb(0, 0, 0));
     let away = if contrast(white, pal.bar) >= contrast(black, pal.bar) { white } else { black };
     pal.bar_text = readable(pal.bar_text, &[pal.bar], TEXT_CONTRAST, away);
@@ -287,12 +318,31 @@ mod tests {
         for name in names() {
             let pal = readable_text(named(&name).unwrap());
             let tiles = [pal.page, pal.panel, pal.kpi];
-            let rows = [pal.page, pal.panel, pal.kpi, pal.teal_light];
-            let (faint, label, ink2) = (worst_contrast(pal.faint, &tiles), worst_contrast(pal.label, &rows), worst_contrast(pal.ink2, &rows));
-            for (role, value) in [("faint", faint), ("label", label), ("ink2", ink2), ("teal", worst_contrast(pal.teal, &tiles)), ("alert", worst_contrast(pal.alert, &tiles)), ("bar_text", contrast(pal.bar_text, pal.bar))] {
+            let rows = [pal.page, pal.panel, pal.kpi, pal.select];
+            let (faint, label, ink2) = (worst_contrast(pal.faint, &tiles), worst_contrast(pal.label, &tiles), worst_contrast(pal.ink2, &tiles));
+            for (role, value) in [("faint", faint), ("label", label), ("ink2", ink2), ("teal", worst_contrast(pal.teal, &rows)), ("alert", worst_contrast(pal.alert, &rows)), ("warn", worst_contrast(pal.warn, &rows)), ("ink on select", contrast(pal.ink, pal.select)), ("bar_text", contrast(pal.bar_text, pal.bar))] {
                 assert!(value >= TEXT_CONTRAST, "{name} {role} {value:.2}");
             }
             assert!(faint < label && label <= ink2, "{name}: {faint:.2} {label:.2} {ink2:.2}");
+        }
+    }
+
+    #[test]
+    fn problems_color_moves_away_from_red_and_yellow() {
+        let colors = |accent: &str| -> HashMap<String, String> {
+            [("background", "#232631"), ("foreground", "#e5d9d6"), ("accent", accent), ("red", "#cf8094"), ("yellow", "#ccc490"), ("magenta", "#c298d7")]
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect()
+        };
+        let shared = derive(&colors("#cf8094")).unwrap();
+        assert!(apart(shared.teal, shared.alert) && apart(shared.teal, shared.warn));
+        assert_eq!(shared.teal, legible(Color::Rgb(0xc2, 0x98, 0xd7), shared.panel, shared.ink));
+        let own = derive(&colors("#86bed3")).unwrap();
+        assert_eq!(own.teal, legible(Color::Rgb(0x86, 0xbe, 0xd3), own.panel, own.ink));
+        for name in ["labra", "banish", "catppuccin"] {
+            let theme = &bundled()[name];
+            assert_eq!(derive(theme).unwrap().teal, legible(hex(&theme["accent"]).unwrap(), derive(theme).unwrap().panel, derive(theme).unwrap().ink), "{name}");
         }
     }
 
