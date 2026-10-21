@@ -514,6 +514,9 @@ fn highlight(buf: &mut Buffer, area: Rect, bg: Color, brighten: bool, pal: &Pale
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             let cell = &mut buf[(x, y)];
+            if cell.fg == pal.page && cell.bg != pal.page {
+                continue;
+            }
             if cell.fg == pal.grid {
                 cell.set_fg(pal.rule);
             } else if brighten && (cell.fg == pal.label || cell.fg == pal.faint || cell.fg == pal.ink2) {
@@ -2356,6 +2359,12 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
         tint: rain.tint.map(|(kind, strength)| (if kind == 2 { pal.alert } else { pal.teal }, strength)),
     });
     scene.placements.push(Placement { rect: eye, picture: Picture::Eye(Box::new(spec)) });
+    if !app.pictures {
+        for (k, (line, color)) in [("this terminal shows no pictures", pal.label), ("foot and kitty show the eye", pal.faint)].into_iter().enumerate() {
+            let x = eye.x + eye.width.saturating_sub(line.chars().count() as u16) / 2;
+            text(buf, x, (eye.y + eye.height / 2).saturating_sub(1) + k as u16, line, Style::new().fg(color), eye.width);
+        }
+    }
 
     let mut masks: HashMap<(u16, u16), u8> = HashMap::new();
     let mut active: HashSet<(u16, u16)> = HashSet::new();

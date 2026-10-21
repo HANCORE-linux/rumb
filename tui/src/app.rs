@@ -119,7 +119,7 @@ pub struct JournalLine {
     #[serde(default)]
     pub day: String,
     pub ident: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::source::or_empty")]
     pub program: String,
     pub message: String,
 }
@@ -395,6 +395,7 @@ pub struct App {
     pub last_part: usize,
     pub updates_map: bool,
     pub map_fits: bool,
+    pub pictures: bool,
     pub follow: bool,
     pub status: Option<(String, bool, Instant)>,
     pub finished_at: Option<Instant>,
@@ -449,6 +450,7 @@ impl App {
             last_part: 0,
             updates_map: true,
             map_fits: false,
+            pictures: true,
             follow: true,
             status: None,
             finished_at: None,

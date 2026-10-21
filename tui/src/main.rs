@@ -322,6 +322,7 @@ fn tilde(path: &std::path::Path) -> String {
 fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf>, theme: &mut Theme, pictures: &mut Option<pictures::Pictures>) -> io::Result<bool> {
     let (mut child, mut rx) = start_source(options, script.as_ref())?;
     let mut app = App::new(options.demo, !options.no_anim, Instant::now());
+    app.pictures = pictures.is_some();
     let mut motion = Motion::new(!options.no_anim, Instant::now());
     let mut source_open = true;
     let mut rows = [10; 3];
@@ -1179,6 +1180,60 @@ mod tests {
         assert!(error.contains("updates"), "{error}");
         app.error = Some("Missing required command: checkupdates".into());
         assert!(screen(&app, 170, 50).iter().any(|row| row.contains("Missing required command: checkupdates")));
+    }
+
+    #[test]
+    fn journal_lines_without_a_program_still_load() {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        let line = json!({"time": "20:29:22", "day": "2026-10-21", "ident": "kernel", "program": null, "message": "virt/tdx: TDX not supported by the host platform"});
+        app.apply(source::Event::Stage { stage: "anatomy".into(), data: json!({"packages": 1, "explicit": 1, "orphans": 0, "cache_bytes": 0, "kernel_running": "7.2.8-10-omarchy", "journal": [line]}) }, now);
+        assert_eq!(app.error, None);
+        assert_eq!(app.anatomy.as_ref().map(|anatomy| anatomy.journal[0].program.as_str()), Some(""));
+        let live: source::Event = serde_json::from_str(r#"{"event": "journal", "time": "20:29:24", "ident": "kernel", "program": null, "message": "Bluetooth: hci0: Reading supported features failed (-16)"}"#).unwrap();
+        assert!(matches!(live, source::Event::Journal { ref program, .. } if program.is_empty()));
+    }
+
+    #[test]
+    fn a_selected_part_keeps_its_problem_badge() {
+        let pal = palette::Palette::paper();
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events() {
+            app.apply(event, now + Duration::from_millis(time));
+        }
+        app.enter_band();
+        let mut inside = 0;
+        for part in 0..app::Subsystem::ALL.len() {
+            app.part = Some(part);
+            let (buffer, _) = render(&app, 170, 50, now + Duration::from_secs(60));
+            for y in 0..50 {
+                for x in 2..168 {
+                    let cell = &buffer[(x, y)];
+                    if cell.fg != pal.page || cell.symbol() == " " {
+                        continue;
+                    }
+                    assert_ne!(cell.bg, pal.select, "part {part} at {x},{y}");
+                    if buffer[(x - 2, y)].bg == pal.select || buffer[(x + 2, y)].bg == pal.select {
+                        inside += 1;
+                    }
+                }
+            }
+        }
+        assert!(inside > 0);
+    }
+
+    #[test]
+    fn a_terminal_without_pictures_says_so_in_place_of_the_eye() {
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events() {
+            app.apply(event, now + Duration::from_millis(time));
+        }
+        let note = |app: &App| screen(app, 170, 50).iter().filter(|row| row.contains("this terminal shows no pictures") || row.contains("foot and kitty show the eye")).count();
+        assert_eq!(note(&app), 0);
+        app.pictures = false;
+        assert_eq!(note(&app), 2);
     }
 
     #[test]
