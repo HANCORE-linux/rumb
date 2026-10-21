@@ -1182,6 +1182,18 @@ mod tests {
     }
 
     #[test]
+    fn journal_lines_without_a_program_still_load() {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        let line = json!({"time": "20:29:22", "day": "2026-10-21", "ident": "kernel", "program": null, "message": "virt/tdx: TDX not supported by the host platform"});
+        app.apply(source::Event::Stage { stage: "anatomy".into(), data: json!({"packages": 1, "explicit": 1, "orphans": 0, "cache_bytes": 0, "kernel_running": "7.2.8-10-omarchy", "journal": [line]}) }, now);
+        assert_eq!(app.error, None);
+        assert_eq!(app.anatomy.as_ref().map(|anatomy| anatomy.journal[0].program.as_str()), Some(""));
+        let live: source::Event = serde_json::from_str(r#"{"event": "journal", "time": "20:29:24", "ident": "kernel", "program": null, "message": "Bluetooth: hci0: Reading supported features failed (-16)"}"#).unwrap();
+        assert!(matches!(live, source::Event::Journal { ref program, .. } if program.is_empty()));
+    }
+
+    #[test]
     fn a_later_start_moves_the_window_but_not_the_intro() {
         let now = Instant::now();
         let mut app = App::new(false, false, now);

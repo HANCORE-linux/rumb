@@ -670,7 +670,7 @@ journal_line='def s: if type == "string" then . else null end;
   | {time: ($at | strflocaltime("%H:%M:%S")),
      day: ($at | strflocaltime("%Y-%m-%d")),
      ident: (if (._TRANSPORT | s) == "kernel" then "kernel" else ((.SYSLOG_IDENTIFIER | s) // (._COMM | s) // "unknown") end),
-     program: ((((._EXE | s) // "") | split("/") | last) as $exe | if $exe != "" then $exe else ((._COMM | s) // "") end),
+     program: ((((._EXE | s) // "") | split("/") | last // "") as $exe | if $exe != "" then $exe else ((._COMM | s) // "") end),
      message: ((.MESSAGE | s) // "binary message")}'
 
 ((stream)) && collect_anatomy

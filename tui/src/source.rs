@@ -50,10 +50,14 @@ pub enum Event {
         #[serde(default)]
         day: String,
         ident: String,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "or_empty")]
         program: String,
         message: String,
     },
+}
+
+pub fn or_empty<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 pub enum Msg {

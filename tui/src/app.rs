@@ -119,7 +119,7 @@ pub struct JournalLine {
     #[serde(default)]
     pub day: String,
     pub ident: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::source::or_empty")]
     pub program: String,
     pub message: String,
 }
