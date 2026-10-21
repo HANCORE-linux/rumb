@@ -322,6 +322,7 @@ fn tilde(path: &std::path::Path) -> String {
 fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf>, theme: &mut Theme, pictures: &mut Option<pictures::Pictures>) -> io::Result<bool> {
     let (mut child, mut rx) = start_source(options, script.as_ref())?;
     let mut app = App::new(options.demo, !options.no_anim, Instant::now());
+    app.pictures = pictures.is_some();
     let mut motion = Motion::new(!options.no_anim, Instant::now());
     let mut source_open = true;
     let mut rows = [10; 3];
@@ -1220,6 +1221,19 @@ mod tests {
             }
         }
         assert!(inside > 0);
+    }
+
+    #[test]
+    fn a_terminal_without_pictures_says_so_in_place_of_the_eye() {
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events() {
+            app.apply(event, now + Duration::from_millis(time));
+        }
+        let note = |app: &App| screen(app, 170, 50).iter().filter(|row| row.contains("this terminal shows no pictures") || row.contains("foot and kitty show the eye")).count();
+        assert_eq!(note(&app), 0);
+        app.pictures = false;
+        assert_eq!(note(&app), 2);
     }
 
     #[test]
