@@ -19,7 +19,7 @@ Every release takes the same path, and each step waits for the maintainer's appr
 4. Open a pull request against `main`.
 5. Merge it once the maintainer approves and CI is green.
 6. Tag the merge commit `vX.Y.Z` (a lightweight tag, like the earlier ones). CI fails when the tag does not match the crate version.
-7. Create the GitHub release. The title is the bare version (`vX.Y.Z`). The notes are a "What's new" list that says what works now, phrased positively, without a verification section.
+7. Create the GitHub release. The title is the bare version (`vX.Y.Z`). The notes start with `## What's Changed`, group the changes under `### Features` and `### Bug Fixes` as bullets beginning with `**feat:**` or `**fix:**` and ending with the short commit hash, and close with `**Full Changelog**: https://github.com/HANCORE-linux/rumb/compare/vPREVIOUS...vX.Y.Z`. Add `### Documentation` with `**docs:**` bullets only when the release changes the documentation. Each bullet says what works now, phrased positively; there is no verification section.
 
 The Omarchy package lives in [omacom/omarchy-pkgs](https://github.com/omacom/omarchy-pkgs). The maintainer's account is vouched there, so a green package PR merges and publishes itself. Open or update one only on the maintainer's go.
 
