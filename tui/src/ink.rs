@@ -502,7 +502,6 @@ pub fn line_widths(cell_width: f32, cell_height: f32) -> (u32, u32) {
 pub struct Fiber {
     pub angle: f32,
     pub risk: u8,
-    pub fixes: bool,
 }
 
 #[derive(Debug, Default)]
@@ -901,7 +900,6 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
     pen.polyline(&collarette, ink(0.42), 0.8);
 
     let mut strokes: Vec<(Color, f32, PathBuilder)> = Vec::new();
-    let mut fixes: Vec<(f32, f32)> = Vec::new();
     for fiber in &spec.fibers {
         let (sin, cos) = (fiber.angle + spec.turn).sin_cos();
         let outer = ri * 0.97;
@@ -915,7 +913,6 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
             1 => (pal.warn, 1.8),
             _ => (pal.label, 1.2),
         };
-        let color = if fiber.fixes { pal.teal } else { color };
         let slot = match strokes.iter().position(|(owner, size, _)| *owner == color && *size == width) {
             Some(slot) => slot,
             None => {
@@ -925,15 +922,9 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
         };
         strokes[slot].2.move_to(ic.0 + cos * outer, ic.1 + sin * outer);
         strokes[slot].2.line_to(ic.0 + cos * inner, ic.1 + sin * inner);
-        if fiber.fixes {
-            fixes.push((ic.0 + cos * ri * 1.08, ic.1 + sin * ri * 1.08));
-        }
     }
     for (color, width, builder) in strokes {
         stroke_all(pen.pixmap, builder, sk(color, 0.95), width * unit, pen.mask.as_ref());
-    }
-    for (x, y) in fixes {
-        pen.disc(x, y, (ri / 50.0).clamp(1.2, 3.0) * unit, sk(pal.teal, 1.0));
     }
     if !spec.fibers.is_empty() && !spec.sectors.is_empty() {
         let mut ticks = PathBuilder::new();
@@ -1117,7 +1108,7 @@ impl EyeSpec {
     pub fn fingerprint(&self, hasher: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
         for fiber in &self.fibers {
-            (fiber.angle.to_bits(), fiber.risk, fiber.fixes).hash(hasher);
+            (fiber.angle.to_bits(), fiber.risk).hash(hasher);
         }
         self.sectors.iter().map(|angle| angle.to_bits()).collect::<Vec<_>>().hash(hasher);
         (self.gaze.0.to_bits(), self.gaze.1.to_bits(), self.typing, self.scroll.to_bits(), self.columns, self.turn.to_bits()).hash(hasher);

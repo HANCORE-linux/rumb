@@ -802,6 +802,23 @@ mod tests {
     }
 
     #[test]
+    fn the_iris_shows_only_risk_colours() {
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events().into_iter().filter(|(time, _)| *time <= 8_500) {
+            app.apply(event, now + Duration::from_millis(time));
+        }
+        assert!(app.problems.iter().any(|problem| problem.status == "possibly-fixed" && app.updates.iter().any(|update| update.name == problem.package)));
+        let pal = palette::Palette::paper();
+        let (_, scene) = render(&app, 170, 50, now + Duration::from_secs(60));
+        let eye = scene.placements.iter().find(|placement| matches!(placement.picture, page::Picture::Eye(_))).expect("the eye is drawn");
+        let pixmap = page::paint(&eye.picture, &pal, u32::from(eye.rect.width) * 10, u32::from(eye.rect.height) * 21, 21.0).expect("the eye paints");
+        let Color::Rgb(r, g, b) = pal.teal else { panic!("the accent is not rgb") };
+        let accent = pixmap.pixels().iter().map(|pixel| pixel.demultiply()).filter(|pixel| pixel.red().abs_diff(r) <= 30 && pixel.green().abs_diff(g) <= 30 && pixel.blue().abs_diff(b) <= 30).count();
+        assert_eq!(accent, 0);
+    }
+
+    #[test]
     fn the_header_names_the_running_version() {
         let now = Instant::now();
         let version = env!("CARGO_PKG_VERSION");
