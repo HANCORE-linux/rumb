@@ -502,7 +502,6 @@ pub fn line_widths(cell_width: f32, cell_height: f32) -> (u32, u32) {
 pub struct Fiber {
     pub angle: f32,
     pub risk: u8,
-    pub fixes: bool,
 }
 
 #[derive(Debug, Default)]
@@ -532,11 +531,12 @@ pub struct Rain {
     pub previous: u64,
     pub switch: f32,
     pub tint: Option<(Color, f32)>,
+    pub pupil: f32,
 }
 
 impl std::fmt::Debug for Rain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Rain({}, {}, {}, {}, {}, {:?})", self.clock.to_bits(), self.level.to_bits(), self.feed, self.previous, self.switch.to_bits(), self.tint.map(|(color, strength)| (color, strength.to_bits())))
+        write!(f, "Rain({}, {}, {}, {}, {}, {:?}, {})", self.clock.to_bits(), self.level.to_bits(), self.feed, self.previous, self.switch.to_bits(), self.tint.map(|(color, strength)| (color, strength.to_bits())), self.pupil.to_bits())
     }
 }
 
@@ -794,6 +794,7 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
     let ri = half_width * 0.54;
     let rp = ri * 0.52;
     let ic = (c.0 + spec.gaze.0 * half_width * 0.27, c.1 + spec.gaze.1 * half_width * 0.07);
+    let mut pupil_drops: Vec<(f32, f32, char, Color, f32)> = Vec::new();
     if let (Some(rain), Some(atlas)) = (&spec.rain, glyphs) {
         let (pitch_x, pitch_y) = (atlas.advance as f32 + (3.0 * unit).round(), (12.0 * unit).round().max(6.0));
         let circle = |bulge: f32, below: bool| {
@@ -837,7 +838,8 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
                 }
                 let baseline = top + (row as f32 + 1.0) * pitch_y;
                 let middle = (x + atlas.advance as f32 / 2.0, baseline - atlas.ascent as f32 / 2.0);
-                if depth(middle.0, middle.1) < -6.0 * unit || (middle.0 - ic.0).hypot(middle.1 - ic.1) < ri - 6.0 * unit {
+                let inner = rain.pupil > 0.0 && (middle.0 - ic.0).hypot(middle.1 - ic.1) < rp;
+                if depth(middle.0, middle.1) < -6.0 * unit || ((middle.0 - ic.0).hypot(middle.1 - ic.1) < ri - 6.0 * unit && !inner) {
                     continue;
                 }
                 let rise = (distance / 0.4).clamp(0.0, 1.0);
@@ -860,6 +862,10 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
                     Some((tint, strength)) => mix(pal.ink, tint, f64::from((strength * spark).clamp(0.0, 1.0))),
                     None => pal.ink,
                 };
+                if inner {
+                    pupil_drops.push((x, baseline, ch, tone, alpha * rain.pupil));
+                    continue;
+                }
                 type_line(&mut pixmap, atlas, x, baseline, &[(ch, sk(tone, alpha))], &clip);
             }
         }
@@ -894,7 +900,6 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
     pen.polyline(&collarette, ink(0.42), 0.8);
 
     let mut strokes: Vec<(Color, f32, PathBuilder)> = Vec::new();
-    let mut fixes: Vec<(f32, f32)> = Vec::new();
     for fiber in &spec.fibers {
         let (sin, cos) = (fiber.angle + spec.turn).sin_cos();
         let outer = ri * 0.97;
@@ -908,7 +913,6 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
             1 => (pal.warn, 1.8),
             _ => (pal.label, 1.2),
         };
-        let color = if fiber.fixes { pal.teal } else { color };
         let slot = match strokes.iter().position(|(owner, size, _)| *owner == color && *size == width) {
             Some(slot) => slot,
             None => {
@@ -918,15 +922,9 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
         };
         strokes[slot].2.move_to(ic.0 + cos * outer, ic.1 + sin * outer);
         strokes[slot].2.line_to(ic.0 + cos * inner, ic.1 + sin * inner);
-        if fiber.fixes {
-            fixes.push((ic.0 + cos * ri * 1.08, ic.1 + sin * ri * 1.08));
-        }
     }
     for (color, width, builder) in strokes {
         stroke_all(pen.pixmap, builder, sk(color, 0.95), width * unit, pen.mask.as_ref());
-    }
-    for (x, y) in fixes {
-        pen.disc(x, y, (ri / 50.0).clamp(1.2, 3.0) * unit, sk(pal.teal, 1.0));
     }
     if !spec.fibers.is_empty() && !spec.sectors.is_empty() {
         let mut ticks = PathBuilder::new();
@@ -946,6 +944,13 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
     pen.disc(ic.0, ic.1, rp, sk(pupil, 1.0));
     pen.mask = None;
     if let Some(atlas) = glyphs {
+        let clip = |px: f32, py: f32| (((rp - 2.0 * unit) - (px - ic.0).hypot(py - ic.1)) / (5.0 * unit)).clamp(0.0, 1.0);
+        for (x, baseline, ch, tone, alpha) in &pupil_drops {
+            type_line(pen.pixmap, atlas, *x, *baseline, &[(*ch, sk(if dark { *tone } else { pal.page }, *alpha))], &clip);
+        }
+    }
+    let calm = 1.0 - spec.rain.as_ref().map_or(0.0, |rain| rain.pupil);
+    if let Some(atlas) = glyphs.filter(|_| calm > 0.0) {
         let line_height = atlas.height as f32 - 1.0;
         let advance = atlas.advance as f32;
         let pad = (8.0 * unit).round();
@@ -964,7 +969,7 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
         let mut entries: Vec<(Glyphs, Option<usize>, Option<usize>)> = Vec::new();
         for (index, (head, tail, shown)) in spec.code.iter().enumerate() {
             let age = count - 1 - index;
-            let fade = if age == 0 { 1.0 } else { (0.82 - 0.12 * age as f32).max(0.26) };
+            let fade = if age == 0 { 1.0 } else { (0.82 - 0.12 * age as f32).max(0.26) } * calm;
             let mut chars: Vec<(char, SkColor)> = head.chars().map(|ch| (ch, sk(pal.ink2, fade))).collect();
             let split = (!tail.is_empty()).then_some(chars.len());
             if !tail.is_empty() {
@@ -1006,8 +1011,8 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
             for (k, (start, end)) in (slot..slot + used).rev().zip(spans.iter().copied()) {
                 let mut line: Vec<(char, SkColor)> = chars[start..end].to_vec();
                 match cursor {
-                    Some(at) if (start..end).contains(at) => line[at - start] = ('▌', sk(pal.ink, 1.0)),
-                    Some(at) if *at == chars.len() && end == chars.len() => line.push(('▌', sk(pal.ink, 1.0))),
+                    Some(at) if (start..end).contains(at) => line[at - start] = ('▌', sk(pal.ink, calm)),
+                    Some(at) if *at == chars.len() && end == chars.len() => line.push(('▌', sk(pal.ink, calm))),
                     _ => {}
                 }
                 placed.push((k, end - start, line));
@@ -1103,7 +1108,7 @@ impl EyeSpec {
     pub fn fingerprint(&self, hasher: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
         for fiber in &self.fibers {
-            (fiber.angle.to_bits(), fiber.risk, fiber.fixes).hash(hasher);
+            (fiber.angle.to_bits(), fiber.risk).hash(hasher);
         }
         self.sectors.iter().map(|angle| angle.to_bits()).collect::<Vec<_>>().hash(hasher);
         (self.gaze.0.to_bits(), self.gaze.1.to_bits(), self.typing, self.scroll.to_bits(), self.columns, self.turn.to_bits()).hash(hasher);

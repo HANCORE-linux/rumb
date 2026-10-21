@@ -53,6 +53,7 @@ pub struct Rain {
     pub previous: u64,
     pub switch: f32,
     pub tint: Option<(u8, f32)>,
+    pub pupil: f32,
 }
 
 type Spring = (Instant, (f32, f32), (f32, f32));
@@ -114,9 +115,12 @@ pub struct Motion {
     last_activity: Instant,
     omarchy: bool,
     attention: Option<(Instant, Target)>,
+    next_look: Option<Instant>,
+    looks: u32,
     last_step: Instant,
     clock: f32,
     level: f32,
+    pupil: f32,
     feed: (u64, Arc<Vec<char>>),
     before: (u64, Arc<Vec<char>>),
     feeds: u64,
@@ -229,9 +233,12 @@ impl Motion {
             last_activity: now,
             omarchy: false,
             attention: None,
+            next_look: None,
+            looks: 0,
             last_step: now,
             clock: 0.0,
             level: 0.2,
+            pupil: 0.0,
             feed: (0, empty.clone()),
             before: (0, empty),
             feeds: 0,
@@ -577,28 +584,44 @@ impl Motion {
             1.0
         } else if flying {
             0.7
-        } else if idle {
-            0.0
         } else {
             0.2
         };
         let dt = dt.clamp(0.0, 0.25);
         self.level += (goal - self.level) * (1.0 - (-dt / 0.6).exp());
-        if self.level < 0.004 && goal == 0.0 {
-            self.level = 0.0;
+        self.pupil += (f32::from(u8::from(idle)) - self.pupil) * (1.0 - (-dt / if idle { 0.5 } else { 0.25 }).exp());
+        if idle && self.pupil > 0.996 {
+            self.pupil = 1.0;
+        } else if !idle && self.pupil < 0.004 {
+            self.pupil = 0.0;
+        }
+        if !idle {
+            self.next_look = None;
+        } else if now >= *self.next_look.get_or_insert(now + ms(3000)) {
+            self.looks = self.looks.wrapping_add(1);
+            let seed = self.looks.wrapping_mul(13);
+            let mut targets: Vec<Target> = Vec::new();
+            if app.visible[0] {
+                targets.extend((0..6).map(Target::Tile));
+            }
+            if app.visible[1] {
+                targets.extend((0..Subsystem::ALL.len() as u8).map(Target::Part));
+            }
+            targets.extend(Pane::ALL.iter().filter(|pane| app.visible[pane.panel()]).map(|pane| Target::List(pane.index() as u8)));
+            if !targets.is_empty() {
+                self.attention = Some((now, targets[(chance(seed) * targets.len() as f32) as usize % targets.len()]));
+            }
+            self.next_look = Some(now + ms(2600 + (chance(seed + 1) * 1000.0) as u64));
         }
         self.clock += dt * (2.5 + 6.0 * self.level);
         while now >= self.turn.start + self.turn.length + self.turn.hold {
             let begin = self.turn.start + self.turn.length + self.turn.hold;
             let thinking = self.typing(begin) || self.open.is_some() || self.comets.iter().any(|comet| begin >= comet.start && begin <= comet.end());
-            let resting = now.saturating_duration_since(self.last_activity) > IDLE;
             self.turns = self.turns.wrapping_add(1);
             let seed = self.turns.wrapping_mul(7);
             self.side = if chance(seed + 1) < 0.8 { -self.side } else { self.side };
             let (amplitude, hold) = if thinking {
                 (0.16 + 0.30 * chance(seed + 2), 140 + (chance(seed + 3) * 380.0) as u64)
-            } else if resting {
-                (0.0, 1200)
             } else {
                 (0.02 + 0.04 * chance(seed + 2), 900 + (chance(seed + 3) * 1400.0) as u64)
             };
@@ -761,7 +784,7 @@ impl Motion {
                 }
             }
         }
-        Some(Rain { clock: self.clock, level: self.level, text: self.feed.1.clone(), before: self.before.1.clone(), feed: self.feed.0, previous: self.before.0, switch: self.switch, tint })
+        Some(Rain { clock: self.clock, level: self.level, text: self.feed.1.clone(), before: self.before.1.clone(), feed: self.feed.0, previous: self.before.0, switch: self.switch, tint, pupil: self.pupil })
     }
 
     pub fn moving(&self, now: Instant) -> bool {

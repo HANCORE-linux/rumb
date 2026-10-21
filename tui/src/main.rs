@@ -802,6 +802,61 @@ mod tests {
     }
 
     #[test]
+    fn the_iris_shows_only_risk_colours() {
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events().into_iter().filter(|(time, _)| *time <= 8_500) {
+            app.apply(event, now + Duration::from_millis(time));
+        }
+        assert!(app.problems.iter().any(|problem| problem.status == "possibly-fixed" && app.updates.iter().any(|update| update.name == problem.package)));
+        let pal = palette::Palette::paper();
+        let (_, scene) = render(&app, 170, 50, now + Duration::from_secs(60));
+        let eye = scene.placements.iter().find(|placement| matches!(placement.picture, page::Picture::Eye(_))).expect("the eye is drawn");
+        let pixmap = page::paint(&eye.picture, &pal, u32::from(eye.rect.width) * 10, u32::from(eye.rect.height) * 21, 21.0).expect("the eye paints");
+        let Color::Rgb(r, g, b) = pal.teal else { panic!("the accent is not rgb") };
+        let accent = pixmap.pixels().iter().map(|pixel| pixel.demultiply()).filter(|pixel| pixel.red().abs_diff(r) <= 30 && pixel.green().abs_diff(g) <= 30 && pixel.blue().abs_diff(b) <= 30).count();
+        assert_eq!(accent, 0);
+    }
+
+    #[test]
+    fn the_header_names_the_running_version() {
+        let now = Instant::now();
+        let version = env!("CARGO_PKG_VERSION");
+        let empty = App::new(true, false, now);
+        let header = screen(&empty, 170, 50)[0].clone();
+        assert!(header.contains(&format!("rumb {version}")) && !header.contains(&format!("rumb {version} ·")), "{header}");
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events() {
+            app.apply(event, now + Duration::from_millis(time));
+        }
+        let header = screen(&app, 170, 50)[0].clone();
+        assert!(header.contains(&format!("rumb {version} · machine")), "{header}");
+    }
+
+    #[test]
+    fn a_quiet_feed_keeps_the_eye_alive() {
+        let now = Instant::now();
+        let mut app = crowded_app(now);
+        let mut motion = Motion::new(true, now);
+        let start = source::Event::Start { last_upgrade: None, problems_since: "2026-10-21T20:00:00+02:00".into(), now: None, omarchy: false, last_upgraded: Vec::new() };
+        motion.push(start, r#"{"event":"start","problems_since":"2026-10-21T20:00:00+02:00"}"#, &mut app, now);
+        let mut looked = Vec::new();
+        for frame in 1..=30 * 24 {
+            let at = now + Duration::from_millis(frame * 1000 / 30);
+            motion.step(&mut app, at, 1.0 / 30.0);
+            if let Some(target) = motion.look(at)
+                && looked.last() != Some(&target)
+            {
+                looked.push(target);
+            }
+        }
+        let rain = motion.rain(now + Duration::from_secs(24)).expect("the white of the eye keeps its code");
+        assert!(rain.level > 0.1);
+        assert_eq!(rain.pupil, 1.0);
+        assert!(looked.len() >= 3, "the eye looked at {looked:?} in a quiet feed");
+    }
+
+    #[test]
     fn three_switches_the_updates_between_map_rows_and_hidden() {
         let now = Instant::now();
         let mut app = crowded_app(now);

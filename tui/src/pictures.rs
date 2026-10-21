@@ -37,6 +37,7 @@ pub struct Pictures {
 struct Slot {
     key: u64,
     next: Instant,
+    since: Instant,
     protocol: Protocol,
 }
 
@@ -103,26 +104,32 @@ impl Pictures {
         while let Ok(done) = self.done.try_recv() {
             self.pending.remove(&done.rect);
             if let Some(protocol) = done.protocol {
-                self.slots.insert(done.rect, Slot { key: done.key, next: now + done.cost.saturating_sub(FRAME), protocol });
+                self.slots.insert(done.rect, Slot { key: done.key, next: now + done.cost.saturating_sub(FRAME), since: now, protocol });
             }
         }
         let font = self.picker.font_size();
-        let mut shown = Vec::new();
-        for placement in scene.placements {
-            let rect = placement.rect;
-            let key = fingerprint(&placement.picture, generation);
-            let slot = self.slots.get(&rect);
-            let stale = slot.is_none_or(|slot| slot.key != key && now >= slot.next);
-            if stale && !self.pending.contains_key(&rect) && self.pending.len() < MAX_PENDING {
-                let (width, height) = (u32::from(rect.width) * u32::from(font.width), u32::from(rect.height) * u32::from(font.height));
-                let job = Job { rect, key, id: self.id(rect), width, height, cell_height: f32::from(font.height), palette: *palette, paint: painter(placement.picture) };
-                if self.jobs.send(job).is_ok() {
-                    self.pending.insert(rect, key);
-                }
+        let mut placements: Vec<(Rect, u64, Option<Picture>)> = scene.placements.into_iter().map(|placement| (placement.rect, fingerprint(&placement.picture, generation), Some(placement.picture))).collect();
+        let mut stale: Vec<usize> = (0..placements.len())
+            .filter(|&index| {
+                let (rect, key, _) = &placements[index];
+                self.slots.get(rect).is_none_or(|slot| slot.key != *key && now >= slot.next) && !self.pending.contains_key(rect)
+            })
+            .collect();
+        stale.sort_by_key(|&index| (!matches!(placements[index].2, Some(Picture::Eye(_))), self.slots.get(&placements[index].0).map(|slot| slot.since)));
+        for index in stale.into_iter().take(MAX_PENDING.saturating_sub(self.pending.len())) {
+            let (rect, key, picture) = &mut placements[index];
+            let Some(picture) = picture.take() else { continue };
+            let (width, height) = (u32::from(rect.width) * u32::from(font.width), u32::from(rect.height) * u32::from(font.height));
+            let job = Job { rect: *rect, key: *key, id: self.id(*rect), width, height, cell_height: f32::from(font.height), palette: *palette, paint: painter(picture) };
+            if self.jobs.send(job).is_ok() {
+                self.pending.insert(*rect, *key);
             }
-            if let Some(slot) = self.slots.get(&rect) {
-                frame.render_widget(Image::new(&slot.protocol), rect);
-                shown.push(rect);
+        }
+        let mut shown = Vec::new();
+        for (rect, _, _) in &placements {
+            if let Some(slot) = self.slots.get(rect) {
+                frame.render_widget(Image::new(&slot.protocol), *rect);
+                shown.push(*rect);
             }
         }
         self.slots.retain(|rect, _| shown.contains(rect));
@@ -248,5 +255,55 @@ mod tests {
         assert!(sent[&icon].iter().chain(&sent[&moved]).all(|id| *id == sent[&icon][0]));
         assert_ne!(sent[&eye][0], sent[&icon][0]);
         assert_eq!(pictures.ids.len() + pictures.free.len(), 2);
+    }
+
+    #[test]
+    fn busy_icons_do_not_starve_the_eye() {
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let mut pictures = Pictures::start(picker);
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        let icons: Vec<Rect> = (0..4).map(|k| Rect::new(1, 1 + 2 * k, 8, 2)).collect();
+        let eye = Rect::new(20, 1, 30, 8);
+        let pal = Palette::labra();
+        let started = Instant::now();
+        let mut seen = Vec::new();
+        for step in 0..25u64 {
+            let scene = Scene { placements: icons.iter().chain([&eye]).map(|&rect| Placement { rect, picture: specimen() }).collect(), ..Scene::default() };
+            terminal.draw(|frame| pictures.draw(frame, scene, &pal, step, started + Duration::from_secs(step), |_| Box::new(|width: u32, height: u32, _: f32| Pixmap::new(width, height)))).unwrap();
+            if let Some(slot) = pictures.slots.get(&eye)
+                && seen.last() != Some(&slot.key)
+            {
+                seen.push(slot.key);
+            }
+            thread::sleep(Duration::from_millis(40));
+        }
+        assert!(seen.len() >= 4, "the eye was redrawn {} times in 25 busy frames", seen.len());
+    }
+
+    #[test]
+    fn the_eye_keeps_its_frame_rate_while_icons_glow() {
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let mut pictures = Pictures::start(picker);
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        let icons: Vec<Rect> = (0..7).map(|k| Rect::new(1, 1 + 2 * k, 8, 2)).collect();
+        let eye = Rect::new(20, 1, 30, 8);
+        let pal = Palette::labra();
+        let started = Instant::now();
+        let mut seen = Vec::new();
+        for step in 0..25u64 {
+            let mut placements: Vec<Placement> = icons.iter().map(|&rect| Placement { rect, picture: specimen() }).collect();
+            placements.push(Placement { rect: eye, picture: Picture::Eye(Box::default()) });
+            let scene = Scene { placements, ..Scene::default() };
+            terminal.draw(|frame| pictures.draw(frame, scene, &pal, step, started + Duration::from_secs(step), |_| Box::new(|width: u32, height: u32, _: f32| Pixmap::new(width, height)))).unwrap();
+            if let Some(slot) = pictures.slots.get(&eye)
+                && seen.last() != Some(&slot.key)
+            {
+                seen.push(slot.key);
+            }
+            thread::sleep(Duration::from_millis(40));
+        }
+        assert!(seen.len() >= 20, "the eye was redrawn {} times in 25 frames with seven glowing icons", seen.len());
     }
 }
