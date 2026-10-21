@@ -115,7 +115,7 @@ impl Pictures {
                 self.slots.get(rect).is_none_or(|slot| slot.key != *key && now >= slot.next) && !self.pending.contains_key(rect)
             })
             .collect();
-        stale.sort_by_key(|&index| self.slots.get(&placements[index].0).map(|slot| slot.since));
+        stale.sort_by_key(|&index| (!matches!(placements[index].2, Some(Picture::Eye(_))), self.slots.get(&placements[index].0).map(|slot| slot.since)));
         for index in stale.into_iter().take(MAX_PENDING.saturating_sub(self.pending.len())) {
             let (rect, key, picture) = &mut placements[index];
             let Some(picture) = picture.take() else { continue };
@@ -279,5 +279,31 @@ mod tests {
             thread::sleep(Duration::from_millis(40));
         }
         assert!(seen.len() >= 4, "the eye was redrawn {} times in 25 busy frames", seen.len());
+    }
+
+    #[test]
+    fn the_eye_keeps_its_frame_rate_while_icons_glow() {
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let mut pictures = Pictures::start(picker);
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        let icons: Vec<Rect> = (0..7).map(|k| Rect::new(1, 1 + 2 * k, 8, 2)).collect();
+        let eye = Rect::new(20, 1, 30, 8);
+        let pal = Palette::labra();
+        let started = Instant::now();
+        let mut seen = Vec::new();
+        for step in 0..25u64 {
+            let mut placements: Vec<Placement> = icons.iter().map(|&rect| Placement { rect, picture: specimen() }).collect();
+            placements.push(Placement { rect: eye, picture: Picture::Eye(Box::default()) });
+            let scene = Scene { placements, ..Scene::default() };
+            terminal.draw(|frame| pictures.draw(frame, scene, &pal, step, started + Duration::from_secs(step), |_| Box::new(|width: u32, height: u32, _: f32| Pixmap::new(width, height)))).unwrap();
+            if let Some(slot) = pictures.slots.get(&eye)
+                && seen.last() != Some(&slot.key)
+            {
+                seen.push(slot.key);
+            }
+            thread::sleep(Duration::from_millis(40));
+        }
+        assert!(seen.len() >= 20, "the eye was redrawn {} times in 25 frames with seven glowing icons", seen.len());
     }
 }
