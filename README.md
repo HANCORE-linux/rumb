@@ -33,4 +33,9 @@ sudo make uninstall                        # uninstall
 
 Run `rumb`. The manual is `man rumb`.
 
+## Contributing
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) explains how to build rumb, run the checks and open a pull request.
+- Design changes are not accepted, only proposals: open an issue with before/after screenshots.
+
 [MIT](LICENSE)
