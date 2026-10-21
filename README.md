@@ -33,6 +33,15 @@ sudo make uninstall                        # uninstall
 
 Run `rumb`. The manual is `man rumb`.
 
+## Terminals
+
+rumb draws the eye, the icons and the graphs as images.
+
+- foot and kitty are supported.
+- Ghostty works but spends a lot of CPU on the images, so it is not recommended.
+- Alacritty cannot show images, so the eye and the icons stay empty. It is not supported.
+- Other terminals are untested.
+
 ## Contributing
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) explains how to build rumb, run the checks and open a pull request.
