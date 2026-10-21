@@ -48,9 +48,10 @@ Verify a change on the real binary as well: `rumb --demo`, or a recorded stream 
 
 ## Design
 
-The look of rumb is the maintainer's. **Do not change the design without asking first.** This covers the layout, colours, text on screen, the pictures, the eye and its motion.
+The look of rumb is the maintainer's. **Design changes are not allowed, only proposals.** This covers the layout, colours, text on screen, the pictures, the eye and its motion.
 
-- Propose a design change as before/after pictures rendered from the real program. Mockups live in a scratch copy, never in product code, until the maintainer approves. Keep them out of the repository (`visualizations/` is ignored by git).
+- Propose a design change as before/after pictures rendered from the real program. Mockups live in a scratch copy, never in product code. Keep them out of the repository (`visualizations/` is ignored by git).
+- Only a proposal the maintainer has approved goes into the code, exactly as approved.
 - The maintainer judges how it looks; passing tests are not that verdict.
 - Every text on screen is data, a legend or a key hint. No filler.
 - A value that is not known yet stays empty. No guessed or placeholder values.

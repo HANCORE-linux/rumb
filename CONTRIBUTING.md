@@ -25,7 +25,7 @@ tui/target/release/rumb --demo   # plays the bundled demo data
 
 ## Design
 
-**Ask before you change the design.** Layout, colours, text on screen, the pictures and the eye are decided by the maintainer. Open an issue or a draft pull request with before/after screenshots first, and build it once the direction is agreed.
+**Design changes are not accepted, only proposals.** Layout, colours, text on screen, the pictures and the eye are decided by the maintainer. To propose a change, open an issue with before/after screenshots.
 
 The screen follows these rules:
 
