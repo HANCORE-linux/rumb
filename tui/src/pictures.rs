@@ -8,8 +8,9 @@ use image::{DynamicImage, RgbaImage};
 use ratatui::Frame;
 use ratatui::layout::{Rect, Size};
 use ratatui_image::picker::cap_parser::QueryStdioOptions;
-use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::picker::{Capability, Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
+use ratatui_image::protocol::kitty::Kitty;
 use ratatui_image::protocol::sixel::Sixel;
 use ratatui_image::{Image, Resize};
 use tiny_skia::Pixmap;
@@ -27,6 +28,8 @@ pub struct Pictures {
     picker: Picker,
     slots: HashMap<Rect, Slot>,
     pending: HashMap<Rect, u64>,
+    ids: HashMap<Rect, u32>,
+    free: Vec<u32>,
     jobs: Sender<Job>,
     done: Receiver<Done>,
 }
@@ -40,6 +43,7 @@ struct Slot {
 struct Job {
     rect: Rect,
     key: u64,
+    id: u32,
     width: u32,
     height: u32,
     cell_height: f32,
@@ -60,6 +64,10 @@ impl Pictures {
         if picker.protocol_type() == ProtocolType::Halfblocks {
             return None;
         }
+        Some(Self::start(picker))
+    }
+
+    fn start(picker: Picker) -> Self {
         let (jobs, inbox) = mpsc::channel::<Job>();
         let (outbox, done) = mpsc::channel();
         let worker = picker.clone();
@@ -75,7 +83,7 @@ impl Pictures {
                         };
                         Some(sixel(encoder, &pixmap, job.rect))
                     } else {
-                        encode(&worker, &pixmap, job.rect)
+                        encode(&worker, &pixmap, job.rect, job.id)
                     }
                 });
                 if outbox.send(Done { rect: job.rect, key: job.key, cost: started.elapsed(), protocol }).is_err() {
@@ -83,7 +91,7 @@ impl Pictures {
                 }
             }
         });
-        Some(Pictures { picker, slots: HashMap::new(), pending: HashMap::new(), jobs, done })
+        Pictures { picker, slots: HashMap::new(), pending: HashMap::new(), ids: HashMap::new(), free: Vec::new(), jobs, done }
     }
 
     pub fn cell(&self) -> (u16, u16) {
@@ -107,7 +115,7 @@ impl Pictures {
             let stale = slot.is_none_or(|slot| slot.key != key && now >= slot.next);
             if stale && !self.pending.contains_key(&rect) && self.pending.len() < MAX_PENDING {
                 let (width, height) = (u32::from(rect.width) * u32::from(font.width), u32::from(rect.height) * u32::from(font.height));
-                let job = Job { rect, key, width, height, cell_height: f32::from(font.height), palette: *palette, paint: painter(placement.picture) };
+                let job = Job { rect, key, id: self.id(rect), width, height, cell_height: f32::from(font.height), palette: *palette, paint: painter(placement.picture) };
                 if self.jobs.send(job).is_ok() {
                     self.pending.insert(rect, key);
                 }
@@ -118,10 +126,23 @@ impl Pictures {
             }
         }
         self.slots.retain(|rect, _| shown.contains(rect));
+        let (pending, free) = (&self.pending, &mut self.free);
+        self.ids.retain(|rect, id| {
+            let keep = shown.contains(rect) || pending.contains_key(rect);
+            if !keep {
+                free.push(*id);
+            }
+            keep
+        });
+    }
+
+    fn id(&mut self, rect: Rect) -> u32 {
+        let next = (std::process::id() << 8) + (self.ids.len() + self.free.len()) as u32;
+        *self.ids.entry(rect).or_insert_with(|| self.free.pop().unwrap_or(next))
     }
 }
 
-fn encode(picker: &Picker, pixmap: &Pixmap, rect: Rect) -> Option<Protocol> {
+fn encode(picker: &Picker, pixmap: &Pixmap, rect: Rect, id: u32) -> Option<Protocol> {
     let pixels = pixmap
         .pixels()
         .iter()
@@ -130,8 +151,13 @@ fn encode(picker: &Picker, pixmap: &Pixmap, rect: Rect) -> Option<Protocol> {
             [color.red(), color.green(), color.blue(), color.alpha()]
         })
         .collect();
-    let image = RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixels)?;
-    picker.new_protocol(DynamicImage::ImageRgba8(image), Size::new(rect.width, rect.height), Resize::Fit(None)).ok()
+    let image = DynamicImage::ImageRgba8(RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixels)?);
+    let size = Size::new(rect.width, rect.height);
+    if picker.protocol_type() == ProtocolType::Kitty {
+        let compress = picker.capabilities().contains(&Capability::KittyCompression);
+        return Kitty::new(image, size, id, picker.tmux_detected(), compress).ok().map(Protocol::Kitty);
+    }
+    picker.new_protocol(image, size, Resize::Fit(None)).ok()
 }
 
 fn sixel(encoder: &mut Encoder, pixmap: &Pixmap, rect: Rect) -> Protocol {
@@ -169,4 +195,58 @@ fn fingerprint(picture: &Picture, generation: u64) -> u64 {
         }
     }
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use crate::app::Subsystem;
+    use crate::page::Placement;
+
+    fn specimen() -> Picture {
+        Picture::Specimen { subsystem: Subsystem::Kernel, signal: false, glow: None, aim: 0.0 }
+    }
+
+    #[test]
+    fn kitty_pictures_reuse_their_image_ids() {
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let mut pictures = Pictures::start(picker);
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        let (eye, icon, moved) = (Rect::new(1, 1, 12, 4), Rect::new(20, 1, 8, 3), Rect::new(20, 5, 8, 3));
+        let pal = Palette::labra();
+        let started = Instant::now();
+        let mut sent: HashMap<Rect, Vec<u32>> = HashMap::new();
+        for step in 0..9u64 {
+            let rects = match step {
+                0..3 => vec![eye, icon],
+                3..6 => vec![eye],
+                _ => vec![eye, moved],
+            };
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let scene = Scene { placements: rects.iter().map(|&rect| Placement { rect, picture: specimen() }).collect(), ..Scene::default() };
+                terminal.draw(|frame| pictures.draw(frame, scene, &pal, step, started + Duration::from_secs(step), |_| Box::new(|width: u32, height: u32, _: f32| Pixmap::new(width, height)))).unwrap();
+                for &rect in &rects {
+                    let symbol = terminal.backend().buffer()[(rect.x, rect.y)].symbol();
+                    sent.entry(rect).or_default().extend(symbol.split("q=2,i=").skip(1).filter_map(|rest| rest.split(',').next()?.parse::<u32>().ok()));
+                }
+                let key = fingerprint(&specimen(), step);
+                if rects.iter().all(|rect| pictures.slots.get(rect).is_some_and(|slot| slot.key == key)) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "the pictures of step {step} were not drawn");
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+        assert_eq!(sent[&eye].len(), 9);
+        assert!(sent[&eye].iter().all(|id| *id == sent[&eye][0]));
+        assert_eq!((sent[&icon].len(), sent[&moved].len()), (3, 3));
+        assert!(sent[&icon].iter().chain(&sent[&moved]).all(|id| *id == sent[&icon][0]));
+        assert_ne!(sent[&eye][0], sent[&icon][0]);
+        assert_eq!(pictures.ids.len() + pictures.free.len(), 2);
+    }
 }
