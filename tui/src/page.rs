@@ -514,6 +514,9 @@ fn highlight(buf: &mut Buffer, area: Rect, bg: Color, brighten: bool, pal: &Pale
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             let cell = &mut buf[(x, y)];
+            if cell.fg == pal.page && cell.bg != pal.page {
+                continue;
+            }
             if cell.fg == pal.grid {
                 cell.set_fg(pal.rule);
             } else if brighten && (cell.fg == pal.label || cell.fg == pal.faint || cell.fg == pal.ink2) {

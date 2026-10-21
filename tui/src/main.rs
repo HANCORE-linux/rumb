@@ -1194,6 +1194,35 @@ mod tests {
     }
 
     #[test]
+    fn a_selected_part_keeps_its_problem_badge() {
+        let pal = palette::Palette::paper();
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events() {
+            app.apply(event, now + Duration::from_millis(time));
+        }
+        app.enter_band();
+        let mut inside = 0;
+        for part in 0..app::Subsystem::ALL.len() {
+            app.part = Some(part);
+            let (buffer, _) = render(&app, 170, 50, now + Duration::from_secs(60));
+            for y in 0..50 {
+                for x in 2..168 {
+                    let cell = &buffer[(x, y)];
+                    if cell.fg != pal.page || cell.symbol() == " " {
+                        continue;
+                    }
+                    assert_ne!(cell.bg, pal.select, "part {part} at {x},{y}");
+                    if buffer[(x - 2, y)].bg == pal.select || buffer[(x + 2, y)].bg == pal.select {
+                        inside += 1;
+                    }
+                }
+            }
+        }
+        assert!(inside > 0);
+    }
+
+    #[test]
     fn a_later_start_moves_the_window_but_not_the_intro() {
         let now = Instant::now();
         let mut app = App::new(false, false, now);
