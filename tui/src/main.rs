@@ -802,6 +802,21 @@ mod tests {
     }
 
     #[test]
+    fn the_header_names_the_running_version() {
+        let now = Instant::now();
+        let version = env!("CARGO_PKG_VERSION");
+        let empty = App::new(true, false, now);
+        let header = screen(&empty, 170, 50)[0].clone();
+        assert!(header.contains(&format!("rumb {version}")) && !header.contains(&format!("rumb {version} ·")), "{header}");
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events() {
+            app.apply(event, now + Duration::from_millis(time));
+        }
+        let header = screen(&app, 170, 50)[0].clone();
+        assert!(header.contains(&format!("rumb {version} · machine")), "{header}");
+    }
+
+    #[test]
     fn a_quiet_feed_keeps_the_eye_alive() {
         let now = Instant::now();
         let mut app = crowded_app(now);

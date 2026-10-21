@@ -91,13 +91,15 @@ pub fn draw(frame: &mut Frame, app: &App, motion: &Motion, pal: &Palette, now: I
 }
 
 fn draw_header(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant) {
-    let mut left = vec![Span::styled("rumb", Style::new().fg(pal.ink).add_modifier(Modifier::BOLD))];
+    let mut left = vec![Span::styled("rumb", Style::new().fg(pal.ink).add_modifier(Modifier::BOLD)), Span::styled(format!(" {}", env!("CARGO_PKG_VERSION")), Style::new().fg(pal.label))];
     if let Some(anatomy) = &app.anatomy {
         let omarchy = if anatomy.omarchy.is_empty() { String::new() } else { format!("Omarchy {}", anatomy.omarchy) };
         let kernel = if anatomy.kernel_running.is_empty() { String::new() } else { format!("kernel {}", anatomy.kernel_running) };
         let parts = if app.visible[1] { vec![anatomy.hostname.clone(), anatomy.os.clone(), omarchy] } else { vec![anatomy.hostname.clone(), anatomy.os.clone(), omarchy, anatomy.desktop.clone(), kernel] };
         let system: Vec<String> = parts.into_iter().filter(|part| !part.is_empty()).collect();
-        left.push(Span::styled(format!("  {}", system.join(" · ")), Style::new().fg(pal.label)));
+        if !system.is_empty() {
+            left.push(Span::styled(format!(" · {}", system.join(" · ")), Style::new().fg(pal.label)));
+        }
     }
     if app.demo {
         left.push(Span::styled("  demo data", Style::new().fg(pal.warn)));
