@@ -47,7 +47,11 @@ pub enum Event {
     },
     Journal {
         time: String,
+        #[serde(default)]
+        day: String,
         ident: String,
+        #[serde(default)]
+        program: String,
         message: String,
     },
 }

@@ -149,9 +149,9 @@ add_update() {
   kind=$(bump_kind "$old" "$new")
   if is_core "$name"; then
     case $kind in
-      epoch|major|minor) risk=high; reason="core package, $kind version jump" ;;
-      rebuild) risk=low; reason="core package, rebuild" ;;
-      *) risk=medium; reason="core package" ;;
+      epoch|major|minor) risk=high; reason="critical package, $kind version jump" ;;
+      rebuild) risk=low; reason="critical package, rebuild" ;;
+      *) risk=medium; reason="critical package" ;;
     esac
   else
     case $kind in
@@ -181,7 +181,7 @@ crash_details() {
   read -r pid epoch < <(jq -r --arg exe "$exe" --argjson since "$since_epoch" \
     '[.[]? | select(.exe == $exe and .time / 1000000 >= $since)] | max_by(.time) // empty | "\(.pid) \(.time / 1000000 | floor)"' "$tmp/cores.json" 2>/dev/null)
   [[ $pid =~ ^[0-9]+$ ]] || return 0
-  crash_last=$(LC_ALL=C date -d "@$epoch" '+%a %-d %b %H:%M' 2>/dev/null)
+  crash_last=$(LC_ALL=C date -d "@$epoch" '+%m-%d %H:%M' 2>/dev/null)
   info=$(LC_ALL=C timeout 5 coredumpctl info "$pid" --no-pager 2>/dev/null) || true
   crash_signal=$(sed -n 's/^ *Signal: [0-9]* (\([A-Z0-9]*\)).*/SIG\1/p' <<<"$info" | head -n 1)
   crash_frames=$(awk '
@@ -522,7 +522,7 @@ collect_problems() {
 collect_problems
 
 collect_anatomy() {
-  local os desktop omarchy="" kernel_running kernel_pkg kernel_installed="" reboot_pending=false cache_dir cache_bytes=0 cache_freeable paccache_out paccache_bytes foreign day today upgrades_json
+  local os desktop omarchy="" kernel_running kernel_pkg="" kernel_installed="" reboot_pending=false cache_dir cache_bytes=0 cache_freeable paccache_out paccache_bytes foreign day today upgrades_json
   local uptime_seconds nvidia_loaded="" nvidia_installed="" hyprland_running="" hyprland_installed="" hyprland_bin packages explicit orphans
   local -a names upgrades=()
   local -A per_day=()
@@ -546,8 +546,8 @@ collect_anatomy() {
   uptime_seconds=${uptime_seconds%.*}
   [[ $uptime_seconds =~ ^[0-9]+$ ]] || uptime_seconds=null
   done_step anatomy "reading the running kernel" "$(jq -cn --arg running "$kernel_running" --arg installed "$kernel_installed" \
-    --argjson uptime "$uptime_seconds" --argjson reboot "$reboot_pending" \
-    '{running: $running, installed: $installed, uptime_seconds: $uptime, reboot_pending: $reboot}')"
+    --arg package "$kernel_pkg" --argjson uptime "$uptime_seconds" --argjson reboot "$reboot_pending" \
+    '{running: $running, installed: $installed, package: $package, uptime_seconds: $uptime, reboot_pending: $reboot}')"
 
   if [[ -r /sys/module/nvidia/version ]]; then
     step anatomy "reading the loaded nvidia module"
@@ -641,7 +641,7 @@ collect_anatomy() {
   upgrades_json=$(printf '%s\n' "${upgrades[@]}" | jq -sc .)
 
   journalctl -p err --since "@$since_epoch" -n 50 -o json \
-    --output-fields=SYSLOG_IDENTIFIER,_COMM,MESSAGE,_TRANSPORT -q --no-pager 2>/dev/null |
+    --output-fields=SYSLOG_IDENTIFIER,_COMM,_EXE,MESSAGE,_TRANSPORT -q --no-pager 2>/dev/null |
     jq -c "$journal_line" 2>/dev/null | jq -sc . >"$tmp/journal_lines.json"
   [[ -s $tmp/journal_lines.json ]] || echo '[]' >"$tmp/journal_lines.json"
 
@@ -649,7 +649,7 @@ collect_anatomy() {
   jq -Rn '[inputs | split("\u001f") | {(.[0]): {depends: (.[1] | tonumber), required_by: (.[2] | tonumber), depends_on: (.[3] // "" | split(",") | map(select(. != ""))), required_names: (.[4] // "" | split(",") | map(select(. != "")))}}] | add // {}' \
     <"$tmp/deps.tsv" >"$tmp/deps.json"
   emit --arg hostname "$(uname -n)" --arg os "$os" --arg desktop "$desktop" --arg omarchy "$omarchy" \
-    --arg kernel_running "$kernel_running" --arg kernel_installed "$kernel_installed" \
+    --arg kernel_running "$kernel_running" --arg kernel_installed "$kernel_installed" --arg kernel_package "$kernel_pkg" \
     --argjson reboot_pending "$reboot_pending" --argjson cache_bytes "$cache_bytes" --argjson cache_freeable "$cache_freeable" \
     --argjson packages "$packages" --argjson explicit "$explicit" \
     --argjson orphans "$orphans" --arg orphan_names "$orphan_names" --argjson upgrades_per_day "$upgrades_json" \
@@ -658,7 +658,7 @@ collect_anatomy() {
     --slurpfile repos "$tmp/repos.json" --slurpfile deps "$tmp/deps.json" --slurpfile journal "$tmp/journal_lines.json" \
     '{event: "stage", stage: "anatomy", data: {hostname: $hostname, os: $os, desktop: $desktop, omarchy: $omarchy,
       packages: $packages, explicit: $explicit, orphans: $orphans, orphan_names: ($orphan_names | split("\n") | map(select(length > 0)) | .[:40]), cache_bytes: $cache_bytes, cache_freeable_bytes: $cache_freeable,
-      kernel_running: $kernel_running, kernel_installed: $kernel_installed, reboot_pending: $reboot_pending,
+      kernel_running: $kernel_running, kernel_installed: $kernel_installed, kernel_package: $kernel_package, reboot_pending: $reboot_pending,
       uptime_seconds: $uptime_seconds, nvidia_loaded: $nvidia_loaded, nvidia_installed: $nvidia_installed,
       hyprland_running: $hyprland_running, hyprland_installed: $hyprland_installed,
       upgrades_per_day: $upgrades_per_day, repos: $repos[0], deps: $deps[0], journal: $journal[0]}}'
@@ -666,8 +666,11 @@ collect_anatomy() {
 
 journal_line='def s: if type == "string" then . else null end;
   select((.SYSLOG_IDENTIFIER | s) != "systemd-coredump")
-  | {time: (.__REALTIME_TIMESTAMP | tonumber / 1000000 | floor | strflocaltime("%H:%M:%S")),
+  | (.__REALTIME_TIMESTAMP | tonumber / 1000000 | floor) as $at
+  | {time: ($at | strflocaltime("%H:%M:%S")),
+     day: ($at | strflocaltime("%Y-%m-%d")),
      ident: (if (._TRANSPORT | s) == "kernel" then "kernel" else ((.SYSLOG_IDENTIFIER | s) // (._COMM | s) // "unknown") end),
+     program: ((((._EXE | s) // "") | split("/") | last) as $exe | if $exe != "" then $exe else ((._COMM | s) // "") end),
      message: ((.MESSAGE | s) // "binary message")}'
 
 ((stream)) && collect_anatomy
@@ -712,10 +715,13 @@ collect_news() {
 }
 
 omarchy_notes_filter='def ver: ltrimstr("v") | split(".") | map(try tonumber catch -1);
-  def notes: (.tag_name | ltrimstr("v")) as $tag | reduce ((.body // "") | gsub("\r"; "") | split("\n")[]) as $line ({tag: $tag, section: "", counts: {}, fixes: []};
+  def notes: (.tag_name | ltrimstr("v")) as $tag | reduce ((.body // "") | gsub("\r"; "") | split("\n")[]) as $line ({tag: $tag, section: "", counts: {}, fixes: [], security: []};
     if ($line | startswith("## ")) then .section = ($line[3:] | ascii_downcase)
     elif ($line | startswith("- ")) and .section != "" then
-      .counts[.section] += 1 | if .section == "fixes" then .fixes += [$line[2:] | sub(" by @.*$"; "")] else . end
+      .counts[.section] += 1
+      | if .section == "fixes" then .fixes += [$line[2:] | sub(" by @.*$"; "")]
+        elif .section == "security" then .security += [$line[2:] | sub(" by @.*$"; "")]
+        else . end
     else . end);
   [.[]? | select((.draft | not) and (.prerelease | not) and (.tag_name | type) == "string")
     | select((.tag_name | ver) > ($old | ver) and (.tag_name | ver) <= ($new | ver))]
@@ -725,7 +731,7 @@ omarchy_notes_filter='def ver: ltrimstr("v") | split(".") | map(try tonumber cat
        fixes: (map(.counts.fixes // 0) | add), improvements: (map(.counts.improvements // 0) | add),
        security: (map(.counts.security // 0) | add),
        per_release: map({tag, fixes: (.counts.fixes // 0), improvements: (.counts.improvements // 0), security: (.counts.security // 0)}),
-       titles: ([.[].fixes[]] | .[:12])} end'
+       titles: ([.[].fixes[]] | .[:12]), security_titles: ([.[].security[]] | .[:12])} end'
 
 collect_omarchy_notes() {
   local name spec="" old new
@@ -767,18 +773,24 @@ collect_preflight() {
 
   snapper_configured=false
   snapshot_before_update=false
+  snapshot_by=""
   if command -v snapper >/dev/null && [[ -n $(ls -A /etc/snapper/configs 2>/dev/null) ]]; then
     snapper_configured=true
-    if command -v omarchy-snapshot >/dev/null || compgen -G '/usr/share/libalpm/hooks/*snap-pac*' >/dev/null; then
+    if compgen -G '/usr/share/libalpm/hooks/*snap-pac*' >/dev/null; then
+      snapshot_by="snap-pac"
+    elif command -v omarchy-snapshot >/dev/null; then
+      snapshot_by="omarchy-update"
+    fi
+    if [[ -n $snapshot_by ]]; then
       snapshot_before_update=true
     fi
   fi
   done_step preflight "checking disk space and snapshots" "$free_bytes"
 
   emit --argjson free_bytes "$free_bytes" --argjson free_ok "$free_ok" --argjson snapper "$snapper_configured" \
-    --argjson snapshot "$snapshot_before_update" --argjson total "$disk_total_bytes" --argjson used "$disk_used_bytes" \
+    --argjson snapshot "$snapshot_before_update" --arg snapshot_by "$snapshot_by" --argjson total "$disk_total_bytes" --argjson used "$disk_used_bytes" \
     '{event: "stage", stage: "preflight", data: {free_bytes: $free_bytes, free_ok: $free_ok, snapper_configured: $snapper,
-      snapshot_before_update: $snapshot, disk_total_bytes: $total, disk_used_bytes: $used}}'
+      snapshot_before_update: $snapshot, snapshot_by: $snapshot_by, disk_total_bytes: $total, disk_used_bytes: $used}}'
 }
 collect_preflight
 
@@ -799,7 +811,7 @@ follow_sources() {
   local journal_pid=""
   tail -F -n0 --pid=$$ "$pacman_log" 2>/dev/null | sed -u 's/^/L /' &
   if command -v journalctl >/dev/null; then
-    journalctl -f -n0 -q -p err -o json --output-fields=SYSLOG_IDENTIFIER,_COMM,MESSAGE,_TRANSPORT 2>/dev/null > >(sed -u 's/^/J /') &
+    journalctl -f -n0 -q -p err -o json --output-fields=SYSLOG_IDENTIFIER,_COMM,_EXE,MESSAGE,_TRANSPORT 2>/dev/null > >(sed -u 's/^/J /') &
     journal_pid=$!
   fi
   tail -f --pid=$$ /dev/null 2>/dev/null
@@ -867,6 +879,7 @@ jq -n \
   --argjson free_ok "$free_ok" \
   --argjson snapper "$snapper_configured" \
   --argjson snapshot "$snapshot_before_update" \
+  --arg snapshot_by "$snapshot_by" \
   --argjson aur_unavailable "$aur_unavailable" \
   --argjson problem_errors "$(jq -nc '$ARGS.positional' --args "${problem_errors[@]}")" \
   --argjson disk_total "$disk_total_bytes" \
@@ -891,7 +904,7 @@ jq -n \
       activity: $activity[0],
       preflight: {
         free_bytes: $free_bytes, free_ok: $free_ok, snapper_configured: $snapper,
-        snapshot_before_update: $snapshot, disk_total_bytes: $disk_total, disk_used_bytes: $disk_used
+        snapshot_before_update: $snapshot, snapshot_by: $snapshot_by, disk_total_bytes: $disk_total, disk_used_bytes: $disk_used
       },
       summary: {
         updates: ($u | length),
@@ -1023,12 +1036,14 @@ echo
 echo "${bold}Before you update${reset}"
 free_gib=$((free_bytes / 1024 / 1024 / 1024))
 if [[ $free_ok == true ]]; then
-  echo "  ${green}ok${reset}  $free_gib GiB free on /"
+  echo "  ${green}ok${reset}  $free_gib GiB available on /"
 else
-  echo "  ${red}!!${reset}  only $free_gib GiB free on / (under 10 GiB)"
+  echo "  ${red}!!${reset}  only $free_gib GiB available on / (under 10 GiB)"
 fi
-if [[ $snapshot_before_update == true ]]; then
-  echo "  ${green}ok${reset}  Snapper takes a snapshot before the update"
+if [[ $snapshot_by == snap-pac ]]; then
+  echo "  ${green}ok${reset}  snap-pac takes a snapshot before each pacman transaction"
+elif [[ $snapshot_by == omarchy-update ]]; then
+  echo "  ${yellow}!!${reset}  omarchy-update takes a snapshot first; pacman -Syu takes none"
 elif [[ $snapper_configured == true ]]; then
   echo "  ${yellow}!!${reset}  Snapper is configured, but nothing takes a snapshot before the update"
 else

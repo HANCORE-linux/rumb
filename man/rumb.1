@@ -100,16 +100,18 @@ The map shows every pending update by risk and subsystem,
 with the dependencies of the selected update.
 .TP
 .B tab
-Move the focus between the instruments and the lists.
+Move the focus between the instruments, the subsystems and the lists.
 .TP
 .BR left ", " right
-Move the focus between the lists, or between the instruments when they have it.
+Move the focus between the lists, or between the instruments or the parts of the subsystems when they have it.
 .TP
 .BR up ", " down ", " PgUp ", " PgDn ", " Home ", " End
-Select a row. Up on the first row moves the focus to the instruments, down moves it back.
+Select a row.
+Up on the first row moves the focus to the subsystems, or to the instruments when the subsystems are hidden;
+from the subsystems up moves it to the instruments and down back to the lists.
 .TP
 .B enter
-Open the selected row or instrument.
+Open the selected row, instrument or part.
 .TP
 .BR / ", " f
 Filter the focused list.
@@ -122,7 +124,7 @@ Export a Markdown report to
 .IR ~/rumb\-exports .
 .TP
 .B esc
-Close, clear or leave the instruments.
+Close, clear or leave the instruments or the subsystems.
 .TP
 .B r
 Scan again.

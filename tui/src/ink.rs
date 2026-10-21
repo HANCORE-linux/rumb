@@ -1136,7 +1136,7 @@ mod tests {
 
     #[test]
     fn sectors_fill_the_circle_and_nodes_stay_inside() {
-        let sectors: Vec<(String, u16)> = [("kernel", 20u16), ("graphics", 12), ("compositor", 0), ("apps", 429)].into_iter().map(|(name, count)| (name.to_string(), count)).collect();
+        let sectors: Vec<(String, u16)> = [("kernel", 20u16), ("graphics", 12), ("compositor", 0), ("other", 429)].into_iter().map(|(name, count)| (name.to_string(), count)).collect();
         let spans = sector_spans(&sectors);
         let total: f32 = spans.iter().map(|(_, span)| span).sum();
         assert!((total - TAU).abs() < 1e-3, "{total}");

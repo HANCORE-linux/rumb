@@ -86,8 +86,20 @@ impl Subsystem {
             Subsystem::Toolkit => "toolkit",
             Subsystem::Shell => "shell",
             Subsystem::Base => "base",
-            Subsystem::Apps => "apps",
+            Subsystem::Apps => "other",
         }
+    }
+}
+
+pub fn problem_part(kind: &str, subject: &str, package: &str) -> Subsystem {
+    if kind == "config" {
+        Subsystem::Compositor
+    } else if kind == "journal" && subject == "kernel" {
+        Subsystem::Kernel
+    } else if package.is_empty() {
+        Subsystem::Apps
+    } else {
+        Subsystem::of(package)
     }
 }
 
@@ -104,7 +116,11 @@ pub struct Deps {
 #[derive(Debug, Clone, Deserialize)]
 pub struct JournalLine {
     pub time: String,
+    #[serde(default)]
+    pub day: String,
     pub ident: String,
+    #[serde(default)]
+    pub program: String,
     pub message: String,
 }
 
@@ -118,6 +134,8 @@ pub struct Anatomy {
     pub kernel_running: String,
     #[serde(default)]
     pub kernel_installed: String,
+    #[serde(default)]
+    pub kernel_package: String,
     #[serde(default)]
     pub cache_freeable_bytes: Option<u64>,
     #[serde(default)]
@@ -164,6 +182,7 @@ pub struct Health {
 pub struct KernelHealth {
     pub running: String,
     pub installed: String,
+    pub package: String,
     pub uptime_seconds: Option<u64>,
     pub reboot_pending: bool,
 }
@@ -187,6 +206,10 @@ pub struct Problem {
 }
 
 impl Problem {
+    pub fn part(&self) -> Subsystem {
+        problem_part(&self.kind, &self.subject, &self.package)
+    }
+
     pub fn name(&self) -> &str {
         if self.kind == "journal" && self.subject == "kernel" {
             return "kernel";
@@ -205,8 +228,6 @@ impl Problem {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OmarchyNotes {
-    pub from: String,
-    pub to: String,
     pub releases: u64,
     pub fixes: u64,
     pub improvements: u64,
@@ -215,6 +236,8 @@ pub struct OmarchyNotes {
     pub per_release: Vec<OmarchyRelease>,
     #[serde(default)]
     pub titles: Vec<String>,
+    #[serde(default)]
+    pub security_titles: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -247,7 +270,7 @@ pub struct Preflight {
     pub free_ok: bool,
     pub snapper_configured: bool,
     #[serde(default)]
-    pub snapshot_before_update: bool,
+    pub snapshot_by: String,
     #[serde(default)]
     pub disk_total_bytes: u64,
     #[serde(default)]
@@ -309,8 +332,10 @@ pub enum Source {
 pub struct EventLine {
     pub at: Instant,
     pub clock: String,
+    pub day: String,
     pub source: Source,
     pub ident: String,
+    pub program: String,
     pub message: String,
 }
 
@@ -366,6 +391,8 @@ pub struct App {
     pub overlay: bool,
     pub tile: Option<usize>,
     pub last_tile: usize,
+    pub part: Option<usize>,
+    pub last_part: usize,
     pub updates_map: bool,
     pub map_fits: bool,
     pub follow: bool,
@@ -418,6 +445,8 @@ impl App {
             overlay: false,
             tile: None,
             last_tile: 0,
+            part: None,
+            last_part: 0,
             updates_map: true,
             map_fits: false,
             follow: true,
@@ -458,7 +487,7 @@ impl App {
             Event::Done { label, value, .. } => self.done(&label, &value),
             Event::Result {} => self.finish(now),
             Event::Activity { line } => self.activity(&line, now),
-            Event::Journal { time, ident, message } => self.journal(JournalLine { time, ident, message }, now),
+            Event::Journal { time, day, ident, program, message } => self.journal(JournalLine { time, day, ident, program, message }, now),
         }
     }
 
@@ -466,7 +495,7 @@ impl App {
         let text = |key: &str| value[key].as_str().unwrap_or_default().to_string();
         match label {
             "reading the running kernel" => {
-                self.health.kernel = Some(KernelHealth { running: text("running"), installed: text("installed"), uptime_seconds: value["uptime_seconds"].as_u64(), reboot_pending: value["reboot_pending"].as_bool().unwrap_or(false) });
+                self.health.kernel = Some(KernelHealth { running: text("running"), installed: text("installed"), package: text("package"), uptime_seconds: value["uptime_seconds"].as_u64(), reboot_pending: value["reboot_pending"].as_bool().unwrap_or(false) });
             }
             "reading the loaded nvidia module" => self.health.nvidia = Some((text("loaded"), text("installed"))),
             "reading the running Hyprland" => self.health.hyprland = Some((text("running"), text("installed"))),
@@ -479,7 +508,7 @@ impl App {
         if stage == "anatomy" {
             let anatomy: Anatomy = serde_json::from_value(data)?;
             if self.health.kernel.is_none() && !anatomy.kernel_running.is_empty() {
-                self.health.kernel = Some(KernelHealth { running: anatomy.kernel_running.clone(), installed: anatomy.kernel_installed.clone(), uptime_seconds: anatomy.uptime_seconds, reboot_pending: anatomy.reboot_pending });
+                self.health.kernel = Some(KernelHealth { running: anatomy.kernel_running.clone(), installed: anatomy.kernel_installed.clone(), package: anatomy.kernel_package.clone(), uptime_seconds: anatomy.uptime_seconds, reboot_pending: anatomy.reboot_pending });
             }
             if self.health.nvidia.is_none() && !anatomy.nvidia_loaded.is_empty() {
                 self.health.nvidia = Some((anatomy.nvidia_loaded.clone(), anatomy.nvidia_installed.clone()));
@@ -489,7 +518,7 @@ impl App {
             }
             if self.events.is_empty() {
                 for line in &anatomy.journal {
-                    self.events.push(EventLine { at: now, clock: line.time.clone(), source: Source::Journal, ident: line.ident.clone(), message: line.message.trim().to_string() });
+                    self.events.push(EventLine { at: now, clock: line.time.clone(), day: line.day.clone(), source: Source::Journal, ident: line.ident.clone(), program: line.program.clone(), message: line.message.trim().to_string() });
                 }
             }
             self.anatomy = Some(anatomy);
@@ -530,7 +559,7 @@ impl App {
         if self.finished_at.is_some() {
             self.journal_live += 1;
         }
-        self.push_event(EventLine { at: now, clock: line.time, source: Source::Journal, ident: line.ident, message: line.message.trim().to_string() }, now);
+        self.push_event(EventLine { at: now, clock: line.time, day: line.day, source: Source::Journal, ident: line.ident, program: line.program, message: line.message.trim().to_string() }, now);
     }
 
     fn push_event(&mut self, event: EventLine, now: Instant) {
@@ -545,7 +574,7 @@ impl App {
 
     fn shows_event(&self, event: &EventLine) -> bool {
         let filter = self.lists[Pane::Events.index()].filter.to_lowercase();
-        filter.is_empty() || format!("{} {}", event.ident, event.message).to_lowercase().contains(&filter)
+        filter.is_empty() || format!("{} {} {}", event.ident, event.program, event.message).to_lowercase().contains(&filter)
     }
 
     fn activity(&mut self, line: &str, now: Instant) {
@@ -587,7 +616,7 @@ impl App {
             _ => {}
         }
         let clock = clock_now();
-        self.push_event(EventLine { at: now, clock, source: Source::Pacman, ident: "pacman".into(), message: line.to_string() }, now);
+        self.push_event(EventLine { at: now, clock, day: today(), source: Source::Pacman, ident: "pacman".into(), program: String::new(), message: line.to_string() }, now);
     }
 
     pub fn transacting(&self) -> bool {
@@ -635,6 +664,43 @@ impl App {
 
     pub fn installed_delta(&self) -> i64 {
         self.updates.iter().filter_map(|update| update.installed_delta_bytes).sum()
+    }
+
+    pub fn aur_updates(&self) -> usize {
+        self.updates.iter().filter(|update| update.source == "aur").count()
+    }
+
+    pub fn space_needed(&self) -> u64 {
+        self.download_bytes() + self.installed_delta().max(0).unsigned_abs()
+    }
+
+    pub fn space_severity(&self) -> Option<Severity> {
+        let preflight = self.preflight.as_ref()?;
+        Some(if preflight.free_bytes < self.space_needed() {
+            Severity::Bad
+        } else if !preflight.free_ok {
+            Severity::Warn
+        } else {
+            Severity::Ok
+        })
+    }
+
+    pub fn reboot_after(&self) -> Vec<(&'static str, &Update)> {
+        let mut parts = Vec::new();
+        let kernel = self.health.kernel.as_ref().map(|kernel| kernel.package.as_str()).filter(|name| !name.is_empty());
+        if let Some(update) = kernel.and_then(|name| self.updates.iter().find(|update| update.name == name)) {
+            parts.push(("kernel", update));
+        }
+        if self.health.nvidia.is_some()
+            && let Some(update) = self.updates.iter().find(|update| update.name == "nvidia-utils")
+        {
+            parts.push(("nvidia", update));
+        }
+        parts
+    }
+
+    pub fn live_feed(&self) -> bool {
+        self.finished_at.is_some() && !self.live_lost && self.error.is_none()
     }
 
     pub fn incomplete(&self) -> bool {
@@ -715,6 +781,9 @@ impl App {
         if panel == 0 && !self.visible[0] {
             self.leave_tiles();
         }
+        if panel == 1 && !self.visible[1] {
+            self.leave_band();
+        }
         if !self.visible[self.focus.panel()]
             && let Some(next) = Pane::ALL.into_iter().find(|pane| self.visible[pane.panel()])
         {
@@ -722,32 +791,56 @@ impl App {
         }
     }
 
-    pub fn cycle_focus(&mut self, forward: bool, tiles: bool) {
-        let visible: Vec<Pane> = Pane::ALL.into_iter().filter(|pane| self.visible[pane.panel()]).collect();
-        let tiles = tiles && self.visible[0];
+    pub fn lists_shown(&self) -> bool {
+        self.visible[2..].iter().any(|on| *on)
+    }
+
+    pub fn list_focused(&self, pane: Pane) -> bool {
+        self.tile.is_none() && self.part.is_none() && self.focus == pane
+    }
+
+    pub fn cycle_focus(&mut self, forward: bool, stops: bool) {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Stop {
+            Tiles,
+            Band,
+            List(Pane),
+        }
+        let mut order = Vec::new();
+        if stops && self.visible[0] {
+            order.push(Stop::Tiles);
+        }
+        if stops && self.visible[1] {
+            order.push(Stop::Band);
+        }
+        order.extend(Pane::ALL.into_iter().filter(|pane| self.visible[pane.panel()]).map(Stop::List));
         self.overlay = false;
-        if self.tile.is_some() {
-            self.leave_tiles();
-            if let Some(pane) = if forward { visible.first() } else { visible.last() } {
-                self.focus = *pane;
-            }
+        if order.is_empty() {
             return;
         }
-        let Some(position) = visible.iter().position(|pane| *pane == self.focus) else {
-            if let Some(first) = visible.first() {
-                self.focus = *first;
-            } else if tiles {
-                self.enter_tiles();
-            }
-            return;
+        let current = if self.tile.is_some() {
+            Stop::Tiles
+        } else if self.part.is_some() {
+            Stop::Band
+        } else {
+            Stop::List(self.focus)
         };
-        let at_edge = if forward { position + 1 == visible.len() } else { position == 0 };
-        if tiles && at_edge {
-            self.enter_tiles();
+        let next = match order.iter().position(|stop| *stop == current) {
+            Some(position) => order[if forward { (position + 1) % order.len() } else { (position + order.len() - 1) % order.len() }],
+            None => order.iter().copied().find(|stop| matches!(stop, Stop::List(_))).unwrap_or(order[0]),
+        };
+        if next == current {
             return;
         }
-        let step = if forward { 1 } else { visible.len() - 1 };
-        self.focus = visible[(position + step) % visible.len()];
+        match next {
+            Stop::Tiles => self.enter_tiles(),
+            Stop::Band => self.enter_band(),
+            Stop::List(pane) => {
+                self.leave_tiles();
+                self.leave_band();
+                self.focus = pane;
+            }
+        }
     }
 
     pub fn press_panel(&mut self, panel: usize) {
@@ -765,6 +858,7 @@ impl App {
 
     pub fn enter_tiles(&mut self) {
         if self.visible[0] {
+            self.leave_band();
             self.tile = Some(self.last_tile);
             self.overlay = false;
         }
@@ -782,6 +876,28 @@ impl App {
             self.tile = Some(if forward { (tile + 1) % 6 } else { (tile + 5) % 6 });
         }
     }
+
+    pub fn enter_band(&mut self) {
+        if self.visible[1] {
+            self.leave_tiles();
+            self.part = Some(self.last_part);
+            self.overlay = false;
+        }
+    }
+
+    pub fn leave_band(&mut self) {
+        if let Some(part) = self.part.take() {
+            self.last_part = part;
+        }
+        self.overlay = false;
+    }
+
+    pub fn move_part(&mut self, forward: bool) {
+        let count = Subsystem::ALL.len();
+        if let Some(part) = self.part {
+            self.part = Some(if forward { (part + 1) % count } else { (part + count - 1) % count });
+        }
+    }
 }
 
 fn local_now() -> libc::tm {
@@ -794,6 +910,11 @@ fn local_now() -> libc::tm {
 pub fn clock_now() -> String {
     let tm = local_now();
     format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+}
+
+pub fn today() -> String {
+    let tm = local_now();
+    format!("{:04}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
 }
 
 pub fn local_stamp() -> String {

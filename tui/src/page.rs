@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use tiny_skia::Pixmap;
 
-use crate::app::{App, Pane, Severity, Source, Subsystem, ease_out_cubic};
+use crate::app::{App, EventLine, Pane, Severity, Source, Subsystem, Update, ease_out_cubic};
 use crate::motion::{Motion, Signal, Target};
 use crate::palette::{Palette, mix};
 
@@ -33,6 +33,9 @@ pub struct Scene {
     pub placements: Vec<Placement>,
     pub rows: [usize; 3],
     pub map_fits: bool,
+    pub lists: Vec<(Pane, Rect)>,
+    pub chosen: [Option<Rect>; 3],
+    pub band: Option<Rect>,
 }
 
 pub fn paint(picture: &Picture, pal: &Palette, width: u32, height: u32, cell_height: f32) -> Option<Pixmap> {
@@ -92,7 +95,8 @@ fn draw_header(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Inst
     if let Some(anatomy) = &app.anatomy {
         let omarchy = if anatomy.omarchy.is_empty() { String::new() } else { format!("Omarchy {}", anatomy.omarchy) };
         let kernel = if anatomy.kernel_running.is_empty() { String::new() } else { format!("kernel {}", anatomy.kernel_running) };
-        let system: Vec<String> = [anatomy.hostname.clone(), anatomy.os.clone(), omarchy, anatomy.desktop.clone(), kernel].into_iter().filter(|part| !part.is_empty()).collect();
+        let parts = if app.visible[1] { vec![anatomy.hostname.clone(), anatomy.os.clone(), omarchy] } else { vec![anatomy.hostname.clone(), anatomy.os.clone(), omarchy, anatomy.desktop.clone(), kernel] };
+        let system: Vec<String> = parts.into_iter().filter(|part| !part.is_empty()).collect();
         left.push(Span::styled(format!("  {}", system.join(" · ")), Style::new().fg(pal.label)));
     }
     if app.demo {
@@ -109,7 +113,7 @@ fn draw_header(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Inst
         }
         (Some(time), Some(done)) => {
             let seconds = app.steps.first().map_or(0.0, |first| done.saturating_duration_since(first.started).as_secs_f64());
-            format!("scanned {} · {seconds:.1} s", short_time(time))
+            format!("scanned {} in {seconds:.1} s", short_time(time))
         }
         (None, Some(_)) => "scanned".to_string(),
     };
@@ -179,10 +183,10 @@ fn tile_pending(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
     }
     let count = |value: usize, color: Color| Span::styled(value.to_string(), Style::new().fg(color).add_modifier(Modifier::BOLD));
     let word = |value: &str| Span::styled(value.to_string(), Style::new().fg(pal.label));
-    let long = vec![count(high, pal.alert), word(" high  "), count(medium, pal.warn), word(" med  "), count(low, pal.ink2), word(" low")];
+    let long = vec![count(high, pal.alert), word(" high  "), count(medium, pal.warn), word(" medium  "), count(low, pal.ink2), word(" low")];
     let short = vec![count(high, pal.alert), word(" hi "), count(medium, pal.warn), word(" med "), count(low, pal.ink2), word(" lo")];
     put(buf, inner.x, inner.y + 9, if width(&long) <= inner.width { long } else { short }, inner.width);
-    legend(buf, area, &format!("1 ■ = {unit} {}", if unit == 1 { "update" } else { "updates" }), pal);
+    legend(buf, area, &if unit == 1 { "1 ■ = 1 update".to_string() } else { format!("1 ■ ≤ {unit} updates") }, pal);
 }
 
 fn tile_days(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant) {
@@ -211,7 +215,7 @@ fn tile_days(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
             let color = if row >= height {
                 pal.grid
             } else if row < red {
-                pal.alert
+                pal.teal
             } else if marked {
                 pal.ink
             } else {
@@ -231,14 +235,14 @@ fn tile_days(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
         inner.x,
         inner.y + 9,
         vec![
-            Span::styled("■", Style::new().fg(pal.alert)),
+            Span::styled("■", Style::new().fg(pal.teal)),
             Span::styled(" crashes  ", Style::new().fg(pal.label)),
             Span::styled("▼", Style::new().fg(pal.ink)),
             Span::styled(" upgrade", Style::new().fg(pal.label)),
         ],
         inner.width,
     );
-    legend(buf, area, &format!("1 ■ = {unit} {}", if unit == 1 { "error" } else { "errors" }), pal);
+    legend(buf, area, &if unit == 1 { "1 ■ = 1 problem".to_string() } else { format!("1 ■ ≤ {unit} problems") }, pal);
 }
 
 fn tile_since(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant) {
@@ -350,7 +354,7 @@ fn tile_disk(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
         let color = if preflight.free_ok { pal.ink2 } else { pal.alert };
         meter(buf, inner.x + 7, inner.y + 1, inner.width.saturating_sub(12), share * reveal(app, now, app.stage_done_at[3], 0.0, 700.0), color, pal);
         right(buf, inner.right(), inner.y + 1, &format!("{:.0}%", share * 100.0), Style::new().fg(pal.ink).add_modifier(Modifier::BOLD));
-        row(buf, inner, inner.y + 2, "free", &bytes(preflight.free_bytes), if preflight.free_ok { pal.ink } else { pal.alert }, pal);
+        row(buf, inner, inner.y + 2, "available", &bytes(preflight.free_bytes), if preflight.free_ok { pal.ink } else { pal.alert }, pal);
     } else {
         text(buf, inner.x, inner.y + 1, "measuring…", Style::new().fg(pal.faint), inner.width);
     }
@@ -361,7 +365,7 @@ fn tile_disk(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
     };
     row(buf, inner, y, "installed", &thousands(anatomy.packages), pal.ink, pal);
     row(buf, inner, y + 1, "explicit", &thousands(anatomy.explicit), pal.ink, pal);
-    row(buf, inner, y + 2, "from AUR", &thousands(anatomy.repos.get("aur").copied().unwrap_or(0)), pal.ink, pal);
+    row(buf, inner, y + 2, "foreign", &thousands(anatomy.repos.get("aur").copied().unwrap_or(0)), pal.ink, pal);
     row(buf, inner, y + 3, "orphans", &thousands(anatomy.orphans), if anatomy.orphans > 0 { pal.warn } else { pal.ink }, pal);
     let cache = bytes(anatomy.cache_bytes);
     let cache_label = if 13 + cache.len() > inner.width as usize { "cache" } else { "pacman cache" };
@@ -393,22 +397,33 @@ fn tile_checks(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette) {
     let mut checks: Vec<(&str, String, Severity)> = Vec::new();
     if app.stage_done_at[0].is_some() {
         let high = app.high();
-        checks.push(("risk", format!("{high} high"), level(high == 0, Severity::Bad)));
+        checks.push(("risk", if high > 0 { "high" } else { "no high" }.into(), level(high == 0, Severity::Bad)));
     }
     if let Some(anatomy) = &app.anatomy {
-        let reboot = if anatomy.reboot_pending { "pending" } else { "not needed" };
-        checks.push(("reboot", reboot.into(), level(!anatomy.reboot_pending, Severity::Bad)));
+        let (reboot, severity) = if anatomy.reboot_pending {
+            ("pending", Severity::Bad)
+        } else if !app.reboot_after().is_empty() {
+            ("after update", Severity::Warn)
+        } else {
+            ("not needed", Severity::Ok)
+        };
+        checks.push(("reboot", reboot.into(), severity));
     }
     if let Some(preflight) = &app.preflight {
-        let snapshot = if preflight.snapshot_before_update {
-            "automatic"
-        } else if preflight.snapper_configured {
-            "not auto"
-        } else {
-            "none"
+        let (snapshot, severity) = match preflight.snapshot_by.as_str() {
+            "snap-pac" => ("automatic", Severity::Ok),
+            "omarchy-update" => ("omarchy-update", Severity::Warn),
+            _ if preflight.snapper_configured => ("not auto", Severity::Warn),
+            _ => ("none", Severity::Warn),
         };
-        checks.push(("snapshot", snapshot.into(), level(preflight.snapshot_before_update, Severity::Warn)));
-        checks.push(("space", bytes(preflight.free_bytes), level(preflight.free_ok, Severity::Bad)));
+        checks.push(("snapshot", snapshot.into(), severity));
+        let severity = app.space_severity().unwrap_or(Severity::Ok);
+        let space = match severity {
+            Severity::Bad => "too low",
+            Severity::Warn => "low",
+            _ => "ok",
+        };
+        checks.push(("space", space.into(), severity));
     }
     if app.stage_done_at[2].is_some() {
         let (news, severity) = if app.news_failed {
@@ -433,9 +448,15 @@ fn tile_checks(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette) {
     };
     for (k, (name, value, severity)) in checks.iter().enumerate() {
         let y = inner.y + 1 + k as u16;
+        let room = inner.width.saturating_sub(11) as usize;
+        let value = match value.as_str() {
+            "omarchy-update" if value.chars().count() > room => "omarchy",
+            "after update" if value.chars().count() > room => "after",
+            other => other,
+        };
         text(buf, inner.x, y, "●", Style::new().fg(if *severity == Severity::Ok { pal.ink2 } else { tone(*severity) }), 1);
         text(buf, inner.x + 2, y, name, Style::new().fg(pal.label), 8);
-        right(buf, inner.right(), y, &fit(value, inner.width.saturating_sub(11) as usize), Style::new().fg(tone(*severity)));
+        right(buf, inner.right(), y, &fit(value, room), Style::new().fg(tone(*severity)));
     }
     if app.finished_at.is_some() {
         let (verdict, severity) = app.verdict();
@@ -464,7 +485,7 @@ fn tile_checks(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette) {
 }
 
 fn list_frame(buf: &mut Buffer, area: Rect, app: &App, pane: Pane, title: &str, legend_text: &str, pal: &Palette) -> Rect {
-    let focused = app.tile.is_none() && app.focus == pane;
+    let focused = app.list_focused(pane);
     let inner = frame(buf, area, title, focused, pal);
     let list = &app.lists[pane.index()];
     let editing = focused && app.editing;
@@ -507,17 +528,27 @@ fn map_fits(area: Rect) -> bool {
     area.height >= 28 && area.width >= 90
 }
 
+fn updates_title(app: &App, count: usize) -> String {
+    let download = app.download_bytes();
+    let aur = app.aur_updates();
+    match (download > 0, aur > 0) {
+        (true, true) => format!("³UPDATES · {count} · {} download + {aur} AUR", bytes(download)),
+        (true, false) => format!("³UPDATES · {count} · {} download", bytes(download)),
+        _ => format!("³UPDATES · {count}"),
+    }
+}
+
 fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut Scene) -> usize {
     use crate::ink::{OrbitLink, OrbitNode, OrbitSpec};
     let updates = app.visible_updates();
-    let download = app.download_bytes();
-    let title = if download > 0 { format!("³UPDATES · {} · {} download", updates.len(), bytes(download)) } else { format!("³UPDATES · {}", updates.len()) };
-    let body = list_frame(buf, area, app, Pane::Updates, &title, "inner ring high · middle medium · outer band low · 3 rows · enter opens", pal);
+    let title = updates_title(app, updates.len());
+    let body = list_frame(buf, area, app, Pane::Updates, &title, "inner ring high · middle medium · outer band low", pal);
     if updates.is_empty() {
         return 10;
     }
     let selected = app.lists[0].selected.min(updates.len() - 1);
     let chosen = updates[selected];
+    scene.chosen[0] = Some(Rect::new(body.x, body.y, body.width, 1));
     let rank = |risk: &str| match risk {
         "high" => 0u8,
         "medium" => 1,
@@ -572,7 +603,7 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scen
         let cap = usize::from(rows.saturating_sub(2)).clamp(2, 14);
         for (left, names, total) in [(true, &deps.depends_on, deps.depends), (false, &deps.required_names, deps.required_by)] {
             let side = dep_side(names, &pending, &troubled, cap);
-            let heading = if left { format!("it depends on {total}") } else { format!("{total} require it") };
+            let heading = if left { format!("it depends on {total}") } else { format!("{total} {}", if total == 1 { "requires it" } else { "require it" }) };
             let offset = rows.saturating_sub(side.len() as u16) / 2;
             let heading_y = top + offset.saturating_sub(1);
             if left {
@@ -610,14 +641,14 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scen
     }
     let spans_w = self::width(&spans);
     put(buf, body.x + body.width.saturating_sub(spans_w) / 2, top + rows + 2, spans, body.width);
+    position(buf, body, selected, updates.len(), pal);
     10
 }
 
-fn draw_updates(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette) -> usize {
+fn draw_updates(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut Scene) -> usize {
     let updates = app.visible_updates();
-    let download = app.download_bytes();
-    let title = if download > 0 { format!("³UPDATES · {} · {} download", updates.len(), bytes(download)) } else { format!("³UPDATES · {}", updates.len()) };
-    let body = list_frame(buf, area, app, Pane::Updates, &title, if map_fits(area) { "sorted by risk · enter opens · / filters · 3 map" } else { "sorted by risk · enter opens · / filters" }, pal);
+    let title = updates_title(app, updates.len());
+    let body = list_frame(buf, area, app, Pane::Updates, &title, "sorted by risk", pal);
     let name_w = body.width.saturating_sub(32).clamp(14, 24);
     let version_x = body.x + 5 + name_w + 1;
     let header = Style::new().fg(pal.faint);
@@ -640,7 +671,7 @@ fn draw_updates(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette) -> usize
         text(buf, body.x + level as u16, y, &"■".repeat(3 - level), Style::new().fg(pal.grid), 3);
         let chosen = index == selected;
         text(buf, body.x + 5, y, &fit(&update.name, name_w as usize), Style::new().fg(pal.ink).add_modifier(if chosen { Modifier::BOLD } else { Modifier::empty() }), name_w);
-        let size = update.download_bytes.map(short_bytes).unwrap_or_else(|| "aur".into());
+        let size = update.download_bytes.map(short_bytes).unwrap_or_default();
         let room = body.right().saturating_sub(version_x + 8);
         text(buf, version_x, y, &versions(&update.old, &update.new, room as usize), Style::new().fg(pal.ink2), room);
         if app.problems.iter().any(|problem| problem.package == update.name) {
@@ -648,7 +679,9 @@ fn draw_updates(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette) -> usize
         }
         right(buf, body.right(), y, &size, Style::new().fg(pal.label));
         if chosen {
-            select_row(buf, Rect::new(body.x.saturating_sub(1), y, body.width + 2, 1), app.tile.is_none() && app.focus == Pane::Updates, pal);
+            let line = Rect::new(body.x.saturating_sub(1), y, body.width + 2, 1);
+            select_row(buf, line, app.list_focused(Pane::Updates), pal);
+            scene.chosen[0] = Some(line);
         }
     }
     if updates.is_empty() {
@@ -665,11 +698,11 @@ fn draw_updates(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette) -> usize
     rows
 }
 
-fn draw_problems(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette) -> usize {
+fn draw_problems(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut Scene) -> usize {
     let problems = app.visible_problems();
-    let since = app.since.as_deref().and_then(|since| since.get(5..10)).map(|date| format!(" since {}", date.replace('-', "/"))).unwrap_or_default();
-    let title = format!("⁴PROBLEMS · {}{since}", problems.len());
-    let body = list_frame(buf, area, app, Pane::Problems, &title, "→ = the owner has an update · j journal", pal);
+    let since = app.since.as_deref().and_then(|since| since.get(5..10)).map(|date| format!(" since {date}")).unwrap_or_default();
+    let title = format!("⁴PROBLEMS · {} {}{since}", problems.len(), if problems.len() == 1 { "source" } else { "sources" });
+    let body = list_frame(buf, area, app, Pane::Problems, &title, "→ = the owner has an update · bars on a log scale", pal);
     let header = Style::new().fg(pal.faint);
     text(buf, body.x, body.y, "count", header, 6);
     text(buf, body.x + 16, body.y, "subject · owner", header, 30);
@@ -682,14 +715,19 @@ fn draw_problems(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette) -> usiz
         let y = body.y + 1 + row as u16 * 2;
         right(buf, body.x + 5, y, &compact(problem.count), Style::new().fg(pal.ink).add_modifier(Modifier::BOLD));
         let bar = ((problem.count as f64).ln_1p() / max.ln_1p() * 8.0).round().clamp(1.0, 8.0) as usize;
-        let severe = problem.kind == "crash" || problem.kind == "failed-unit";
-        text(buf, body.x + 6, y, &"■".repeat(bar), Style::new().fg(if severe { pal.alert } else { pal.ink2 }), 8);
+        let bar_color = match problem.kind.as_str() {
+            "crash" => pal.teal,
+            "failed-unit" => pal.alert,
+            _ => pal.ink2,
+        };
+        text(buf, body.x + 6, y, &"■".repeat(bar), Style::new().fg(bar_color), 8);
         text(buf, body.x + 6 + bar as u16, y, &"■".repeat(8 - bar), Style::new().fg(pal.grid), 8);
-        let (kind, kind_color) = match problem.kind.as_str() {
-            "crash" => ("crash", pal.alert),
-            "failed-unit" => ("unit", pal.alert),
-            "config" => ("config", pal.warn),
-            _ => ("error", pal.label),
+        let kind = kind_label(&problem.kind);
+        let kind_color = match problem.kind.as_str() {
+            "crash" => pal.teal,
+            "failed-unit" => pal.alert,
+            "config" => pal.warn,
+            _ => pal.label,
         };
         let subject_w = body.width.saturating_sub(24);
         text(buf, body.x + 16, y, &fit(&problem.subject, subject_w as usize), Style::new().fg(pal.ink), subject_w);
@@ -704,7 +742,9 @@ fn draw_problems(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette) -> usiz
         let owner_w = body.width.saturating_sub(16);
         text(buf, body.x + 16, y + 1, &fit(&owner, owner_w as usize), Style::new().fg(color), owner_w);
         if index == selected {
-            select_row(buf, Rect::new(body.x.saturating_sub(1), y, body.width + 2, 2), app.tile.is_none() && app.focus == Pane::Problems, pal);
+            let lines = Rect::new(body.x.saturating_sub(1), y, body.width + 2, 2);
+            select_row(buf, lines, app.list_focused(Pane::Problems), pal);
+            scene.chosen[1] = Some(lines);
         }
     }
     if problems.is_empty() {
@@ -721,16 +761,29 @@ fn draw_problems(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette) -> usiz
     rows
 }
 
-fn draw_events(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant) -> usize {
+fn event_stamp(event: &EventLine, today: &str) -> String {
+    match event.day.get(5..) {
+        Some(day) if event.day != today => format!("{day} {}", event.clock.get(..5).unwrap_or(&event.clock)),
+        _ => event.clock.clone(),
+    }
+}
+
+fn draw_events(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant, scene: &mut Scene) -> usize {
     let events = app.visible_events();
-    let state = if app.follow { "following" } else { "paused · Home follows" };
-    let title = format!("⁵LIVE EVENTS · {state}");
+    let title = match (app.live_feed(), app.follow) {
+        (true, true) => "⁵LIVE EVENTS · following".to_string(),
+        (true, false) => "⁵LIVE EVENTS · paused · Home follows".to_string(),
+        _ => "⁵LIVE EVENTS".to_string(),
+    };
     let body = list_frame(buf, area, app, Pane::Events, &title, "journal errors + pacman · newest first", pal);
+    let today = crate::app::today();
+    let time_w = if events.iter().any(|event| event.day.len() >= 10 && event.day != today) { 11u16 } else { 8 };
     let ident_w = 12u16;
-    let message_x = body.x + 11 + ident_w + 1;
+    let ident_x = body.x + time_w + 3;
+    let message_x = ident_x + ident_w + 1;
     let header = Style::new().fg(pal.faint);
-    text(buf, body.x, body.y, "time", header, 8);
-    text(buf, body.x + 11, body.y, "source", header, ident_w);
+    text(buf, body.x, body.y, "time", header, time_w);
+    text(buf, ident_x, body.y, "source", header, ident_w);
     text(buf, message_x, body.y, "message", header, 10);
     let rows = body.height.saturating_sub(1) as usize;
     let selected = app.lists[2].selected.min(events.len().saturating_sub(1));
@@ -742,14 +795,17 @@ fn draw_events(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Inst
             Source::Journal => ("J", pal.label),
             Source::Pacman => ("P", pal.ink),
         };
-        text(buf, body.x, y, &event.clock, Style::new().fg(pal.faint), 8);
-        text(buf, body.x + 9, y, tag, Style::new().fg(color).add_modifier(Modifier::BOLD), 1);
-        text(buf, body.x + 11, y, &fit(&event.ident, ident_w as usize), Style::new().fg(pal.ink2), ident_w);
+        text(buf, body.x, y, &event_stamp(event, &today), Style::new().fg(pal.faint), time_w);
+        text(buf, body.x + time_w + 1, y, tag, Style::new().fg(color).add_modifier(Modifier::BOLD), 1);
+        text(buf, ident_x, y, &fit(&event.ident, ident_w as usize), Style::new().fg(pal.ink2), ident_w);
         let room = body.right().saturating_sub(message_x);
         text(buf, message_x, y, &fit(&event.message, room as usize), Style::new().fg(pal.ink), room);
         let line = Rect::new(body.x.saturating_sub(1), y, body.width + 2, 1);
         let age = ms(now, event.at);
-        if index == selected && app.tile.is_none() && app.focus == Pane::Events {
+        if index == selected {
+            scene.chosen[2] = Some(line);
+        }
+        if index == selected && app.list_focused(Pane::Events) {
             select_row(buf, line, true, pal);
         } else if !app.skipped && age < 1300.0 {
             highlight(buf, line, mix(pal.select, pal.page, age / 1300.0), age < 650.0, pal);
@@ -769,7 +825,7 @@ fn position(buf: &mut Buffer, body: Rect, selected: usize, total: usize, pal: &P
     }
 }
 
-fn draw_keys(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant) {
+fn draw_keys(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant, map_fits: bool) {
     let mut room = area.width.saturating_sub(2);
     if let Some((message, ok, at)) = &app.status
         && now.saturating_duration_since(*at).as_secs() < 8
@@ -780,14 +836,29 @@ fn draw_keys(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
     }
     let pairs: Vec<(&str, &str)> = if app.editing {
         vec![("type", "to filter"), ("Enter", "keep"), ("Esc", "clear")]
-    } else if app.overlay && app.tile.is_some() {
-        vec![("←→", "previous/next"), ("Esc", "close"), ("e", "export"), ("q", "quit")]
+    } else if app.overlay && (app.tile.is_some() || app.part.is_some()) {
+        vec![("←→", "previous/next"), ("Esc", "close"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
     } else if app.overlay {
-        vec![("↑↓", "previous/next"), ("Esc", "close"), ("e", "export"), ("q", "quit")]
+        let mut pairs = vec![("↑↓", "previous/next"), ("Esc", "close")];
+        if app.focus == Pane::Problems {
+            pairs.push(("j", "journal"));
+        }
+        pairs.extend([("e", "export"), ("r", "rescan"), ("q", "quit")]);
+        pairs
     } else if app.tile.is_some() {
-        vec![("Tab", "focus"), ("←→", "select"), ("↓", "lists"), ("Enter", "open"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
-    } else if !app.visible[2..].iter().any(|on| *on) {
-        let mut pairs = if app.visible[0] { vec![("Tab", "focus")] } else { Vec::new() };
+        vec![("Tab", "focus"), ("←→", "select"), ("↓", if app.visible[1] { "subsystems" } else { "lists" }), ("Enter", "open"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
+    } else if app.part.is_some() {
+        let mut pairs = vec![("Tab", "focus"), ("←→", "part")];
+        if app.visible[0] {
+            pairs.push(("↑", "tiles"));
+        }
+        if app.lists_shown() {
+            pairs.push(("↓", "lists"));
+        }
+        pairs.extend([("Enter", "open"), ("e", "export"), ("r", "rescan"), ("q", "quit")]);
+        pairs
+    } else if !app.lists_shown() {
+        let mut pairs = if app.visible[0] || app.visible[1] { vec![("Tab", "focus")] } else { Vec::new() };
         pairs.extend([("e", "export"), ("r", "rescan"), ("q", "quit")]);
         pairs
     } else {
@@ -804,6 +875,10 @@ fn draw_keys(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
             spans.push(Span::styled(format!("{}", index + 1), Style::new().fg(if *on { pal.ink } else { pal.faint }).add_modifier(Modifier::BOLD)));
         }
         spans.push(Span::styled(" show/hide   ", Style::new().fg(pal.label)));
+        if map_fits && app.visible[2] {
+            spans.push(Span::styled("3", Style::new().fg(pal.ink).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(" map/rows   ", Style::new().fg(pal.label)));
+        }
     }
     let mut used = width(&spans);
     for (key, word) in pairs {
@@ -874,26 +949,73 @@ fn signal_meaning(signal: &str) -> &'static str {
     }
 }
 
-fn tile_details(app: &App, tile: usize, pal: &Palette) -> (&'static str, Vec<(String, String, Color)>) {
+fn kind_label(kind: &str) -> &'static str {
+    match kind {
+        "crash" => "crash",
+        "failed-unit" => "unit",
+        "config" => "config",
+        _ => "error",
+    }
+}
+
+fn pair(version: &str) -> String {
+    short_version(version).split('.').take(2).collect::<Vec<_>>().join(".")
+}
+
+fn reboot_reason(after: &[(&str, &Update)]) -> String {
+    let parts: Vec<String> = after
+        .iter()
+        .map(|(what, update)| if *what == "nvidia" { format!("nvidia {} → {}", pair(&update.old), pair(&update.new)) } else { format!("{what} {} → {}", update.old, update.new) })
+        .collect();
+    format!("after this update · {}", parts.join(" · "))
+}
+
+fn wrapped(lines: &mut Vec<(String, String, Color)>, name: &str, value: &str, width: usize, color: Color) {
+    let mut current = String::new();
+    let mut first = true;
+    for word in value.split_whitespace() {
+        if !current.is_empty() && current.chars().count() + word.chars().count() + 1 > width {
+            lines.push((if first { name.to_string() } else { String::new() }, std::mem::take(&mut current), color));
+            first = false;
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    lines.push((if first { name.to_string() } else { String::new() }, current, color));
+}
+
+fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static str, Vec<(String, String, Color)>) {
     let mut lines: Vec<(String, String, Color)> = Vec::new();
-    let mut push = |name: &str, value: String, color: Color| lines.push((name.to_string(), value, color));
     let name = match tile {
         0 => {
-            let mut risky: Vec<_> = app.updates.iter().filter(|update| update.risk == "high").collect();
-            risky.sort_by(|a, b| a.name.cmp(&b.name));
-            for (index, update) in risky.iter().take(8).enumerate() {
-                push(if index == 0 { "high risk" } else { "" }, format!("{}  {} → {}", update.name, short_version(&update.old), short_version(&update.new)), pal.alert);
+            let kinds: Vec<String> = ["epoch", "major", "minor", "patch", "date", "rebuild", "other"]
+                .into_iter()
+                .filter_map(|kind| {
+                    let count = app.updates.iter().filter(|update| update.bump == kind).count();
+                    (count > 0).then(|| format!("{count} {kind}"))
+                })
+                .collect();
+            if !kinds.is_empty() {
+                wrapped(&mut lines, "jumps", &kinds.join(" · "), room, pal.ink);
             }
-            if risky.len() > 8 {
-                push("", format!("+ {} more", risky.len() - 8), pal.label);
+            if app.updates.iter().any(|update| update.installed_delta_bytes.is_some()) {
+                lines.push(("disk change".into(), signed_bytes(app.installed_delta()), pal.ink));
             }
             let mut largest: Vec<_> = app.updates.iter().filter(|update| update.download_bytes.is_some()).collect();
             largest.sort_by(|a, b| b.download_bytes.cmp(&a.download_bytes).then_with(|| a.name.cmp(&b.name)));
             for (index, update) in largest.iter().take(5).enumerate() {
-                push(if index == 0 { "largest" } else { "" }, format!("{}  {}", update.name, update.download_bytes.map(bytes).unwrap_or_default()), pal.ink);
+                lines.push((if index == 0 { "largest" } else { "" }.into(), format!("{}  {}", update.name, update.download_bytes.map(bytes).unwrap_or_default()), pal.ink));
+            }
+            let no_size: Vec<&Update> = app.updates.iter().filter(|update| update.download_bytes.is_none()).collect();
+            if !no_size.is_empty() {
+                let names: Vec<&str> = no_size.iter().map(|update| update.name.as_str()).collect();
+                let count = if no_size.iter().all(|update| update.source == "aur") { format!("{} AUR", no_size.len()) } else { no_size.len().to_string() };
+                wrapped(&mut lines, "no size", &format!("{count} · {}", names.join(", ")), room, pal.ink);
             }
             if app.updates.is_empty() {
-                push("updates", "none pending".to_string(), pal.label);
+                lines.push(("updates".into(), "none pending".to_string(), pal.label));
             }
             "PENDING"
         }
@@ -902,10 +1024,10 @@ fn tile_details(app: &App, tile: usize, pal: &Palette) -> (&'static str, Vec<(St
                 let day = activity.date.get(5..).unwrap_or(&activity.date);
                 let crashes = if activity.crashes == 1 { "crash" } else { "crashes" };
                 let errors = if activity.errors == 1 { "error" } else { "errors" };
-                push(day, format!("{} {crashes} · {} {errors}", thousands(activity.crashes), thousands(activity.errors)), if activity.crashes > 0 { pal.alert } else { pal.ink });
+                lines.push((day.into(), format!("{} {crashes} · {} {errors}", thousands(activity.crashes), thousands(activity.errors)), if activity.crashes > 0 { pal.teal } else { pal.ink }));
             }
             if app.activity.iter().all(|activity| activity.crashes + activity.errors == 0) {
-                push("days", "nothing logged".to_string(), pal.label);
+                lines.push(("days".into(), "nothing logged".to_string(), pal.label));
             }
             "PROBLEMS / DAY"
         }
@@ -913,27 +1035,25 @@ fn tile_details(app: &App, tile: usize, pal: &Palette) -> (&'static str, Vec<(St
             let shown = app.last_upgraded.len().min(16);
             for (index, entry) in app.last_upgraded.iter().take(shown).enumerate() {
                 let entry = match entry.split_once(' ').and_then(|(name, change)| change.split_once(" -> ").map(|(old, new)| (name, old, new))) {
-                    Some((name, old, new)) => format!("{name}  {} → {}", short_version(old), short_version(new)),
+                    Some((name, old, new)) => format!("{name}  {}", versions(old, new, 60)),
                     None => entry.clone(),
                 };
-                push(if index == 0 { "upgraded" } else { "" }, entry, pal.ink);
+                lines.push((if index == 0 { "upgraded" } else { "" }.into(), entry, pal.ink));
             }
             let total = match (app.last_upgrade.as_deref(), app.scan_time.as_deref()) {
                 (Some(last), Some(scan)) => upgraded_that_day(app, last, scan).map_or(app.last_upgraded.len(), |count| count as usize),
                 _ => app.last_upgraded.len(),
             };
             if total > shown && shown > 0 {
-                push("", format!("+ {} more", total - shown), pal.label);
+                lines.push((String::new(), format!("+ {} more", total - shown), pal.label));
             }
             if app.last_upgraded.is_empty() {
-                push("upgraded", "no full upgrade logged".to_string(), pal.label);
+                lines.push(("upgraded".into(), "no full upgrade logged".to_string(), pal.label));
             }
             "SINCE UPGRADE"
         }
         3 if app.omarchy => {
             if let Some(notes) = &app.omarchy_notes {
-                push("installed", notes.from.clone(), pal.ink);
-                push("available", notes.to.clone(), pal.ink);
                 for release in &notes.per_release {
                     let mut parts = vec![format!("{} {}", release.fixes, if release.fixes == 1 { "fix" } else { "fixes" })];
                     if release.improvements > 0 {
@@ -942,61 +1062,114 @@ fn tile_details(app: &App, tile: usize, pal: &Palette) -> (&'static str, Vec<(St
                     if release.security > 0 {
                         parts.push(format!("{} security", release.security));
                     }
-                    push(&release.tag, parts.join(" · "), if release.security > 0 { pal.warn } else { pal.ink });
+                    lines.push((release.tag.clone(), parts.join(" · "), if release.security > 0 { pal.warn } else { pal.ink }));
+                }
+                for (index, title) in notes.security_titles.iter().enumerate() {
+                    lines.push((if index == 0 { "security" } else { "" }.into(), title.clone(), pal.ink));
                 }
                 for (index, title) in notes.titles.iter().enumerate() {
-                    push(if index == 0 { "fixes" } else { "" }, title.clone(), pal.label);
+                    lines.push((if index == 0 { "fixes" } else { "" }.into(), title.clone(), pal.label));
                 }
-                if notes.fixes as usize > notes.titles.len() {
-                    push("", format!("+ {} more in the release notes", notes.fixes as usize - notes.titles.len()), pal.faint);
+                let (total, shown) = ((notes.fixes + notes.security) as usize, notes.titles.len() + notes.security_titles.len());
+                if total > shown {
+                    lines.push((String::new(), format!("+ {} more in the release notes", total - shown), pal.faint));
                 }
             } else if app.updates.iter().any(|update| update.name == "omarchy" || update.name == "omarchy-dev") {
-                push("release notes", "unavailable".to_string(), pal.label);
+                lines.push(("release notes".into(), "unavailable".to_string(), pal.label));
             } else {
-                push("omarchy", "up to date".to_string(), pal.label);
+                lines.push(("omarchy".into(), "up to date".to_string(), pal.label));
             }
             "OMARCHY"
         }
         3 => {
             for problem in app.problems.iter().filter(|problem| problem.status == "possibly-fixed") {
-                push(problem.name(), format!("{} × {} · {}", thousands(problem.count), problem.kind, problem.update), pal.teal);
+                lines.push((problem.name().into(), format!("{} × {} · {}", thousands(problem.count), kind_label(&problem.kind), problem.update), pal.teal));
             }
             if !app.problems.iter().any(|problem| problem.status == "possibly-fixed") {
-                push("problems", "no owner has an update".to_string(), pal.label);
+                lines.push(("problems".into(), "no owner has an update".to_string(), pal.label));
             }
             "OWNER HAS UPDATE"
         }
         4 => {
             if let Some(anatomy) = &app.anatomy {
                 for (index, chunk) in anatomy.orphan_names.chunks(4).enumerate() {
-                    push(if index == 0 { "orphans" } else { "" }, chunk.join("  "), pal.warn);
+                    lines.push((if index == 0 { "orphans" } else { "" }.into(), chunk.join("  "), pal.warn));
                 }
                 if anatomy.orphans as usize > anatomy.orphan_names.len() {
-                    push("", format!("+ {} more", anatomy.orphans as usize - anatomy.orphan_names.len()), pal.label);
+                    lines.push((String::new(), format!("+ {} more", anatomy.orphans as usize - anatomy.orphan_names.len()), pal.label));
                 }
             }
             if let Some(preflight) = &app.preflight {
-                push("disk size", bytes(preflight.disk_total_bytes), pal.ink);
-                push("used", bytes(preflight.disk_used_bytes), pal.ink);
+                lines.push(("disk size".into(), bytes(preflight.disk_total_bytes), pal.ink));
+                lines.push(("used".into(), bytes(preflight.disk_used_bytes), pal.ink));
             }
             "DISK AND PACKAGES"
         }
         _ => {
+            if app.stage_done_at[0].is_some() {
+                let mut risky: Vec<_> = app.updates.iter().filter(|update| update.risk == "high").collect();
+                risky.sort_by(|a, b| a.name.cmp(&b.name));
+                if risky.is_empty() {
+                    lines.push(("risk".into(), "no high-risk update".to_string(), pal.ink));
+                } else {
+                    lines.push(("risk".into(), format!("{} high", risky.len()), pal.alert));
+                }
+                for update in risky.iter().take(12) {
+                    let reason = if update.reason.is_empty() { String::new() } else { format!(" · {}", update.reason) };
+                    lines.push((String::new(), format!("{}  {}{reason}", update.name, versions(&update.old, &update.new, 60)), pal.ink));
+                }
+                if risky.len() > 12 {
+                    lines.push((String::new(), format!("+ {} more", risky.len() - 12), pal.label));
+                }
+            }
             if let Some(anatomy) = &app.anatomy
                 && !anatomy.kernel_running.is_empty()
             {
                 let installed = if anatomy.kernel_installed.is_empty() { anatomy.kernel_running.clone() } else { anatomy.kernel_installed.clone() };
-                push("kernel", format!("{} running · {installed} installed", anatomy.kernel_running), if anatomy.reboot_pending { pal.alert } else { pal.ink });
+                let after = app.reboot_after();
+                let (state, color) = if anatomy.reboot_pending {
+                    (format!("pending · {} running, {installed} installed", anatomy.kernel_running), pal.alert)
+                } else if !after.is_empty() {
+                    (reboot_reason(&after), pal.warn)
+                } else {
+                    (format!("not needed · {} running, {installed} installed", anatomy.kernel_running), pal.ink)
+                };
+                wrapped(&mut lines, "reboot", &state, room, color);
+            }
+            if let Some(preflight) = &app.preflight {
+                let (snapshot, color) = match preflight.snapshot_by.as_str() {
+                    "snap-pac" => ("snap-pac takes one before each pacman transaction", pal.ink),
+                    "omarchy-update" => ("omarchy-update takes one first · pacman -Syu takes none", pal.warn),
+                    _ if preflight.snapper_configured => ("snapper set up, no pacman hook", pal.warn),
+                    _ => ("snapper not set up", pal.warn),
+                };
+                wrapped(&mut lines, "snapshot", snapshot, room, color);
+                let need = app.space_needed();
+                let space = if need > 0 { format!("{} available · ≈ {} needed", bytes(preflight.free_bytes), bytes(need)) } else { format!("{} available", bytes(preflight.free_bytes)) };
+                let color = match app.space_severity() {
+                    Some(Severity::Bad) => pal.alert,
+                    Some(Severity::Warn) => pal.warn,
+                    _ => pal.ink,
+                };
+                lines.push(("space".into(), space, color));
+            }
+            if app.stage_done_at[2].is_some() && app.news.is_empty() && !app.news_failed {
+                let since = app.last_upgrade.as_deref().and_then(|iso| iso.get(5..10)).map(|day| format!(" since {day}")).unwrap_or_default();
+                lines.push(("news".into(), format!("none new{since}"), pal.ink));
             }
             for (index, news) in app.news.iter().enumerate() {
-                push(if index == 0 { "news" } else { "" }, format!("{}  {}", news.date.get(5..).unwrap_or(&news.date), news.title), if news.manual_intervention { pal.alert } else { pal.ink });
+                lines.push((if index == 0 { "news" } else { "" }.into(), format!("{}  {}", news.date.get(5..).unwrap_or(&news.date), news.title), if news.manual_intervention { pal.alert } else { pal.ink }));
             }
-            let failed: Vec<&String> = app.update_errors.iter().chain(&app.problem_errors).collect();
-            for (index, error) in failed.iter().enumerate() {
-                push(if index == 0 { "failed" } else { "" }, (*error).clone(), pal.warn);
-            }
-            if app.news_failed {
-                push(if failed.is_empty() { "failed" } else { "" }, "news".to_string(), pal.warn);
+            if app.finished_at.is_some() {
+                let mut failed: Vec<&str> = app.update_errors.iter().chain(&app.problem_errors).map(String::as_str).collect();
+                if app.news_failed {
+                    failed.push("news");
+                }
+                if failed.is_empty() {
+                    lines.push(("checks".into(), "all ran".to_string(), pal.ink));
+                } else {
+                    lines.push(("checks".into(), format!("{} failed", failed.join(", ")), pal.warn));
+                }
             }
             "BEFORE YOU UPDATE"
         }
@@ -1036,6 +1209,126 @@ fn dep_side(names: &[String], pending: &std::collections::HashSet<&str>, trouble
     sorted
 }
 
+fn place(area: Rect, app: &App, scene: &Scene, width: u16, height: u16) -> Rect {
+    let centred = Rect::new(area.x + area.width.saturating_sub(width) / 2, area.y + area.height.saturating_sub(height) / 2, width, height);
+    let (middle, top) = if let Some(tile) = app.tile {
+        let tile_w = area.width.saturating_sub(2) / 6;
+        (area.x + 1 + tile as u16 * tile_w + tile_w / 2, area.y + 1)
+    } else if let Some(part) = app.part {
+        let Some(band) = scene.band else { return centred };
+        let half = area.width / 2;
+        (if part < 4 { area.x + half / 2 } else { area.x + half + half / 2 }, band.y)
+    } else if let Some(row) = scene.chosen[app.focus.index()] {
+        let list = scene.lists.iter().find(|(pane, _)| *pane == app.focus).map_or(area, |(_, rect)| *rect);
+        (list.x + list.width / 2, row.y.saturating_sub(2).max(list.y))
+    } else {
+        return centred;
+    };
+    let x = middle.saturating_sub(width / 2).min(area.right().saturating_sub(width)).max(area.x);
+    let y = top.min(area.bottom().saturating_sub(height + 1)).max(area.y + 1);
+    Rect::new(x, y, width, height)
+}
+
+fn clear_around(buf: &mut Buffer, area: Rect, rect: Rect, pal: &Palette) {
+    let inside = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(2)).intersection(buf.area);
+    let ring = Rect::new(rect.x.saturating_sub(1), rect.y.saturating_sub(1), rect.width + 2, rect.height + 2).intersection(inside);
+    for y in ring.top()..ring.bottom() {
+        for x in ring.left()..ring.right() {
+            if !rect.contains(ratatui::layout::Position::new(x, y)) {
+                let cell = &mut buf[(x, y)];
+                cell.reset();
+                cell.set_bg(pal.page);
+            }
+        }
+    }
+}
+
+fn part_details(app: &App, k: usize, room: usize, pal: &Palette) -> (String, Vec<(String, String, Color)>) {
+    let subsystem = Subsystem::ALL[k];
+    let mut lines: Vec<(String, String, Color)> = Vec::new();
+    let kernel_package = app.health.kernel.as_ref().map(|kernel| kernel.package.clone()).unwrap_or_default();
+    match k {
+        0 => {
+            if let Some(kernel) = &app.health.kernel {
+                lines.push(("running".into(), kernel.running.clone(), pal.ink));
+                if !kernel.installed.is_empty() {
+                    lines.push(("installed".into(), kernel.installed.clone(), pal.ink));
+                }
+                if let Some(seconds) = kernel.uptime_seconds {
+                    let (days, hours) = (seconds / 86_400, (seconds % 86_400) / 3600);
+                    let up = if days > 0 { format!("{days} {} {hours} h", if days == 1 { "day" } else { "days" }) } else { format!("{hours} h") };
+                    lines.push(("up".into(), up, pal.ink));
+                }
+                let after = app.reboot_after();
+                let (reboot, color) = if kernel.reboot_pending {
+                    ("pending now".to_string(), pal.alert)
+                } else if !after.is_empty() {
+                    (reboot_reason(&after), pal.warn)
+                } else {
+                    ("not needed".to_string(), pal.ink)
+                };
+                wrapped(&mut lines, "reboot", &reboot, room, color);
+            }
+        }
+        1 => {
+            if let Some((loaded, installed)) = &app.health.nvidia {
+                lines.push(("loaded".into(), format!("nvidia {loaded}"), pal.ink));
+                if !installed.is_empty() {
+                    lines.push(("installed".into(), format!("nvidia {installed}"), pal.ink));
+                }
+            }
+        }
+        2 => {
+            if let Some((running, installed)) = &app.health.hyprland {
+                lines.push(("running".into(), format!("Hyprland {running}"), pal.ink));
+                if !installed.is_empty() {
+                    lines.push(("installed".into(), format!("Hyprland {installed}"), pal.ink));
+                }
+            }
+            if let Some(errors) = app.health.config_errors {
+                let text = match errors {
+                    0 => "no errors".to_string(),
+                    1 => "1 error".to_string(),
+                    n => format!("{n} errors"),
+                };
+                lines.push(("config".into(), text, if errors > 0 { pal.warn } else { pal.ink }));
+            }
+        }
+        _ => {}
+    }
+    let mut updates: Vec<&Update> = app.updates.iter().filter(|update| Subsystem::of(&update.name) == subsystem).collect();
+    updates.sort_by_key(|update| (update.name != kernel_package, update.risk_rank(), update.name.clone()));
+    if app.stage_done_at[0].is_some() {
+        let high = updates.iter().filter(|update| update.risk == "high").count();
+        let medium = updates.iter().filter(|update| update.risk == "medium").count();
+        let mut summary = vec![updates.len().to_string()];
+        if high > 0 {
+            summary.push(format!("{high} high"));
+        }
+        if medium > 0 {
+            summary.push(format!("{medium} medium"));
+        }
+        lines.push(("updates".into(), if updates.is_empty() { "none pending".to_string() } else { summary.join(" · ") }, if updates.is_empty() { pal.label } else { pal.ink }));
+    }
+    for update in updates.iter().take(10) {
+        let color = match update.risk.as_str() {
+            "high" => pal.alert,
+            "medium" => pal.warn,
+            _ => pal.ink,
+        };
+        lines.push((String::new(), format!("{}  {}", update.name, versions(&update.old, &update.new, 40)), color));
+    }
+    if updates.len() > 10 {
+        lines.push((String::new(), format!("+ {} more", updates.len() - 10), pal.label));
+    }
+    let mut problems: Vec<_> = app.problems.iter().filter(|problem| problem.part() == subsystem).collect();
+    problems.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.subject.cmp(&b.subject)));
+    for (index, problem) in problems.iter().enumerate() {
+        lines.push((if index == 0 { "problems" } else { "" }.into(), format!("{} × {} · {}", thousands(problem.count), kind_label(&problem.kind), problem.subject), pal.teal));
+    }
+    (subsystem.label().to_string(), lines)
+}
+
 fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut Scene) {
     let width = area.width.saturating_sub(20).min(104);
     let room = width.saturating_sub(18) as usize;
@@ -1043,8 +1336,12 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
     let mut block: Option<DepBlock> = None;
     let title;
     if let Some(tile) = app.tile {
-        let (name, details) = tile_details(app, tile, pal);
+        let (name, details) = tile_details(app, tile, room, pal);
         title = name.to_string();
+        lines = details;
+    } else if let Some(part) = app.part {
+        let (name, details) = part_details(app, part, room, pal);
+        title = name;
         lines = details;
     } else {
     match app.focus {
@@ -1052,26 +1349,33 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
             let updates = app.visible_updates();
             let Some(update) = updates.get(app.lists[0].selected.min(updates.len().saturating_sub(1))) else { return };
             title = update.name.clone();
+            let deps = app.anatomy.as_ref().and_then(|anatomy| anatomy.deps.get(&update.name));
+            let listed = deps.is_some_and(|deps| !deps.depends_on.is_empty() || !deps.required_names.is_empty());
+            let value_w = if listed { 32 } else { room };
             lines.push(("version".into(), format!("{} → {}", update.old, update.new), pal.ink));
             let risk_color = match update.risk.as_str() {
                 "high" => pal.alert,
                 "medium" => pal.warn,
                 _ => pal.ink,
             };
-            lines.push(("risk".into(), format!("{} · {}", update.risk, if update.reason.is_empty() { "routine" } else { &update.reason }), risk_color));
-            lines.push(("jump".into(), if update.bump.is_empty() { "other".into() } else { update.bump.clone() }, pal.ink));
+            let risk = if update.reason.is_empty() { update.risk.clone() } else { format!("{} · {}", update.risk, update.reason) };
+            wrapped(&mut lines, "risk", &risk, value_w, risk_color);
+            if !update.bump.is_empty() && !update.reason.contains(update.bump.as_str()) {
+                lines.push(("jump".into(), update.bump.clone(), pal.ink));
+            }
             lines.push(("source".into(), update.source.clone(), pal.ink));
             lines.push(("part".into(), Subsystem::of(&update.name).label().to_string(), pal.ink));
-            lines.push(("download".into(), update.download_bytes.map(bytes).unwrap_or_else(|| "unknown".into()), pal.ink));
-            lines.push(("disk change".into(), update.installed_delta_bytes.map(signed_bytes).unwrap_or_else(|| "unknown".into()), pal.ink));
-            for problem in app.problems.iter().filter(|problem| problem.package == update.name) {
-                lines.push(("problem".into(), format!("{} × {} · {}", thousands(problem.count), problem.kind, problem.subject), pal.teal));
+            if let Some(download) = update.download_bytes {
+                lines.push(("download".into(), bytes(download), pal.ink));
             }
-            if let Some(deps) = app.anatomy.as_ref().and_then(|anatomy| anatomy.deps.get(&update.name)) {
-                if deps.depends_on.is_empty() && deps.required_names.is_empty() {
-                    lines.push(("depends on".into(), format!("{} packages", deps.depends), pal.ink));
-                    lines.push(("required by".into(), format!("{} packages", deps.required_by), pal.ink));
-                } else {
+            if let Some(delta) = update.installed_delta_bytes {
+                lines.push(("disk change".into(), signed_bytes(delta), pal.ink));
+            }
+            for problem in app.problems.iter().filter(|problem| problem.package == update.name) {
+                wrapped(&mut lines, "problem", &format!("{} × {} · {}", thousands(problem.count), kind_label(&problem.kind), problem.subject), value_w, pal.teal);
+            }
+            if let Some(deps) = deps {
+                if listed {
                     let pending: std::collections::HashSet<&str> = app.updates.iter().map(|update| update.name.as_str()).collect();
                     let troubled: std::collections::HashSet<&str> = app.problems.iter().map(|problem| problem.package.as_str()).filter(|name| !name.is_empty()).collect();
                     block = Some(DepBlock {
@@ -1080,6 +1384,9 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
                         depends: deps.depends,
                         required_by: deps.required_by,
                     });
+                } else {
+                    lines.push(("depends on".into(), format!("{} {}", deps.depends, if deps.depends == 1 { "package" } else { "packages" }), pal.ink));
+                    lines.push(("required by".into(), format!("{} {}", deps.required_by, if deps.required_by == 1 { "package" } else { "packages" }), pal.ink));
                 }
             }
         }
@@ -1088,7 +1395,7 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
             let Some(problem) = problems.get(app.lists[1].selected.min(problems.len().saturating_sub(1))) else { return };
             title = problem.name().to_string();
             lines.push(("subject".into(), problem.subject.clone(), pal.ink));
-            lines.push(("kind".into(), problem.kind.clone(), pal.ink));
+            lines.push(("kind".into(), kind_label(&problem.kind).to_string(), pal.ink));
             let since = app.since.as_deref().and_then(|since| since.get(5..16)).map(|since| format!(" since {}", since.replace('T', " "))).unwrap_or_default();
             lines.push(("count".into(), format!("{}{since}", thousands(problem.count)), pal.ink));
             if !problem.last.is_empty() {
@@ -1099,45 +1406,49 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
                 lines.push(("signal".into(), if meaning.is_empty() { problem.signal.clone() } else { format!("{} · {meaning}", problem.signal) }, pal.ink));
             }
             for (index, frame) in problem.frames.split('|').filter(|frame| !frame.is_empty()).enumerate() {
-                lines.push((if index == 0 { "crashed in".into() } else { String::new() }, frame_text(frame), if index == 0 { pal.alert } else { pal.label }));
+                lines.push((if index == 0 { "crashed in".into() } else { String::new() }, frame_text(frame), if index == 0 { pal.ink } else { pal.label }));
             }
-            lines.push(("owner".into(), if problem.package.is_empty() { "unknown".into() } else { problem.package.clone() }, pal.ink));
+            if !problem.package.is_empty() {
+                lines.push(("owner".into(), problem.package.clone(), pal.ink));
+            }
             let status = match problem.status.as_str() {
                 "possibly-fixed" => format!("the owner has an update: {}", problem.update),
                 "config" => "a configuration error, no package can fix it".into(),
                 "not-packaged" => "the program is not from a package".into(),
-                "unknown-owner" => "the journal did not record which program it was".into(),
+                "unknown-owner" => match problem.kind.as_str() {
+                    "crash" => "the program file no longer exists".into(),
+                    "failed-unit" => "no unit file found".into(),
+                    _ => "the journal has no program path for it".into(),
+                },
                 _ => "no update pending for the owner".into(),
             };
-            lines.push(("status".into(), status, if problem.status == "possibly-fixed" { pal.teal } else { pal.ink }));
-            lines.push(("note".into(), "an update to the owner is not a verified fix".into(), pal.faint));
+            wrapped(&mut lines, "status", &status, room, if problem.status == "possibly-fixed" { pal.teal } else { pal.ink });
+            if problem.status == "possibly-fixed" {
+                lines.push(("note".into(), "an update to the owner is not a verified fix".into(), pal.faint));
+            }
             lines.push(("j".into(), format!("shows the live journal filtered to {}", problem.name()), pal.label));
         }
         Pane::Events => {
             let events = app.visible_events();
             let Some(event) = events.get(app.lists[2].selected.min(events.len().saturating_sub(1))) else { return };
             title = event.ident.clone();
-            lines.push(("time".into(), event.clock.clone(), pal.ink));
-            lines.push(("source".into(), if event.source == Source::Pacman { "pacman log".into() } else { "journal, priority error or higher".into() }, pal.ink));
-            let mut current = String::new();
-            let mut first = true;
-            for word in event.message.split_whitespace() {
-                if !current.is_empty() && current.chars().count() + word.chars().count() + 1 > room {
-                    lines.push((if first { "message".into() } else { String::new() }, std::mem::take(&mut current), pal.ink));
-                    first = false;
-                }
-                if !current.is_empty() {
-                    current.push(' ');
-                }
-                current.push_str(word);
+            let when = match event.day.get(5..) {
+                Some(day) => format!("{day} {}", event.clock),
+                None => event.clock.clone(),
+            };
+            lines.push(("time".into(), when, pal.ink));
+            if !event.program.is_empty() && event.program != event.ident {
+                lines.push(("program".into(), event.program.clone(), pal.ink));
             }
-            lines.push((if first { "message".into() } else { String::new() }, current, pal.ink));
+            lines.push(("source".into(), if event.source == Source::Pacman { "pacman log".into() } else { "journal, priority error or higher".into() }, pal.ink));
+            wrapped(&mut lines, "message", &event.message, room, pal.ink);
         }
     }
     }
     let Some(block) = block else {
         let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(6));
-        let rect = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
+        let rect = place(area, app, scene, width, height);
+        clear_around(buf, area, rect, pal);
         clear(buf, rect, pal);
         let inner = frame(buf, rect, &title, true, pal);
         facts(buf, inner.x, inner.y + 1, inner.width, &lines, inner.height.saturating_sub(1), pal);
@@ -1147,7 +1458,8 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
     let width = area.width.saturating_sub(10).min(150);
     let facts_w = 46u16;
     let height = ((lines.len() as u16).max(block_rows) + 4).min(area.height.saturating_sub(6));
-    let rect = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
+    let rect = place(area, app, scene, width, height);
+    clear_around(buf, area, rect, pal);
     clear(buf, rect, pal);
     let inner = frame(buf, rect, &title, true, pal);
     facts(buf, inner.x, inner.y + 1, facts_w, &lines, inner.height.saturating_sub(1), pal);
@@ -1184,7 +1496,7 @@ fn dep_block(buf: &mut Buffer, x: u16, y: u16, width: u16, block: &DepBlock, pal
     let right_x = pic_x + pic_w + 1;
     let left_head = format!("it depends on {}", block.depends);
     text(buf, (pic_x - 1).saturating_sub(left_head.chars().count() as u16), y, &left_head, Style::new().fg(pal.label), left_w);
-    text(buf, right_x, y, &format!("{} require it", block.required_by), Style::new().fg(pal.label), right_w);
+    text(buf, right_x, y, &format!("{} {}", block.required_by, if block.required_by == 1 { "requires it" } else { "require it" }), Style::new().fg(pal.label), right_w);
     let tone = |kind: u8| match kind {
         2 => pal.teal,
         1 => pal.ink,
@@ -1605,6 +1917,10 @@ fn local_mask(wire: &Wire, index: usize) -> u8 {
     mask
 }
 
+fn counted(value: u64, one: &str, many: &str) -> String {
+    format!("{} {}", thousands(value), if value == 1 { one } else { many })
+}
+
 fn eye_log(app: &App) -> (Vec<(String, String, usize)>, bool) {
     let mut lines: Vec<(String, String)> = Vec::new();
     let kind = |name: &str| app.problems.iter().filter(|problem| problem.kind == name).map(|problem| problem.count).sum::<u64>();
@@ -1613,13 +1929,13 @@ fn eye_log(app: &App) -> (Vec<(String, String, usize)>, bool) {
     }
     if app.stage_done_at[0].is_some() {
         let aur = app.updates.iter().filter(|update| update.source == "aur").count();
-        lines.push(("› checkupdates".into(), format!("{} updates", apos((app.updates.len() - aur) as u64))));
+        lines.push(("› checkupdates".into(), counted((app.updates.len() - aur) as u64, "update", "updates")));
         lines.push(("› yay -Qua".into(), format!("{aur} aur")));
     }
     if app.stage_done_at[1].is_some() {
-        lines.push(("› coredumpctl list".into(), format!("{} crashes", apos(kind("crash")))));
-        lines.push(("› journalctl -p err".into(), format!("{} errors", apos(kind("journal")))));
-        lines.push(("› systemctl --failed".into(), format!("{} units", kind("failed-unit"))));
+        lines.push(("› coredumpctl list".into(), counted(kind("crash"), "crash", "crashes")));
+        lines.push(("› journalctl -p err".into(), counted(kind("journal"), "error", "errors")));
+        lines.push(("› systemctl --failed".into(), counted(kind("failed-unit"), "unit", "units")));
         if let Some(errors) = app.health.config_errors {
             lines.push(("› hyprctl configerrors".into(), errors.to_string()));
         }
@@ -1634,7 +1950,7 @@ fn eye_log(app: &App) -> (Vec<(String, String, usize)>, bool) {
         lines.push(("› hyprctl version".into(), format!("v{running}")));
     }
     if let Some(anatomy) = &app.anatomy {
-        lines.push(("› pacman -Q".into(), format!("{} · {} orphans", apos(anatomy.packages), anatomy.orphans)));
+        lines.push(("› pacman -Q".into(), format!("{} · {}", thousands(anatomy.packages), counted(anatomy.orphans, "orphan", "orphans"))));
         if let Some(freeable) = anatomy.cache_freeable_bytes {
             lines.push(("› paccache -dk1".into(), format!("{} freeable", bytes(freeable))));
         }
@@ -1644,7 +1960,7 @@ fn eye_log(app: &App) -> (Vec<(String, String, usize)>, bool) {
         lines.push(("› curl archlinux.org/feeds/news".into(), news));
     }
     if let Some(preflight) = &app.preflight {
-        lines.push(("› df /".into(), format!("{} free", bytes(preflight.free_bytes))));
+        lines.push(("› df /".into(), format!("{} available", bytes(preflight.free_bytes))));
     }
     let mut typing = false;
     if app.finished_at.is_none() {
@@ -1676,13 +1992,14 @@ fn draw_lists(buf: &mut Buffer, rect: Rect, app: &App, pal: &Palette, now: Insta
         scene.rows[pane.index()] = match pane {
             Pane::Updates => {
                 scene.map_fits = map_fits(area);
-                if app.updates_map && scene.map_fits { draw_updates_map(buf, area, app, pal, scene) } else { draw_updates(buf, area, app, pal) }
+                if app.updates_map && scene.map_fits { draw_updates_map(buf, area, app, pal, scene) } else { draw_updates(buf, area, app, pal, scene) }
             }
-            Pane::Problems => draw_problems(buf, area, app, pal),
-            Pane::Events => draw_events(buf, area, app, pal, now),
+            Pane::Problems => draw_problems(buf, area, app, pal, scene),
+            Pane::Events => draw_events(buf, area, app, pal, now, scene),
         };
         rects.push((*pane, area));
     }
+    scene.lists.clone_from(&rects);
     rects
 }
 
@@ -1692,13 +2009,42 @@ fn band_rows(area: Rect) -> u16 {
     by_height.min(by_width.max(15))
 }
 
+fn grown_rows(area: Rect, tiles: bool) -> u16 {
+    let used = 2 + if tiles { TILES_HEIGHT + 3 } else { 0 };
+    let by_height = area.height.saturating_sub(used + 1).clamp(15, 40);
+    let by_width = (f32::from(area.width.saturating_sub(116)) / 3.6) as u16;
+    by_height.min(by_width.max(15))
+}
+
+fn fit_facts(main: &str, second: &str, kind: u8, room: usize) -> (String, String) {
+    let needed = |text: &str| text.chars().count() + 3 + second.chars().count();
+    if second.is_empty() || (kind == 0 && needed(main) > room) {
+        return (fit(main, room), String::new());
+    }
+    let bare = main.replace(" ✓", "");
+    let plain = bare.replace(" running", "").replace(" loaded", "");
+    let short = if second.contains("config") {
+        "Hyprland".to_string()
+    } else {
+        plain.strip_prefix("nvidia ").or_else(|| plain.strip_prefix("Hyprland ")).unwrap_or(&plain).to_string()
+    };
+    for candidate in [main.to_string(), bare, plain, short.clone()] {
+        if needed(&candidate) <= room {
+            return (candidate, second.to_string());
+        }
+    }
+    let keep = room.saturating_sub(3 + second.chars().count());
+    if keep >= 4 { (fit(&short, keep), second.to_string()) } else { (String::new(), fit(second, room)) }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Palette, now: Instant, cell: (u16, u16), scene: &mut Scene) {
     use std::collections::{HashMap, HashSet};
     draw_header(buf, Rect::new(area.x, area.y, area.width, 1), app, pal, now);
     let keys = Rect::new(area.x, area.bottom() - 1, area.width, 1);
     let band_visible = app.visible[1];
-    let rows = band_rows(area);
+    let alone = band_visible && !app.lists_shown();
+    let rows = if alone { grown_rows(area, app.visible[0]) } else { band_rows(area) };
     let eye_w = ((f32::from(rows) * 3.6).round() as u16).min(area.width.saturating_sub(4));
     let eye_x = area.x + (area.width - eye_w) / 2;
     let (cw, ch) = (f32::from(cell.0.max(1)), f32::from(cell.1.max(1)));
@@ -1751,7 +2097,11 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
         }
         y = tiles.bottom() + gutter;
     }
+    if alone {
+        y += keys.y.saturating_sub(y + rows + 1) / 2;
+    }
     let band = Rect::new(area.x, y, area.width, if band_visible { rows } else { 0 });
+    scene.band = band_visible.then_some(band);
     let lists_top = if band_visible { band.bottom() + 1 } else { y };
     let lists_area = Rect::new(area.x, lists_top, area.width, keys.y.saturating_sub(lists_top));
     let lists = draw_lists(buf, lists_area, app, pal, now, scene);
@@ -1765,7 +2115,7 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
             text(buf, rect.x + 2, rect.y + 3, "checking…", Style::new().fg(pal.faint), rect.width.saturating_sub(4));
         }
     }
-    draw_keys(buf, keys, app, pal, now);
+    draw_keys(buf, keys, app, pal, now, scene.map_fits);
     if !band_visible {
         return;
     }
@@ -1841,6 +2191,7 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
     let mut outer: Vec<(Target, Wire)> = Vec::new();
     let mut icon_slots: Vec<usize> = Vec::new();
     let mut texts: Vec<(u16, u16, Vec<Span<'static>>)> = Vec::new();
+    let mut mark: Option<Rect> = None;
     let counted = app.stage_done_at[0].is_some();
     for (k, part) in parts.iter().enumerate() {
         let (subsystem, updates, high, problems) = *part;
@@ -1856,11 +2207,17 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
         }
         let badge = Span::styled(format!(" {problems} "), Style::new().fg(pal.page).bg(pal.teal).add_modifier(Modifier::BOLD));
         let room = 30usize;
-        let main = fit(&main, room);
+        let avail = if k < 4 { left_trunk.saturating_sub(13).saturating_sub(area.x + 1) as usize } else { area.right().saturating_sub(2).saturating_sub(right_trunk + 13) as usize };
+        let (main, second) = if main == "checking…" { (main, String::new()) } else { fit_facts(&main, &second, second_kind, avail) };
         let tone = if main == "checking…" { pal.faint } else { mix(pal.ink, tint(flash_kind), f64::from(flash_strength)) };
-        let mut fact_line = vec![Span::styled(main.clone(), Style::new().fg(tone))];
-        if !second.is_empty() && main.chars().count() + 3 + second.chars().count() <= room {
-            fact_line.push(Span::styled(" · ".to_string(), Style::new().fg(pal.faint)));
+        let mut fact_line = Vec::new();
+        if !main.is_empty() {
+            fact_line.push(Span::styled(main.clone(), Style::new().fg(tone)));
+        }
+        if !second.is_empty() {
+            if !main.is_empty() {
+                fact_line.push(Span::styled(" · ".to_string(), Style::new().fg(pal.faint)));
+            }
             fact_line.push(Span::styled(second, Style::new().fg(match second_kind {
                 2 => pal.alert,
                 1 => pal.warn,
@@ -1879,6 +2236,9 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
             let right_edge = icon_x.saturating_sub(3);
             for (row, spans) in [(y, head), (y + 2, fact_line)] {
                 let w = width(&spans);
+                if app.part == Some(k) && row == y {
+                    mark = Some(Rect::new(right_edge.saturating_sub(w).max(area.x).saturating_sub(1), row, w + 2, 1));
+                }
                 texts.push((right_edge.saturating_sub(w).max(area.x), row, spans));
             }
             let pad = right_edge.saturating_sub(room as u16 + 3).max(area.x);
@@ -1897,6 +2257,9 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
             }
             let left_edge = icon_x + 8 + 3;
             for (row, spans) in [(y, head), (y + 2, fact_line)] {
+                if app.part == Some(k) && row == y {
+                    mark = Some(Rect::new(left_edge - 1, row, width(&spans) + 2, 1));
+                }
                 texts.push((left_edge, row, spans));
             }
             let pad = (left_edge + room as u16 + 2).min(area.right() - 1);
@@ -2084,8 +2447,23 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
         }
         buf[wire.cells[head]].set_symbol("●").set_fg(color);
     }
+    if area.width >= 250 {
+        let free = |row: u16, until: u16| texts.iter().all(|(x, y, _)| *y != row || *x > until + 2);
+        let label = ":: ²SUBSYSTEMS";
+        if free(band.y, area.x + 2 + label.chars().count() as u16) {
+            text(buf, area.x + 2, band.y, label, Style::new().fg(pal.label), 20);
+        }
+        let legend = "✓ = running matches installed";
+        let checked = texts.iter().any(|(_, _, spans)| spans.iter().any(|span| span.content.contains('✓')));
+        if checked && free(band.bottom() - 1, area.x + 2 + legend.chars().count() as u16) {
+            text(buf, area.x + 2, band.bottom() - 1, legend, Style::new().fg(pal.faint), 40);
+        }
+    }
     for (x, y, spans) in texts {
         put(buf, x, y, spans, area.right().saturating_sub(x));
+    }
+    if let Some(rect) = mark {
+        select_row(buf, rect, true, pal);
     }
 }
 
@@ -2103,7 +2481,11 @@ fn part_lines(app: &App, index: usize, part: (Subsystem, usize, usize, usize)) -
     match index {
         0 => {
             if let Some(kernel) = &app.health.kernel {
-                let uptime = kernel.uptime_seconds.map_or_else(String::new, |seconds| if seconds >= 86_400 { format!("up {} d", seconds / 86_400) } else { format!("up {} h", seconds / 3600) });
+                let uptime = kernel.uptime_seconds.map_or_else(String::new, |seconds| match seconds / 86_400 {
+                    0 => format!("up {} h", seconds / 3600),
+                    1 => "up 1 day".to_string(),
+                    days => format!("up {days} days"),
+                });
                 if kernel.reboot_pending {
                     return (format!("{} running", kernel.running), "reboot".into(), 2);
                 }
@@ -2126,8 +2508,12 @@ fn part_lines(app: &App, index: usize, part: (Subsystem, usize, usize, usize)) -
             if let Some((running, installed)) = &app.health.hyprland {
                 let installed = release(installed);
                 if installed.is_empty() || installed == *running {
-                    let errors = app.health.config_errors.map_or_else(String::new, |errors| format!("{errors} config errors"));
-                    let kind = u8::from(app.health.config_errors.is_some_and(|errors| errors > 0));
+                    let errors = match app.health.config_errors {
+                        Some(1) => "1 config error".to_string(),
+                        Some(errors) if errors > 1 => format!("{errors} config errors"),
+                        _ => String::new(),
+                    };
+                    let kind = u8::from(!errors.is_empty());
                     return (format!("Hyprland {running} running ✓"), errors, kind);
                 }
                 return (format!("Hyprland {running} ≠ {installed}"), "relogin".into(), 2);
@@ -2137,10 +2523,16 @@ fn part_lines(app: &App, index: usize, part: (Subsystem, usize, usize, usize)) -
     }
     let (subsystem, _, _, problems) = part;
     if problems > 0
-        && let Some(problem) = app.problems.iter().filter(|problem| !problem.package.is_empty() && Subsystem::of(&problem.package) == subsystem).max_by_key(|problem| problem.count)
+        && let Some(problem) = app.problems.iter().filter(|problem| problem.part() == subsystem).max_by_key(|problem| problem.count)
     {
-        let kind = if problem.kind == "crash" { "crashes" } else { "errors" };
-        return (format!("{} {} {kind}", problem.name(), apos(problem.count)), if problems == 1 { "1 problem".to_string() } else { format!("{problems} problems") }, 0);
+        let fact = match (problem.kind.as_str(), problem.count) {
+            ("failed-unit", _) => format!("{} failed", problem.name()),
+            ("crash", 1) => format!("{} 1 crash", problem.name()),
+            ("crash", count) => format!("{} {} crashes", problem.name(), thousands(count)),
+            (_, 1) => format!("{} 1 error", problem.name()),
+            (_, count) => format!("{} {} errors", problem.name(), thousands(count)),
+        };
+        return (fact, String::new(), 0);
     }
     match app.updates.iter().filter(|update| Subsystem::of(&update.name) == subsystem).min_by_key(|update| (update.risk_rank(), update.name.clone())) {
         Some(update) => (format!("{} → {}", update.name, short_version(&update.new)), update.risk.clone(), if update.risk == "high" { 2 } else if update.risk == "medium" { 1 } else { 0 }),
@@ -2148,16 +2540,12 @@ fn part_lines(app: &App, index: usize, part: (Subsystem, usize, usize, usize)) -
     }
 }
 
-pub fn apos(value: u64) -> String {
-    thousands(value).replace(',', "'")
-}
-
 fn subsystem_parts(app: &App) -> Vec<(Subsystem, usize, usize, usize)> {
     Subsystem::ALL
         .into_iter()
         .map(|subsystem| {
             let (updates, high) = app.updates.iter().filter(|update| Subsystem::of(&update.name) == subsystem).fold((0, 0), |(count, high), update| (count + 1, high + usize::from(update.risk == "high")));
-            let problems = app.problems.iter().filter(|problem| !problem.package.is_empty() && Subsystem::of(&problem.package) == subsystem).count();
+            let problems = app.problems.iter().filter(|problem| problem.part() == subsystem).count();
             (subsystem, updates, high, problems)
         })
         .collect()

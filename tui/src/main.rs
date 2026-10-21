@@ -65,7 +65,8 @@ Usage: rumb [--demo] [--no-anim] [--theme <name>] [--since <time>] [--no-aur]
   --no-aur        Passed on to rumb-scan
 
 Keys: 1-5 show or hide the instruments, subsystems, updates, problems and
-live events; tab or left/right moves the focus between the lists; up/down,
+live events; tab moves the focus between the instruments, the subsystems and
+the lists; left/right moves it between the lists, tiles or parts; up/down,
 PgUp/PgDn and Home/End select; enter opens the selection; / filters the
 focused list; j shows the journal of the selected problem; e exports a
 Markdown report to ~/rumb-exports; esc closes or clears; r rescans; q quits.
@@ -230,7 +231,30 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3]) -> Action {
             KeyCode::Right => app.move_tile(true),
             KeyCode::Tab => app.cycle_focus(true, true),
             KeyCode::BackTab => app.cycle_focus(false, true),
+            KeyCode::Down if !app.overlay && app.visible[1] => app.enter_band(),
             KeyCode::Down | KeyCode::Esc if !app.overlay => app.leave_tiles(),
+            KeyCode::Enter => app.overlay = true,
+            KeyCode::Char(digit @ '1'..='5') => {
+                app.press_panel(digit as usize - '1' as usize);
+                app.overlay = false;
+            }
+            _ => {}
+        }
+        return Action::Nothing;
+    }
+    if app.part.is_some() {
+        match key.code {
+            KeyCode::Char('q') => return Action::Quit,
+            KeyCode::Char('e') => return Action::Export,
+            KeyCode::Char('r') if app.finished_at.is_some() => return Action::Rescan,
+            KeyCode::Esc if app.overlay => app.overlay = false,
+            KeyCode::Left => app.move_part(false),
+            KeyCode::Right => app.move_part(true),
+            KeyCode::Tab => app.cycle_focus(true, true),
+            KeyCode::BackTab => app.cycle_focus(false, true),
+            KeyCode::Up if !app.overlay && app.visible[0] => app.enter_tiles(),
+            KeyCode::Down if !app.overlay && app.lists_shown() => app.leave_band(),
+            KeyCode::Esc if !app.overlay => app.leave_band(),
             KeyCode::Enter => app.overlay = true,
             KeyCode::Char(digit @ '1'..='5') => {
                 app.press_panel(digit as usize - '1' as usize);
@@ -261,6 +285,7 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3]) -> Action {
             app.overlay = false;
         }
         KeyCode::Down => app.select(focus, selected + 1),
+        KeyCode::Up if selected == 0 && !app.overlay && app.visible[1] => app.enter_band(),
         KeyCode::Up if selected == 0 && !app.overlay && app.visible[0] => app.enter_tiles(),
         KeyCode::Up => app.select(focus, selected - 1),
         KeyCode::PageDown => app.select(focus, selected + step),
@@ -365,11 +390,11 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
         if !event::poll(timeout)? {
             continue;
         }
-        let before = (app.focus, app.lists[app.focus.index()].selected, app.tile);
+        let before = (app.focus, app.lists[app.focus.index()].selected, app.tile, app.part);
         match event::read()? {
             TermEvent::Key(key) if key.kind == KeyEventKind::Press => match on_key(&mut app, key, rows) {
                 Action::Nothing => {
-                    if (app.focus, app.lists[app.focus.index()].selected, app.tile) != before {
+                    if (app.focus, app.lists[app.focus.index()].selected, app.tile, app.part) != before {
                         motion.select(&app, Instant::now());
                     }
                 }
@@ -586,7 +611,7 @@ mod tests {
             .map(|i| {
                 let (source, risk) = (if i % 7 == 0 { "aur" } else { "repo" }, ["high", "medium", "low"][i % 3]);
                 json!({"name": long(i), "old": "1.0-1", "new": "2.0-1", "source": source, "bump": "major", "risk": risk,
-                    "reason": "core package, major version jump", "download_bytes": 1000 * i, "installed_delta_bytes": 10 * i})
+                    "reason": "critical package, major version jump", "download_bytes": 1000 * i, "installed_delta_bytes": 10 * i})
             })
             .collect();
         let mut problems: Vec<Value> = (0..60)
@@ -607,7 +632,7 @@ mod tests {
             app.apply(source::Event::Activity { line: format!("upgraded {} (1.0-1 -> 2.0-1)", long(i)) }, now);
         }
         for i in 0..300 {
-            app.apply(source::Event::Journal { time: "12:00:00".into(), ident: format!("ident-{i}"), message: "x".repeat(300) }, now);
+            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: format!("ident-{i}"), program: String::new(), message: "x".repeat(300) }, now);
         }
         app
     }
@@ -643,6 +668,27 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "panicked: {failures:#?}");
+        for list in &mut app.lists {
+            list.filter.clear();
+            list.selected = 0;
+        }
+        app.editing = false;
+        for (width, height) in [(150, 44), (200, 60), (150, 17)] {
+            for mask in 0..32u8 {
+                app.visible = std::array::from_fn(|panel| mask & (1 << panel) != 0);
+                for overlay in [false, true] {
+                    app.overlay = overlay;
+                    for stop in 0..13usize {
+                        (app.tile, app.part) = if stop < 6 { (Some(stop), None) } else { (None, Some(stop - 6)) };
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(render(&app, width, height, later))));
+                        if outcome.is_err() {
+                            failures.push(format!("{width}x{height} mask {mask:05b} overlay {overlay} tile {:?} part {:?}", app.tile, app.part));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "panicked: {failures:#?}");
     }
 
     #[test]
@@ -667,9 +713,13 @@ mod tests {
         assert_eq!(app.lists[0].selected, 449);
         press(&mut app, &[KeyCode::Down, KeyCode::Home, KeyCode::Up]);
         assert_eq!(app.lists[0].selected, 0);
-        assert_eq!(app.tile, Some(0));
+        assert_eq!((app.part, app.tile), (Some(0), None));
+        press(&mut app, &[KeyCode::Up]);
+        assert_eq!((app.part, app.tile), (None, Some(0)));
         press(&mut app, &[KeyCode::Down]);
-        assert_eq!(app.tile, None);
+        assert_eq!((app.part, app.tile), (Some(0), None));
+        press(&mut app, &[KeyCode::Down]);
+        assert_eq!((app.part, app.tile), (None, None));
 
         press(&mut app, &[KeyCode::Char('/')]);
         assert!(app.editing);
@@ -719,8 +769,35 @@ mod tests {
         app.overlay = true;
         let (buffer, scene) = render(&app, 170, 50, now);
         assert!(scene.placements.iter().any(|placement| matches!(placement.picture, page::Picture::Fan(_))));
-        assert!((0..50).filter(|y| buffer[(59, *y)].symbol() == "│").count() >= 3);
-        assert!((0..50).any(|y| (12..20).map(|x| buffer[(x, y)].symbol()).collect::<String>() == "version "));
+        let rows: Vec<String> = (0..50).map(|y| (0..170).map(|x| buffer[(x, y)].symbol()).collect()).collect();
+        let x = rows.iter().find_map(|row| row.find("version ").map(|at| row[..at].chars().count() as u16)).expect("facts shown");
+        assert!((0..50).filter(|y| buffer[(x + 47, *y)].symbol() == "│").count() >= 3);
+    }
+
+    #[test]
+    fn a_selection_is_a_glance_not_a_stare() {
+        let now = Instant::now();
+        let mut app = crowded_app(now);
+        let mut motion = Motion::new(true, now);
+        app.focus = Pane::Problems;
+        motion.select(&app, now);
+        motion.step(&mut app, now + Duration::from_millis(200), 0.2);
+        assert_eq!(motion.look(now + Duration::from_millis(400)), Some(motion::Target::List(1)));
+        assert_eq!(motion.look(now + Duration::from_secs(3)), None);
+    }
+
+    #[test]
+    fn choosing_a_part_turns_the_eye_to_it() {
+        let now = Instant::now();
+        let mut app = crowded_app(now);
+        let mut motion = Motion::new(true, now);
+        app.part = Some(1);
+        motion.select(&app, now);
+        assert_eq!(motion.look(now + Duration::from_millis(300)), Some(motion::Target::Part(1)));
+        assert_eq!(motion.look(now + Duration::from_secs(3)), None);
+        app.part = None;
+        motion.select(&app, now + Duration::from_millis(400));
+        assert_eq!(motion.look(now + Duration::from_millis(600)), Some(motion::Target::List(0)));
     }
 
     #[test]
@@ -749,7 +826,7 @@ mod tests {
     #[test]
     fn keys_reach_the_instrument_tiles() {
         let mut app = crowded_app(Instant::now());
-        press(&mut app, &[KeyCode::Up]);
+        press(&mut app, &[KeyCode::Up, KeyCode::Up]);
         assert_eq!(app.tile, Some(0));
         press(&mut app, &[KeyCode::Right, KeyCode::Right]);
         assert_eq!(app.tile, Some(2));
@@ -767,13 +844,257 @@ mod tests {
         press(&mut app, &[KeyCode::Tab, KeyCode::Tab, KeyCode::Tab]);
         assert_eq!(app.tile, Some(5));
         press(&mut app, &[KeyCode::Tab]);
-        assert_eq!((app.tile, app.focus), (None, Pane::Updates));
-        press(&mut app, &[KeyCode::BackTab]);
+        assert_eq!((app.tile, app.part), (None, Some(0)));
+        press(&mut app, &[KeyCode::Tab]);
+        assert_eq!((app.tile, app.part, app.focus), (None, None, Pane::Updates));
+        press(&mut app, &[KeyCode::BackTab, KeyCode::BackTab]);
         assert_eq!(app.tile, Some(5));
         press(&mut app, &[KeyCode::Char('1')]);
         assert_eq!(app.tile, None);
         press(&mut app, &[KeyCode::Up]);
+        assert_eq!((app.tile, app.part), (None, Some(0)));
+        press(&mut app, &[KeyCode::Up]);
         assert_eq!(app.tile, None);
+    }
+
+    fn done(label: &str, value: Value) -> source::Event {
+        source::Event::Done { label: label.into(), value }
+    }
+
+    fn stage(name: &str, data: Value) -> source::Event {
+        source::Event::Stage { stage: name.into(), data }
+    }
+
+    fn find(rows: &[String], text: &str) -> Option<(u16, u16)> {
+        rows.iter().enumerate().find_map(|(y, row)| row.find(text).map(|at| (row[..at].chars().count() as u16, y as u16)))
+    }
+
+    fn system_app(now: Instant) -> App {
+        let gib = 1024 * 1024 * 1024u64;
+        let mut app = App::new(false, false, now);
+        app.apply(done("reading the running kernel", json!({"running": "7.2.5-3-omarchy", "installed": "7.2.5-3", "package": "linux-omarchy", "uptime_seconds": 2_188_986, "reboot_pending": false})), now);
+        app.apply(done("reading the loaded nvidia module", json!({"loaded": "610.57.04", "installed": "610.57.04-1"})), now);
+        app.apply(done("reading the running Hyprland", json!({"running": "0.56.2", "installed": "0.56.2-2"})), now);
+        let updates = json!([
+            {"name": "linux-omarchy", "old": "7.2.5-3", "new": "7.2.8-9", "source": "repo", "bump": "patch", "risk": "medium", "reason": "critical package", "download_bytes": 6 * gib, "installed_delta_bytes": gib / 2},
+            {"name": "nvidia-utils", "old": "610.57.04-1", "new": "615.78.08-1", "source": "repo", "bump": "major", "risk": "high", "reason": "critical package, major version jump", "download_bytes": gib, "installed_delta_bytes": 0},
+            {"name": "netwatch-tui", "old": "0.4.0-1", "new": "0.5.0-1", "source": "aur", "bump": "minor", "risk": "low"}
+        ]);
+        app.apply(stage("updates", json!({"updates": updates})), now);
+        app.apply(stage("problems", json!({"problems": [
+            {"kind": "journal", "subject": "/usr/bin/conmon", "count": 1915, "package": "conmon", "status": "no-update"},
+            {"kind": "journal", "subject": "hancore", "count": 3, "package": "", "status": "unknown-owner"}
+        ], "activity": [], "config_errors": 0})), now);
+        app.apply(stage("anatomy", json!({"packages": 1342, "explicit": 300, "orphans": 12, "cache_bytes": 1000, "kernel_running": "7.2.5-3-omarchy", "kernel_installed": "7.2.5-3", "kernel_package": "linux-omarchy", "hostname": "box"})), now);
+        app.apply(stage("preflight", json!({"free_bytes": 167 * gib, "free_ok": true, "snapper_configured": true, "snapshot_before_update": true, "snapshot_by": "omarchy-update", "disk_total_bytes": 465 * gib, "disk_used_bytes": 289 * gib})), now);
+        app.apply(source::Event::Result {}, now);
+        app
+    }
+
+    #[test]
+    fn the_band_never_drops_a_red_or_yellow_fact() {
+        let now = Instant::now();
+        let pal = palette::Palette::paper();
+        for (width, height) in [(150, 44), (170, 50), (358, 85)] {
+            let mut app = App::new(false, false, now);
+            app.apply(done("reading the running kernel", json!({"running": "7.2.5-3-omarchy", "installed": "7.2.8-9", "package": "linux-omarchy", "uptime_seconds": 90_000, "reboot_pending": true})), now);
+            app.apply(done("reading the loaded nvidia module", json!({"loaded": "610.57.04", "installed": "615.78.08-1"})), now);
+            app.apply(done("reading the running Hyprland", json!({"running": "0.56.2", "installed": "0.56.3-1"})), now);
+            let (buffer, _) = render(&app, width, height, now);
+            let rows: Vec<String> = (0..height).map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect()).collect();
+            for word in ["· reboot", "· relogin"] {
+                let (x, y) = find(&rows, word).unwrap_or_else(|| panic!("{word} missing at {width}x{height}"));
+                assert_eq!(buffer[(x + 2, y)].fg, pal.alert, "{word} at {width}x{height}");
+            }
+            assert_eq!(rows.iter().filter(|row| row.contains("· reboot")).count(), 2, "{width}x{height}");
+
+            let mut app = App::new(false, false, now);
+            app.apply(done("reading the loaded nvidia module", json!({"loaded": "610.57.04", "installed": "610.57.04-1"})), now);
+            app.apply(done("reading the running Hyprland", json!({"running": "0.56.2", "installed": "0.56.2-2"})), now);
+            app.apply(stage("updates", json!({"updates": [{"name": "nvidia-utils", "old": "610.57.04-1", "new": "615.78.08-1", "source": "repo", "bump": "major", "risk": "high"}]})), now);
+            app.apply(stage("problems", json!({"problems": [], "activity": [], "config_errors": 2})), now);
+            let rows = screen(&app, width, height);
+            assert!(find(&rows, "· 615.78 pending").is_some(), "nvidia at {width}x{height}");
+            assert!(find(&rows, "· 2 config errors").is_some(), "config at {width}x{height}");
+        }
+    }
+
+    #[test]
+    fn before_you_update_says_what_really_happens() {
+        let now = Instant::now();
+        let mut app = system_app(now);
+        app.tile = Some(5);
+        app.overlay = true;
+        let rows = screen(&app, 358, 85);
+        for line in ["omarchy-update takes one first · pacman -Syu takes none", "after this update · kernel 7.2.5-3 → 7.2.8-9 · nvidia 610.57 → 615.78", "167 GiB available · ≈ 7.5 GiB needed", "nvidia-utils  610.57.04 → 615.78.08 · critical package, major version jump"] {
+            assert!(find(&rows, line).is_some(), "missing {line:?}");
+        }
+        app.overlay = false;
+        let value = |rows: &[String], name: &str| {
+            let row = rows.iter().find(|row| row.contains(&format!("● {name}"))).unwrap_or_else(|| panic!("no {name} row"));
+            row.split(&format!("● {name}")).nth(1).and_then(|tail| tail.split('│').next()).unwrap_or_default().trim().to_string()
+        };
+        let wide = screen(&app, 358, 85);
+        assert_eq!([value(&wide, "risk"), value(&wide, "reboot"), value(&wide, "snapshot"), value(&wide, "space")], ["high", "after update", "omarchy-update", "ok"]);
+        let narrow = screen(&app, 150, 44);
+        assert_eq!([value(&narrow, "reboot"), value(&narrow, "snapshot")], ["after update", "omarchy"]);
+        assert!(find(&wide, "³UPDATES · 3 · 7.0 GiB download + 1 AUR").is_some());
+    }
+
+    #[test]
+    fn space_needed_is_download_plus_growth() {
+        let now = Instant::now();
+        let mut app = system_app(now);
+        assert_eq!(app.space_needed(), 7 * 1024 * 1024 * 1024 + 512 * 1024 * 1024);
+        assert_eq!(app.space_severity(), Some(app::Severity::Ok));
+        if let Some(preflight) = app.preflight.as_mut() {
+            preflight.free_bytes = 7 * 1024 * 1024 * 1024;
+        }
+        assert_eq!(app.space_severity(), Some(app::Severity::Bad));
+        for update in &mut app.updates {
+            update.installed_delta_bytes = Some(-(1 << 40));
+        }
+        assert_eq!(app.space_needed(), 7 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn windows_open_over_what_they_explain() {
+        let now = Instant::now();
+        let mut app = crowded_app(now);
+        app.tile = Some(0);
+        app.overlay = true;
+        let rows = screen(&app, 358, 85);
+        assert!(rows[2].contains(":: PENDING"), "{}", rows[2]);
+        app.tile = None;
+        app.focus = Pane::Problems;
+        app.select(Pane::Problems, 3);
+        app.overlay = false;
+        let (_, scene) = render(&app, 358, 85, app.started + Duration::from_secs(60));
+        let row = scene.chosen[1].expect("selected problem drawn");
+        app.overlay = true;
+        let name = app.visible_problems()[3].name().to_string();
+        let rows = screen(&app, 358, 85);
+        let (_, y) = find(&rows, &format!(":: {name}")).expect("problem window");
+        assert_eq!(y, row.y - 1);
+    }
+
+    #[test]
+    fn events_from_earlier_days_show_their_date() {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        app.apply(source::Event::Journal { time: "13:45:10".into(), day: "2000-01-02".into(), ident: "earlier".into(), program: String::new(), message: "old".into() }, now);
+        app.apply(source::Event::Journal { time: "14:00:00".into(), day: app::today(), ident: "today".into(), program: String::new(), message: "new".into() }, now);
+        let rows = screen(&app, 150, 44);
+        assert!(find(&rows, "01-02 13:45").is_some());
+        assert!(find(&rows, "14:00:00").is_some());
+        assert!(!rows.iter().any(|row| row.contains("following")), "the feed is not live yet");
+        app.apply(source::Event::Result {}, now);
+        assert!(screen(&app, 150, 44).iter().any(|row| row.contains("LIVE EVENTS · following")));
+    }
+
+    #[test]
+    fn the_map_shows_the_position_too() {
+        let app = crowded_app(Instant::now());
+        assert!(screen(&app, 358, 85).iter().any(|row| row.contains("1 of 450")));
+    }
+
+    #[test]
+    fn problems_without_an_owner_belong_to_other() {
+        use app::{Subsystem, problem_part};
+        assert_eq!(problem_part("journal", "hancore", ""), Subsystem::Apps);
+        assert_eq!(problem_part("config", "Hyprland config errors", ""), Subsystem::Compositor);
+        assert_eq!(problem_part("journal", "kernel", ""), Subsystem::Kernel);
+        assert_eq!(problem_part("crash", "/usr/bin/Hyprland", "hyprland"), Subsystem::Compositor);
+        assert_eq!(Subsystem::Apps.label(), "other");
+        let rows = screen(&system_app(Instant::now()), 358, 85);
+        assert!(find(&rows, " 2  other").is_some() || find(&rows, " 2 other").is_some(), "badge counts the unowned problem");
+    }
+
+    #[test]
+    fn the_eye_takes_the_room_of_hidden_lists() {
+        let now = Instant::now();
+        let mut app = crowded_app(now);
+        let eye = |app: &App, width: u16, height: u16| render(app, width, height, now).1.placements.iter().find_map(|placement| matches!(placement.picture, page::Picture::Eye(_)).then_some(placement.rect)).expect("eye drawn");
+        assert_eq!(eye(&app, 358, 85).height, 20);
+        app.visible = [true, true, false, false, false];
+        let grown = eye(&app, 358, 85);
+        assert_eq!(grown.height, 40);
+        assert!(grown.y > 16 && grown.bottom() < 84, "{grown:?}");
+        assert_eq!(eye(&app, 170, 50).height, 15);
+        app.visible = [false, true, false, false, false];
+        assert_eq!(eye(&app, 358, 85).height, 40);
+    }
+
+    #[test]
+    fn the_subsystems_are_a_stop_between_tiles_and_lists() {
+        let mut app = crowded_app(Instant::now());
+        press(&mut app, &[KeyCode::Up]);
+        assert_eq!(app.part, Some(0));
+        assert!(screen(&app, 358, 85).iter().any(|row| row.contains("←→ part")));
+        press(&mut app, &[KeyCode::Left]);
+        assert_eq!(app.part, Some(6));
+        press(&mut app, &[KeyCode::Right, KeyCode::Right]);
+        assert_eq!(app.part, Some(1));
+        press(&mut app, &[KeyCode::Enter]);
+        assert!(app.overlay);
+        assert!(screen(&app, 358, 85).iter().any(|row| row.contains(":: graphics")));
+        press(&mut app, &[KeyCode::Right]);
+        assert_eq!((app.overlay, app.part), (true, Some(2)));
+        press(&mut app, &[KeyCode::Esc]);
+        assert_eq!((app.overlay, app.part), (false, Some(2)));
+        press(&mut app, &[KeyCode::Down]);
+        assert_eq!((app.part, app.focus), (None, Pane::Updates));
+        press(&mut app, &[KeyCode::Up, KeyCode::Up, KeyCode::Down]);
+        assert_eq!((app.tile, app.part), (None, Some(2)));
+        press(&mut app, &[KeyCode::Char('2')]);
+        assert_eq!(app.part, None);
+    }
+
+    #[test]
+    fn the_kernel_window_names_the_reboot_this_update_brings() {
+        let now = Instant::now();
+        let mut app = system_app(now);
+        app.part = Some(0);
+        app.overlay = true;
+        let rows = screen(&app, 358, 85);
+        assert!(find(&rows, ":: kernel").is_some());
+        assert!(find(&rows, "after this update · kernel 7.2.5-3 → 7.2.8-9").is_some());
+        assert!(find(&rows, "linux-omarchy  7.2.5 → 7.2.8").is_some());
+        app.part = Some(6);
+        let rows = screen(&app, 358, 85);
+        assert!(find(&rows, "1,915 × error · /usr/bin/conmon").is_some());
+        assert!(find(&rows, "3 × error · hancore").is_some());
+    }
+
+    #[test]
+    fn problem_windows_say_only_what_is_known() {
+        let now = Instant::now();
+        let mut app = system_app(now);
+        app.focus = Pane::Problems;
+        app.select(Pane::Problems, 1);
+        app.overlay = true;
+        let rows = screen(&app, 358, 85);
+        assert!(find(&rows, "the journal has no program path for it").is_some());
+        assert!(find(&rows, "kind          error").is_some());
+        for gone in ["owner         unknown", "not a verified fix"] {
+            assert!(!rows.iter().any(|row| row.contains(gone)), "{gone} shown");
+        }
+        assert!(rows.iter().any(|row| row.contains("j journal") && row.contains("r rescan")));
+    }
+
+    #[test]
+    fn j_finds_journal_lines_by_program_when_the_identifier_differs() {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [{"kind": "journal", "subject": "/usr/bin/conmon", "count": 1915, "package": "conmon", "status": "no-update"}], "activity": []}) }, now);
+        app.apply(source::Event::Journal { time: "14:17:39".into(), day: String::new(), ident: "peaceful_golick".into(), program: "conmon".into(), message: "Compiling rumb".into() }, now);
+        app.apply(source::Event::Journal { time: "14:17:40".into(), day: String::new(), ident: "playerctld".into(), program: "playerctld".into(), message: "lost the bus".into() }, now);
+        app.visible = [true; 5];
+        app.focus = Pane::Problems;
+        press(&mut app, &[KeyCode::Char('j')]);
+        assert_eq!(app.focus, Pane::Events);
+        let shown: Vec<&str> = app.visible_events().iter().map(|event| event.ident.as_str()).collect();
+        assert_eq!(shown, vec!["peaceful_golick"]);
     }
 
     #[test]
@@ -784,12 +1105,12 @@ mod tests {
         press(&mut app, &[KeyCode::Down, KeyCode::Down]);
         assert!(!app.follow);
         let chosen = app.visible_events()[2].ident.clone();
-        app.apply(source::Event::Journal { time: "12:00:01".into(), ident: "late".into(), message: "boom".into() }, now);
+        app.apply(source::Event::Journal { time: "12:00:01".into(), day: String::new(), ident: "late".into(), program: String::new(), message: "boom".into() }, now);
         assert_eq!(app.visible_events()[app.lists[2].selected].ident, chosen);
         app.lists[2].filter = "ident-1".into();
         app.select(Pane::Events, 1);
         let chosen = app.visible_events()[1].ident.clone();
-        app.apply(source::Event::Journal { time: "12:00:02".into(), ident: "other".into(), message: "boom".into() }, now);
+        app.apply(source::Event::Journal { time: "12:00:02".into(), day: String::new(), ident: "other".into(), program: String::new(), message: "boom".into() }, now);
         assert_eq!(app.visible_events()[app.lists[2].selected].ident, chosen);
         press(&mut app, &[KeyCode::Home]);
         assert!(app.follow);
@@ -802,7 +1123,7 @@ mod tests {
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [], "activity": []}) }, now);
         app.apply(source::Event::Result {}, now);
         for _ in 0..3 {
-            app.apply(source::Event::Journal { time: "12:00:00".into(), ident: "x".into(), message: "y".into() }, now);
+            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: "x".into(), program: String::new(), message: "y".into() }, now);
         }
         assert_eq!(app.journal_live, 3);
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [], "activity": []}) }, now);
@@ -814,7 +1135,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let now = Instant::now();
         let mut app = crowded_app(now);
-        app.apply(source::Event::Journal { time: "12:00:03".into(), ident: "evil|ident".into(), message: "red \u{1b}[31mtext\u{7}".into() }, now);
+        app.apply(source::Event::Journal { time: "12:00:03".into(), day: String::new(), ident: "evil|ident".into(), program: String::new(), message: "red \u{1b}[31mtext\u{7}".into() }, now);
         let dir = std::env::temp_dir().join(format!("rumb-export-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let first = export::write(&app, &dir, "20261019-120000").unwrap();

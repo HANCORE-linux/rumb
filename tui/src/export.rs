@@ -73,19 +73,27 @@ pub fn report(app: &App) -> String {
         let _ = writeln!(out, "- high risk updates: {}", app.high());
     }
     if let Some(anatomy) = &app.anatomy {
-        let reboot = if anatomy.reboot_pending { format!("pending, kernel {} is installed", clean(&anatomy.kernel_installed)) } else { "not needed".into() };
+        let after: Vec<String> = app.reboot_after().iter().map(|(what, update)| format!("{what} {} -> {}", clean(&update.old), clean(&update.new))).collect();
+        let reboot = if anatomy.reboot_pending {
+            format!("pending, kernel {} is installed", clean(&anatomy.kernel_installed))
+        } else if !after.is_empty() {
+            format!("after this update ({})", after.join(", "))
+        } else {
+            "not needed".into()
+        };
         let _ = writeln!(out, "- reboot: {reboot}");
     }
     if let Some(preflight) = &app.preflight {
-        let snapshot = if preflight.snapshot_before_update {
-            "taken automatically before updates"
-        } else if preflight.snapper_configured {
-            "snapper is set up, but not automatic before updates"
-        } else {
-            "none set up"
+        let snapshot = match preflight.snapshot_by.as_str() {
+            "snap-pac" => "snap-pac takes one before each pacman transaction",
+            "omarchy-update" => "omarchy-update takes one first, pacman -Syu takes none",
+            _ if preflight.snapper_configured => "snapper is set up, but nothing takes one before an update",
+            _ => "none set up",
         };
         let _ = writeln!(out, "- snapshot: {snapshot}");
-        let _ = writeln!(out, "- free space on /: {}{}", bytes(preflight.free_bytes), if preflight.free_ok { "" } else { ", under 10 GiB" });
+        let need = app.space_needed();
+        let needed = if need > 0 { format!(", about {} needed", bytes(need)) } else { String::new() };
+        let _ = writeln!(out, "- available on /: {}{needed}{}", bytes(preflight.free_bytes), if preflight.free_ok { "" } else { ", under 10 GiB" });
     }
     for error in app.update_errors.iter().chain(&app.problem_errors) {
         let _ = writeln!(out, "- could not run: {}", clean(error));
@@ -132,7 +140,9 @@ pub fn report(app: &App) -> String {
             };
             let _ = writeln!(out, "| {} | {} | {} | {} | {} |", problem.count, cell(&problem.kind), cell(&problem.subject), cell(&problem.package), cell(&status));
         }
-        out.push_str("\nAn update to the owner is a hint, not a verified fix.\n");
+        if app.problems.iter().any(|problem| problem.status == "possibly-fixed") {
+            out.push_str("\nAn update to the owner is a hint, not a verified fix.\n");
+        }
     }
 
     if let Some(anatomy) = &app.anatomy {
@@ -140,11 +150,11 @@ pub fn report(app: &App) -> String {
         if let Some(preflight) = &app.preflight
             && preflight.disk_total_bytes > 0
         {
-            let _ = writeln!(out, "- disk /: {:.0}% used, {} free", preflight.disk_used_bytes as f64 * 100.0 / preflight.disk_total_bytes as f64, bytes(preflight.free_bytes));
+            let _ = writeln!(out, "- disk /: {:.0}% used, {} available", preflight.disk_used_bytes as f64 * 100.0 / preflight.disk_total_bytes as f64, bytes(preflight.free_bytes));
         }
         let _ = writeln!(out, "- installed: {}", thousands(anatomy.packages));
         let _ = writeln!(out, "- explicit: {}", thousands(anatomy.explicit));
-        let _ = writeln!(out, "- from AUR: {}", thousands(anatomy.repos.get("aur").copied().unwrap_or(0)));
+        let _ = writeln!(out, "- foreign: {}", thousands(anatomy.repos.get("aur").copied().unwrap_or(0)));
         let _ = writeln!(out, "- orphans: {}", thousands(anatomy.orphans));
         let freeable = anatomy.cache_freeable_bytes.map(|freeable| format!(", {} freeable with paccache -rk1", bytes(freeable))).unwrap_or_default();
         let _ = writeln!(out, "- pacman cache: {}{freeable}", bytes(anatomy.cache_bytes));
@@ -164,7 +174,8 @@ pub fn report(app: &App) -> String {
     }
     for event in app.events.iter().rev() {
         let tag = if event.source == Source::Pacman { "P" } else { "J" };
-        let _ = writeln!(out, "    {} {tag} {}: {}", clean(&event.clock), clean(&event.ident), clean(&event.message));
+        let when = if event.day.is_empty() { clean(&event.clock) } else { format!("{} {}", clean(&event.day), clean(&event.clock)) };
+        let _ = writeln!(out, "    {when} {tag} {}: {}", clean(&event.ident), clean(&event.message));
     }
     out
 }

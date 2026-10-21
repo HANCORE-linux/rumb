@@ -12,6 +12,7 @@ const LIVE_TYPE: Duration = Duration::from_millis(12);
 const GAP: Duration = Duration::from_millis(260);
 const SETTLE: Duration = Duration::from_millis(240);
 const LOOK: Duration = Duration::from_millis(500);
+const GLANCE: Duration = Duration::from_millis(520);
 const IDLE: Duration = Duration::from_secs(8);
 const REST: Duration = Duration::from_secs(4);
 const BACKLOG: Duration = Duration::from_secs(12);
@@ -169,18 +170,21 @@ pub fn command_of(label: &str) -> &str {
 
 pub fn result_of(label: &str, value: &Value) -> String {
     let number = value.as_u64();
-    let count = |one: &str, many: &str| number.map_or_else(|| "failed".to_string(), |n| format!("{} {}", crate::page::apos(n), if n == 1 { one } else { many }));
+    let count = |one: &str, many: &str| number.map_or_else(|| "failed".to_string(), |n| format!("{} {}", crate::page::thousands(n), if n == 1 { one } else { many }));
     match label {
         "checking repository updates" => count("update", "updates"),
         "checking AUR updates" => count("aur", "aur"),
-        "reading crash reports" => number.map_or_else(|| "failed".to_string(), |n| format!("{} {}", crate::page::apos(n), if n == 1 { "crash" } else { "crashes" })),
+        "reading crash reports" => number.map_or_else(|| "failed".to_string(), |n| format!("{} {}", crate::page::thousands(n), if n == 1 { "crash" } else { "crashes" })),
         "reading journal errors" => count("error", "errors"),
         "checking failed units" => count("unit", "units"),
         "checking Hyprland config" => number.map_or_else(|| "failed".to_string(), |n| n.to_string()),
         "reading the running kernel" => value["running"].as_str().unwrap_or_default().to_string(),
         "reading the loaded nvidia module" => value["loaded"].as_str().unwrap_or_default().to_string(),
         "reading the running Hyprland" => value["running"].as_str().map(|version| format!("v{version}")).unwrap_or_default(),
-        "listing installed packages" => format!("{} · {} orphans", crate::page::apos(value["packages"].as_u64().unwrap_or(0)), value["orphans"].as_u64().unwrap_or(0)),
+        "listing installed packages" => {
+            let orphans = value["orphans"].as_u64().unwrap_or(0);
+            format!("{} · {orphans} {}", crate::page::thousands(value["packages"].as_u64().unwrap_or(0)), if orphans == 1 { "orphan" } else { "orphans" })
+        }
         "measuring the package cache" => number.map_or_else(|| "no paccache".to_string(), |bytes| format!("{} freeable", crate::page::bytes(bytes))),
         "fetching Arch news" => match number {
             None => "failed".to_string(),
@@ -188,7 +192,7 @@ pub fn result_of(label: &str, value: &Value) -> String {
             Some(n) => format!("{n} new"),
         },
         "fetching Omarchy release notes" => number.map_or_else(|| "failed".to_string(), |n| format!("{n} {}", if n == 1 { "release" } else { "releases" })),
-        "checking disk space and snapshots" => number.map_or_else(String::new, |bytes| format!("{} free", crate::page::bytes(bytes))),
+        "checking disk space and snapshots" => number.map_or_else(String::new, |bytes| format!("{} available", crate::page::bytes(bytes))),
         _ => match value {
             Value::String(text) => text.clone(),
             Value::Null => String::new(),
@@ -443,8 +447,10 @@ impl Motion {
                 }
                 self.send(at, Target::List(1), 2, 700, true);
                 let mut hit = [false; 7];
-                for name in data["problems"].as_array().into_iter().flatten().filter_map(|problem| problem["package"].as_str()).filter(|name| !name.is_empty()) {
-                    let part = Subsystem::ALL.iter().position(|part| *part == Subsystem::of(name)).unwrap_or(6);
+                for problem in data["problems"].as_array().into_iter().flatten() {
+                    let field = |key: &str| problem[key].as_str().unwrap_or_default();
+                    let owner = crate::app::problem_part(field("kind"), field("subject"), field("package"));
+                    let part = Subsystem::ALL.iter().position(|part| *part == owner).unwrap_or(6);
                     hit[part] = true;
                 }
                 for part in (0..7).filter(|part| hit[*part]) {
@@ -482,7 +488,13 @@ impl Motion {
             self.last_activity = now;
             return;
         }
-        if matches!(self.attention, Some((_, Target::Tile(_)))) {
+        if let Some(part) = app.part {
+            self.pending_select = None;
+            self.attention = Some((now, Target::Part(part as u8)));
+            self.last_activity = now;
+            return;
+        }
+        if matches!(self.attention, Some((_, Target::Tile(_) | Target::Part(_)))) {
             self.attention = Some((now, Target::List(app.focus.index() as u8)));
             self.last_activity = now;
         }
@@ -517,7 +529,7 @@ impl Motion {
                         "config" => ("config error", "config errors"),
                         _ => ("error", "errors"),
                     };
-                    (format!("▸ {}", short(problem.subject.rsplit('/').next().unwrap_or(&problem.subject))), format!("{} {}", crate::page::apos(problem.count), if problem.count == 1 { one } else { many }))
+                    (format!("▸ {}", short(problem.subject.rsplit('/').next().unwrap_or(&problem.subject))), format!("{} {}", crate::page::thousands(problem.count), if problem.count == 1 { one } else { many }))
                 }
                 None => return,
             },
@@ -658,7 +670,7 @@ impl Motion {
     }
 
     pub fn look(&self, now: Instant) -> Option<Target> {
-        let mut look: Option<(Instant, Target)> = self.attention.filter(|(start, _)| now >= *start);
+        let mut look: Option<(Instant, Target)> = self.attention.filter(|(start, _)| now >= *start && now <= *start + GLANCE + LOOK);
         for comet in &self.comets {
             if now >= comet.start && now <= comet.end() + LOOK && look.is_none_or(|(start, _)| comet.start > start) {
                 look = Some((comet.start, comet.target));
