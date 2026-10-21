@@ -60,7 +60,7 @@ The look of rumb is the maintainer's. **Design changes are not allowed, only pro
 - Text stays readable: at least 4.5:1 contrast in every bundled palette (tested in `tui/src/theme.rs`).
 - UI text is English and every term is accurate: units, plurals, full numbers as `1,915`, dates as `MM-DD HH:MM`.
 - Colours come from the current Omarchy theme, with Labra as the fallback.
-- The eye stays calm: it glances at a selection and looks back; it does not stare.
+- The eye stays calm: it glances at a selection and looks back; it does not stare. While the feed is quiet, the code keeps running in the white of the eye and in the pupil, the iris keeps turning a little, and the eye glances at a part of the page now and then.
 
 ## Code
 

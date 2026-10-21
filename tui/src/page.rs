@@ -2357,6 +2357,7 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
         previous: rain.previous,
         switch: rain.switch,
         tint: rain.tint.map(|(kind, strength)| (if kind == 2 { pal.alert } else { pal.teal }, strength)),
+        pupil: rain.pupil,
     });
     scene.placements.push(Placement { rect: eye, picture: Picture::Eye(Box::new(spec)) });
     if !app.pictures {

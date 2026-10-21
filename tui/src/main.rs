@@ -802,6 +802,29 @@ mod tests {
     }
 
     #[test]
+    fn a_quiet_feed_keeps_the_eye_alive() {
+        let now = Instant::now();
+        let mut app = crowded_app(now);
+        let mut motion = Motion::new(true, now);
+        let start = source::Event::Start { last_upgrade: None, problems_since: "2026-10-21T20:00:00+02:00".into(), now: None, omarchy: false, last_upgraded: Vec::new() };
+        motion.push(start, r#"{"event":"start","problems_since":"2026-10-21T20:00:00+02:00"}"#, &mut app, now);
+        let mut looked = Vec::new();
+        for frame in 1..=30 * 24 {
+            let at = now + Duration::from_millis(frame * 1000 / 30);
+            motion.step(&mut app, at, 1.0 / 30.0);
+            if let Some(target) = motion.look(at)
+                && looked.last() != Some(&target)
+            {
+                looked.push(target);
+            }
+        }
+        let rain = motion.rain(now + Duration::from_secs(24)).expect("the white of the eye keeps its code");
+        assert!(rain.level > 0.1);
+        assert_eq!(rain.pupil, 1.0);
+        assert!(looked.len() >= 3, "the eye looked at {looked:?} in a quiet feed");
+    }
+
+    #[test]
     fn three_switches_the_updates_between_map_rows_and_hidden() {
         let now = Instant::now();
         let mut app = crowded_app(now);
