@@ -1220,7 +1220,7 @@ mod tests {
         assert_eq!(buffer[(x, y)].fg, palette::Palette::paper().teal);
     }
 
-    fn demo_map() -> (u32, u32, ink::OrbitSpec) {
+    fn demo_map(columns: u16, rows: u16) -> (u32, u32, ink::OrbitSpec) {
         let now = Instant::now();
         let mut app = App::new(true, false, now);
         for (time, event) in demo_events() {
@@ -1230,7 +1230,7 @@ mod tests {
         }
         app.visible = [false, false, true, false, false];
         app.focus = Pane::Updates;
-        let (_, scene) = render(&app, 170, 50, app.started + Duration::from_secs(60));
+        let (_, scene) = render(&app, columns, rows, app.started + Duration::from_secs(60));
         scene
             .placements
             .into_iter()
@@ -1243,7 +1243,7 @@ mod tests {
 
     #[test]
     fn the_map_links_end_at_the_ports_outside_the_dial() {
-        let (width, height, spec) = demo_map();
+        let (width, height, spec) = demo_map(170, 50);
         assert_eq!(spec.links.iter().filter(|link| link.left).count(), 24);
         let pal = palette::Palette::paper();
         let with = ink::orbit(&spec, &pal, width, height, 21.0).unwrap();
@@ -1265,11 +1265,16 @@ mod tests {
 
     #[test]
     fn the_map_labels_stay_inside_the_picture() {
-        let (width, height, spec) = demo_map();
-        let picture = ink::orbit(&spec, &palette::Palette::paper(), width, height, 21.0).unwrap();
-        let ground = picture.pixel(0, 0).unwrap();
-        let touched = (0..width).filter(|x| picture.pixel(*x, 0) != Some(ground) || picture.pixel(*x, height - 1) != Some(ground)).count();
-        assert_eq!(touched, 0);
+        let pal = palette::Palette::paper();
+        for (columns, rows) in [(92, 31), (130, 40), (170, 50)] {
+            let (width, height, spec) = demo_map(columns, rows);
+            let labelled = ink::orbit(&spec, &pal, width, height, 21.0).unwrap();
+            let bare = ink::orbit(&ink::OrbitSpec { sectors: spec.sectors.iter().map(|(_, count)| (String::new(), *count)).collect(), ..spec }, &pal, width, height, 21.0).unwrap();
+            let label: Vec<(u32, u32)> = labelled.pixels().iter().zip(bare.pixels()).enumerate().filter(|(_, (a, b))| a != b).map(|(index, _)| (index as u32 % width, index as u32 / width)).collect();
+            assert!(!label.is_empty());
+            let on_edge = label.iter().filter(|(x, y)| *x < 1 || *x + 1 >= width || *y < 1 || *y + 1 >= height).count();
+            assert_eq!(on_edge, 0, "{on_edge} label pixels on the edge at {columns}x{rows}");
+        }
     }
 
     fn draw_map(app: &App, motion: &Motion, now: Instant) -> (ink::OrbitSpec, String) {

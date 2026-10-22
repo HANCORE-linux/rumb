@@ -339,7 +339,7 @@ pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_heig
             let (left, y) = if sin.abs() < 0.35 {
                 let rim = c.0 + cos.signum() * r * 1.06;
                 let ray_above = spec.nodes.iter().any(|node| node.fixes && usize::from(node.sector) == sector && ring_position(node, &spans).1 < 0.0);
-                (if cos < 0.0 { rim - length } else { rim }, c.1 + if ray_above { 1.0 } else { -1.0 } * ascent * 2.2)
+                ((if cos < 0.0 { rim - length } else { rim }).clamp(2.0, (w - length - 2.0).max(2.0)), c.1 + if ray_above { 1.0 } else { -1.0 } * ascent * 2.2)
             } else {
                 ((x - length / 2.0).clamp(2.0, (w - length - 2.0).max(2.0)), y.clamp(ascent / 2.0 + 2.0, h - ascent / 2.0 - 4.0))
             };
