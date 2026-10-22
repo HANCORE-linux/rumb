@@ -137,6 +137,7 @@ pub struct OrbitNode {
     pub fixes: bool,
     pub selected: bool,
     pub related: bool,
+    pub faint: bool,
 }
 
 #[derive(Debug, Hash)]
@@ -283,12 +284,18 @@ pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_heig
                 };
                 pen.disc(x, y, if link.kind == 3 { 1.2 } else { 2.0 } * unit, sk(dot, 0.95));
             }
-            let length = (sx * sx + sy * sy).sqrt().max(0.001);
-            let (dx, dy) = (sx / length, sy / length);
-            pen.line((c.0 + dx * r * 0.08, c.1 + dy * r * 0.08), (c.0 + dx * r * 0.2, c.1 + dy * r * 0.2), ink(0.95), 1.4);
+            if !chosen.faint {
+                let length = (sx * sx + sy * sy).sqrt().max(0.001);
+                let (dx, dy) = (sx / length, sy / length);
+                pen.line((c.0 + dx * r * 0.08, c.1 + dy * r * 0.08), (c.0 + dx * r * 0.2, c.1 + dy * r * 0.2), ink(0.95), 1.4);
+            }
         }
         for node in &spec.nodes {
             let (x, y) = at(place(node).0, place(node).1);
+            if node.faint {
+                pen.disc(x, y, 2.6 * unit, sk(pal.label, 0.85));
+                continue;
+            }
             match node.ring {
                 0 => {
                     pen.disc(x, y, 6.5 * unit, sk(ground, 1.0));
@@ -1162,7 +1169,7 @@ mod tests {
         assert_eq!(spans[2].1, 0.0);
         for (ring, count) in [(0u8, 3u16), (1, 40), (2, 400)] {
             for slot in 0..count {
-                let (x, y) = ring_position(&OrbitNode { ring, sector: 3, slot, count, fixes: false, selected: false, related: false }, &spans);
+                let (x, y) = ring_position(&OrbitNode { ring, sector: 3, slot, count, fixes: false, selected: false, related: false, faint: false }, &spans);
                 let radius = x.hypot(y);
                 assert!((0.25..0.9).contains(&radius), "{ring} {slot} {radius}");
             }

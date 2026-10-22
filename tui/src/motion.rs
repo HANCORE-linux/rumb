@@ -17,6 +17,9 @@ const IDLE: Duration = Duration::from_secs(8);
 const REST: Duration = Duration::from_secs(4);
 const BACKLOG: Duration = Duration::from_secs(12);
 const LINES: usize = 14;
+const WAVE: Duration = Duration::from_millis(150);
+const FAINT: Duration = Duration::from_millis(300);
+const REVEAL: f32 = 1.5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
@@ -133,6 +136,10 @@ pub struct Motion {
     shown_select: [Option<usize>; 3],
     gaze: Cell<Option<Spring>>,
     sight: Cell<Option<Sight>>,
+    arrived: std::collections::HashMap<String, Instant>,
+    picked: Option<String>,
+    picked_at: Option<Instant>,
+    deps_at: Option<Instant>,
 }
 
 fn ease(x: f32) -> f32 {
@@ -251,6 +258,10 @@ impl Motion {
             shown_select: [None; 3],
             gaze: Cell::new(None),
             sight: Cell::new(None),
+            arrived: std::collections::HashMap::new(),
+            picked: None,
+            picked_at: None,
+            deps_at: None,
         }
     }
 
@@ -554,6 +565,7 @@ impl Motion {
         if !self.enabled {
             return;
         }
+        self.track_map(app, now);
         self.fire_select(app, now);
         if self.acts.iter().any(|(at, _, _)| *at <= now) {
             self.acts.sort_by_key(|(at, sequence, _)| (*at, *sequence));
@@ -787,6 +799,47 @@ impl Motion {
         Some(Rain { clock: self.clock, level: self.level, text: self.feed.1.clone(), before: self.before.1.clone(), feed: self.feed.0, previous: self.before.0, switch: self.switch, tint, pupil: self.pupil })
     }
 
+    fn track_map(&mut self, app: &App, now: Instant) {
+        for update in &app.updates {
+            let wave = match update.risk.as_str() {
+                "high" => 0,
+                "medium" => 1,
+                _ => 2,
+            };
+            self.arrived.entry(update.name.clone()).or_insert(now + WAVE * wave);
+        }
+        if self.deps_at.is_none() && app.anatomy.is_some() {
+            self.deps_at = Some(now);
+        }
+        let updates = app.visible_updates();
+        let current = updates.get(app.lists[0].selected.min(updates.len().saturating_sub(1))).map(|update| update.name.clone());
+        if current != self.picked {
+            if self.picked.is_some() && current.is_some() {
+                self.picked_at = Some(now);
+            }
+            self.picked = current;
+        }
+    }
+
+    pub fn map_dot(&self, name: &str, now: Instant) -> u8 {
+        match self.arrived.get(name) {
+            Some(at) if now < *at => 0,
+            Some(at) if now < *at + FAINT => 1,
+            None if self.enabled => 0,
+            _ => 2,
+        }
+    }
+
+    pub fn map_reveal(&self, now: Instant) -> Option<f32> {
+        let start = [self.picked_at, self.deps_at].into_iter().flatten().max()?;
+        let elapsed = now.saturating_duration_since(start).as_secs_f32();
+        (elapsed < REVEAL).then_some(elapsed)
+    }
+
+    fn map_moving(&self, now: Instant) -> bool {
+        self.arrived.values().any(|at| now < *at + FAINT) || self.map_reveal(now).is_some()
+    }
+
     pub fn moving(&self, now: Instant) -> bool {
         if !self.enabled {
             return false;
@@ -801,6 +854,7 @@ impl Motion {
             || (now < self.turn.start + self.turn.length && (self.turn.to - self.turn.from).abs() > 1e-4)
             || self.gaze_moving(now)
             || self.sight_moving(now)
+            || self.map_moving(now)
     }
 
     pub fn wake(&self, now: Instant) -> Option<Duration> {

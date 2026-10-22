@@ -1272,6 +1272,71 @@ mod tests {
         assert_eq!(touched, 0);
     }
 
+    fn draw_map(app: &App, motion: &Motion, now: Instant) -> (ink::OrbitSpec, String) {
+        let pal = palette::Palette::paper();
+        let mut terminal = Terminal::new(TestBackend::new(170, 50)).unwrap();
+        let mut scene = None;
+        terminal.draw(|frame| scene = Some(page::draw(frame, app, motion, &pal, now, (10, 21)))).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text = (0..50u16).map(|y| (0..170u16).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");
+        let spec = scene
+            .unwrap()
+            .placements
+            .into_iter()
+            .find_map(|placement| match placement.picture {
+                page::Picture::Orbit(spec) => Some(*spec),
+                _ => None,
+            })
+            .expect("the update map is drawn");
+        (spec, text)
+    }
+
+    fn demo_until(millis: u64, start: Instant) -> App {
+        let mut app = App::new(true, true, start);
+        for (time, event) in demo_events() {
+            if time <= millis {
+                app.apply(event, start);
+            }
+        }
+        app.visible = [false, false, true, false, false];
+        app.focus = Pane::Updates;
+        app
+    }
+
+    #[test]
+    fn the_map_brings_new_updates_in_ring_by_ring() {
+        let start = Instant::now();
+        let mut app = demo_until(3_100, start);
+        let mut motion = Motion::new(true, start);
+        motion.step(&mut app, start, 0.0);
+        let (first, _) = draw_map(&app, &motion, start + Duration::from_millis(10));
+        assert!(!first.nodes.is_empty());
+        assert!(first.nodes.iter().all(|node| node.ring == 0 && node.faint), "{:?}", first.nodes);
+        let (settled, _) = draw_map(&app, &motion, start + Duration::from_secs(1));
+        assert_eq!(settled.nodes.len(), app.updates.len());
+        assert!(settled.nodes.iter().all(|node| !node.faint));
+    }
+
+    #[test]
+    fn a_new_selection_brings_its_names_in_from_the_ports() {
+        let start = Instant::now();
+        let mut app = demo_until(26_000, start);
+        let mut motion = Motion::new(true, start);
+        motion.step(&mut app, start, 0.0);
+        let later = start + Duration::from_secs(3);
+        app.select(Pane::Updates, 1);
+        motion.step(&mut app, later, 0.0);
+        let chosen = app.visible_updates()[1].name.clone();
+        let names = app.anatomy.as_ref().unwrap().deps[&chosen].depends_on.clone();
+        let shown = |after: Duration| {
+            let (_, text) = draw_map(&app, &motion, later + after);
+            names.iter().filter(|name| text.contains(&format!(" {name} "))).count()
+        };
+        let (early, full) = (shown(Duration::from_millis(20)), shown(Duration::from_secs(1)));
+        assert_eq!(full, names.len());
+        assert!(early < full / 2, "{early} of {full} names right after the selection");
+    }
+
     #[test]
     fn paused_events_keep_the_selected_line_when_new_ones_arrive() {
         let now = Instant::now();
@@ -1471,6 +1536,11 @@ mod tests {
         let only: Option<Vec<u64>> = std::env::var("RUMB_ONLY").ok().map(|text| text.split(',').filter_map(|frame| frame.trim().parse().ok()).collect());
         let started = Instant::now();
         let mut app = App::new(false, true, started);
+        if let Ok(panels) = std::env::var("RUMB_PANELS") {
+            for (index, on) in panels.chars().enumerate().take(app.visible.len()) {
+                app.visible[index] = on == '1';
+            }
+        }
         let mut motion = Motion::new(true, started);
         let (mut next, mut chosen, mut last) = (0usize, 0usize, started);
         let mut costs: Vec<f64> = Vec::new();

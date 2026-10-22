@@ -543,7 +543,7 @@ fn updates_title(app: &App, count: usize) -> String {
     }
 }
 
-fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut Scene) -> usize {
+fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Palette, now: Instant, scene: &mut Scene) -> usize {
     use crate::ink::{OrbitLink, OrbitNode, OrbitSpec};
     let updates = app.visible_updates();
     let title = updates_title(app, updates.len());
@@ -572,6 +572,10 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scen
         let (ring, sector) = (rank(&update.risk), sector_of(&update.name));
         let slot = seen[usize::from(sector)][usize::from(ring)];
         seen[usize::from(sector)][usize::from(ring)] += 1;
+        let dot = motion.map_dot(&update.name, now);
+        if dot == 0 {
+            continue;
+        }
         nodes.push(OrbitNode {
             ring,
             sector,
@@ -580,6 +584,7 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scen
             fixes: app.problems.iter().any(|problem| problem.status == "possibly-fixed" && problem.package == update.name),
             selected: index == selected,
             related: related.contains(update.name.as_str()),
+            faint: dot == 1,
         });
     }
     let sectors: Vec<(String, u16)> = Subsystem::ALL.iter().enumerate().map(|(index, part)| (part.label().to_string(), counts[index].iter().sum())).collect();
@@ -600,6 +605,7 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scen
     let column = (body.width / 4).clamp(16, 30);
     let pic_x = body.x + column + 1;
     let pic_w = body.width.saturating_sub(2 * column + 2);
+    let reveal = motion.map_reveal(now);
     let mut links = Vec::new();
     let mut kinds = Vec::new();
     let mut fresh = false;
@@ -630,9 +636,12 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scen
                     _ => pal.label,
                 });
                 fresh |= name.ends_with(" +");
-                if left {
+                let distance = f32::from((top + 1 + row).abs_diff(top + rows.div_ceil(2)));
+                let (shown, glow) = reveal.map_or((true, false), |elapsed| (elapsed >= distance * 0.02, elapsed < distance * 0.02 + 0.15));
+                let style = if glow { Style::new().fg(pal.ink).add_modifier(Modifier::BOLD) } else { style };
+                if shown && left {
                     text(buf, (pic_x - 1).saturating_sub(label.chars().count() as u16), top + 1 + row, &label, style, column);
-                } else {
+                } else if shown {
                     text(buf, pic_x + pic_w + 1, top + 1 + row, &label, style, column);
                 }
                 links.push(OrbitLink { left, row: row + 1, kind: *kind });
@@ -2027,7 +2036,7 @@ fn eye_log(app: &App) -> (Vec<(String, String, usize)>, bool) {
     (lines.into_iter().map(|(head, tail)| (head, tail, usize::MAX)).collect(), typing)
 }
 
-fn draw_lists(buf: &mut Buffer, rect: Rect, app: &App, pal: &Palette, now: Instant, scene: &mut Scene) -> Vec<(Pane, Rect)> {
+fn draw_lists(buf: &mut Buffer, rect: Rect, app: &App, motion: &Motion, pal: &Palette, now: Instant, scene: &mut Scene) -> Vec<(Pane, Rect)> {
     let panes: Vec<Pane> = Pane::ALL.into_iter().filter(|pane| app.visible[pane.panel()]).collect();
     let mut rects = Vec::new();
     if panes.is_empty() || rect.height < 6 {
@@ -2041,7 +2050,7 @@ fn draw_lists(buf: &mut Buffer, rect: Rect, app: &App, pal: &Palette, now: Insta
         scene.rows[pane.index()] = match pane {
             Pane::Updates => {
                 scene.map_fits = map_fits(area);
-                if app.updates_map && scene.map_fits { draw_updates_map(buf, area, app, pal, scene) } else { draw_updates(buf, area, app, pal, scene) }
+                if app.updates_map && scene.map_fits { draw_updates_map(buf, area, app, motion, pal, now, scene) } else { draw_updates(buf, area, app, pal, scene) }
             }
             Pane::Problems => draw_problems(buf, area, app, pal, scene),
             Pane::Events => draw_events(buf, area, app, pal, now, scene),
@@ -2153,7 +2162,7 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
     scene.band = band_visible.then_some(band);
     let lists_top = if band_visible { band.bottom() + 1 } else { y };
     let lists_area = Rect::new(area.x, lists_top, area.width, keys.y.saturating_sub(lists_top));
-    let lists = draw_lists(buf, lists_area, app, pal, now, scene);
+    let lists = draw_lists(buf, lists_area, app, motion, pal, now, scene);
     for (pane, rect) in &lists {
         if held(Target::List(pane.index() as u8)) {
             for row in rect.y + 2..rect.bottom().saturating_sub(2) {
