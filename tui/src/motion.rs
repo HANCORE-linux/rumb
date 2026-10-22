@@ -20,6 +20,7 @@ const LINES: usize = 14;
 const WAVE: Duration = Duration::from_millis(150);
 const FAINT: Duration = Duration::from_millis(300);
 const REVEAL: f32 = 1.5;
+const GLOW: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
@@ -140,6 +141,8 @@ pub struct Motion {
     picked: Option<String>,
     picked_at: Option<Instant>,
     deps_at: Option<Instant>,
+    glances: u32,
+    glow_at: Option<Instant>,
 }
 
 fn ease(x: f32) -> f32 {
@@ -262,6 +265,8 @@ impl Motion {
             picked: None,
             picked_at: None,
             deps_at: None,
+            glances: 0,
+            glow_at: None,
         }
     }
 
@@ -621,7 +626,14 @@ impl Motion {
             }
             targets.extend(Pane::ALL.iter().filter(|pane| app.visible[pane.panel()]).map(|pane| Target::List(pane.index() as u8)));
             if !targets.is_empty() {
-                self.attention = Some((now, targets[(chance(seed) * targets.len() as f32) as usize % targets.len()]));
+                let target = targets[(chance(seed) * targets.len() as f32) as usize % targets.len()];
+                self.attention = Some((now, target));
+                if target == Target::List(Pane::Updates.index() as u8) && app.updates_map {
+                    self.glances = self.glances.wrapping_add(1);
+                    if app.visible[1] || self.glances.is_multiple_of(3) {
+                        self.glow_at = Some(now);
+                    }
+                }
             }
             self.next_look = Some(now + ms(2600 + (chance(seed + 1) * 1000.0) as u64));
         }
@@ -836,8 +848,13 @@ impl Motion {
         (elapsed < REVEAL).then_some(elapsed)
     }
 
+    pub fn map_glow(&self, now: Instant) -> Option<f32> {
+        let elapsed = now.saturating_duration_since(self.glow_at?).as_secs_f32();
+        (elapsed < GLOW).then_some(elapsed)
+    }
+
     fn map_moving(&self, now: Instant) -> bool {
-        self.arrived.values().any(|at| now < *at + FAINT) || self.map_reveal(now).is_some()
+        self.arrived.values().any(|at| now < *at + FAINT) || self.map_reveal(now).is_some() || self.map_glow(now).is_some()
     }
 
     pub fn moving(&self, now: Instant) -> bool {

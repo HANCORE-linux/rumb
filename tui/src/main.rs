@@ -1338,6 +1338,30 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_glance_at_the_map_lets_its_names_light_up() {
+        let start = Instant::now();
+        let mut app = demo_until(26_000, start);
+        let mut motion = Motion::new(true, start);
+        let mut now = start;
+        let mut glow = None;
+        while glow.is_none() && now < start + Duration::from_secs(60) {
+            now += Duration::from_millis(33);
+            motion.step(&mut app, now, 0.033);
+            if motion.map_glow(now).is_some() {
+                glow = Some(now);
+            }
+        }
+        let glow = glow.expect("an idle glance at the update list lights the names");
+        let pal = palette::Palette::paper();
+        let colours = |at: Instant| {
+            let mut terminal = Terminal::new(TestBackend::new(170, 50)).unwrap();
+            terminal.draw(|frame| drop(page::draw(frame, &app, &motion, &pal, at, (10, 21)))).unwrap();
+            terminal.backend().buffer().content().iter().map(|cell| cell.fg).collect::<std::collections::HashSet<_>>().len()
+        };
+        assert!(colours(glow + Duration::from_millis(300)) > colours(glow + Duration::from_secs(6)));
+    }
+
+    #[test]
     fn paused_events_keep_the_selected_line_when_new_ones_arrive() {
         let now = Instant::now();
         let mut app = crowded_app(now);

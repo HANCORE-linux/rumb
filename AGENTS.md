@@ -61,6 +61,7 @@ The look of rumb is the maintainer's. **Design changes are not allowed, only pro
 - UI text is English and every term is accurate: units, plurals, full numbers as `1,915`, dates as `MM-DD HH:MM`.
 - Colours come from the current Omarchy theme, with Labra as the fallback.
 - The eye stays calm: it glances at a selection and looks back; it does not stare. While the feed is quiet, the code keeps running in the white of the eye and in the pupil, the iris keeps turning a little, and the eye glances at a part of the page now and then.
+- The update map moves only on events: new updates appear ring by ring, faint first; the names of a new selection come in from the ports; when the eye glances at the update list while the feed is quiet, the names light up once. Nothing in the map moves at rest.
 
 ## Code
 
@@ -76,4 +77,4 @@ The look of rumb is the maintainer's. **Design changes are not allowed, only pro
 | `RUMB_THEME` | theme name, like `--theme` |
 | `RUMB_EVENTS` | a recorded stream for the frame tests instead of the demo |
 | `RUMB_DUMP` | output directory for the `mockup_frames` test: cell grid as JSON plus pictures |
-| `RUMB_VIDEO` | output directory for the `motion_frames` test, with `RUMB_ONLY`, `RUMB_SECONDS`, `RUMB_COLUMNS`, `RUMB_ROWS`, `RUMB_CELL_WIDTH`, `RUMB_CELL_HEIGHT` and `RUMB_SELECT` |
+| `RUMB_VIDEO` | output directory for the `motion_frames` test, with `RUMB_ONLY`, `RUMB_SECONDS`, `RUMB_COLUMNS`, `RUMB_ROWS`, `RUMB_CELL_WIDTH`, `RUMB_CELL_HEIGHT`, `RUMB_SELECT` and `RUMB_PANELS` (five digits, 1 shows the panel, like keys 1–5) |

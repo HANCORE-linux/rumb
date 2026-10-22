@@ -606,6 +606,7 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pa
     let pic_x = body.x + column + 1;
     let pic_w = body.width.saturating_sub(2 * column + 2);
     let reveal = motion.map_reveal(now);
+    let idle = motion.map_glow(now);
     let mut links = Vec::new();
     let mut kinds = Vec::new();
     let mut fresh = false;
@@ -630,15 +631,23 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pa
             for (index, (name, kind)) in side.iter().enumerate() {
                 let row = offset + index as u16;
                 let label = fit(&if *kind == 1 { format!("{name} ↑") } else { name.clone() }, column as usize - 1);
-                let style = Style::new().fg(match *kind {
+                let color = match *kind {
                     2 => pal.teal,
                     1 | NEW => pal.ink,
                     _ => pal.label,
-                });
+                };
                 fresh |= name.ends_with(" +");
                 let distance = f32::from((top + 1 + row).abs_diff(top + rows.div_ceil(2)));
                 let (shown, glow) = reveal.map_or((true, false), |elapsed| (elapsed >= distance * 0.02, elapsed < distance * 0.02 + 0.15));
-                let style = if glow { Style::new().fg(pal.ink).add_modifier(Modifier::BOLD) } else { style };
+                let light = idle.map_or(0.0, |elapsed| {
+                    let t = (elapsed - distance * 0.07) / 0.6;
+                    if (0.0..1.0).contains(&t) { 1.0 - (2.0 * t - 1.0).abs() } else { 0.0 }
+                });
+                let style = if glow {
+                    Style::new().fg(pal.ink).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(mix(color, pal.ink, f64::from(light)))
+                };
                 if shown && left {
                     text(buf, (pic_x - 1).saturating_sub(label.chars().count() as u16), top + 1 + row, &label, style, column);
                 } else if shown {
