@@ -233,8 +233,8 @@ pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_heig
             };
             pen.line((c.0 + cos * r * from, c.1 + sin * r * from), (c.0 + cos * r * to, c.1 + sin * r * to), ink(alpha), 0.7);
         }
-        for (dx, dy) in [(0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)] {
-            let (x, y) = (c.0 + dx * r * 1.15, c.1 + dy * r * 1.15);
+        for side in [-1.0f32, 1.0] {
+            let (x, y) = (c.0 + side * r * 1.15, c.1);
             let arm = 5.0 * unit;
             pen.line((x - arm, y), (x + arm, y), ink(0.7), 0.8);
             pen.line((x, y - arm), (x, y + arm), ink(0.7), 0.8);
@@ -260,19 +260,20 @@ pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_heig
         }
         if let Some(chosen) = spec.nodes.iter().find(|node| node.selected) {
             let (sx, sy) = place(chosen);
-            let target = at(sx, sy);
             for link in &spec.links {
                 let y = (f32::from(link.row) + 0.5) * cell_height;
                 let x = if link.left { 4.0 * unit } else { w - 4.0 * unit };
                 let side = if link.left { 1.0 } else { -1.0 };
+                let port = (c.0 - side * r * 1.15, c.1);
                 let (color, alpha) = match link.kind {
                     2 => (pal.teal, 0.9),
                     3 => (pal.relation, 0.35),
                     _ => (pal.relation, 0.85),
                 };
+                let half = (port.0 - x) / 2.0;
                 let mut path = PathBuilder::new();
                 path.move_to(x, y);
-                path.cubic_to(x + side * w * 0.22, y, target.0 - side * w * 0.12, target.1, target.0, target.1);
+                path.cubic_to(x + half, y, port.0 - half, port.1, port.0, port.1);
                 pen.stroke(path, sk(color, alpha), if link.kind == 3 { 0.6 } else { 0.9 }, None);
                 let dot = match link.kind {
                     2 => pal.teal,
@@ -282,6 +283,9 @@ pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_heig
                 };
                 pen.disc(x, y, if link.kind == 3 { 1.2 } else { 2.0 } * unit, sk(dot, 0.95));
             }
+            let length = (sx * sx + sy * sy).sqrt().max(0.001);
+            let (dx, dy) = (sx / length, sy / length);
+            pen.line((c.0 + dx * r * 0.08, c.1 + dy * r * 0.08), (c.0 + dx * r * 0.2, c.1 + dy * r * 0.2), ink(0.95), 1.4);
         }
         for node in &spec.nodes {
             let (x, y) = at(place(node).0, place(node).1);
@@ -314,9 +318,10 @@ pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_heig
             }
         }
     }
-    if let Some(atlas) = atlas(cell_height) {
+    if let Some(atlas) = sized_atlas(16.0 * cell_height / 21.0) {
         let advance = atlas.advance as f32;
-        for ((name, count), (start, span)) in spec.sectors.iter().zip(&spans) {
+        let ascent = atlas.ascent as f32;
+        for (sector, ((name, count), (start, span))) in spec.sectors.iter().zip(&spans).enumerate() {
             if *count == 0 {
                 continue;
             }
@@ -324,8 +329,14 @@ pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_heig
             let (x, y) = (c.0 + cos * r * 1.2, c.1 + sin * r * 1.2);
             let line: Vec<(char, SkColor)> = name.chars().map(|ch| (ch, sk(pal.label, 1.0))).collect();
             let length = line.len() as f32 * advance;
-            let left = (x - length / 2.0).clamp(2.0, (w - length - 2.0).max(2.0));
-            type_line(&mut pixmap, atlas, left, y + atlas.ascent as f32 / 2.0, &line, &|_, _| 1.0);
+            let (left, y) = if sin.abs() < 0.35 {
+                let rim = c.0 + cos.signum() * r * 1.06;
+                let ray_above = spec.nodes.iter().any(|node| node.fixes && usize::from(node.sector) == sector && ring_position(node, &spans).1 < 0.0);
+                (if cos < 0.0 { rim - length } else { rim }, c.1 + if ray_above { 1.0 } else { -1.0 } * ascent * 2.2)
+            } else {
+                ((x - length / 2.0).clamp(2.0, (w - length - 2.0).max(2.0)), y.clamp(ascent / 2.0 + 2.0, h - ascent / 2.0 - 4.0))
+            };
+            type_line(&mut pixmap, atlas, left, y + ascent / 2.0, &line, &|_, _| 1.0);
         }
     }
     Some(pixmap)
@@ -579,7 +590,10 @@ fn atlases() -> &'static [Atlas] {
 }
 
 fn atlas(cell_height: f32) -> Option<&'static Atlas> {
-    let target = 10.0 * cell_height / 21.0;
+    sized_atlas(10.0 * cell_height / 21.0)
+}
+
+fn sized_atlas(target: f32) -> Option<&'static Atlas> {
     atlases().iter().min_by(|a, b| (a.size as f32 - target).abs().total_cmp(&(b.size as f32 - target).abs()))
 }
 

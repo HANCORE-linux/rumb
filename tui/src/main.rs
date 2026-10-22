@@ -1220,6 +1220,58 @@ mod tests {
         assert_eq!(buffer[(x, y)].fg, palette::Palette::paper().teal);
     }
 
+    fn demo_map() -> (u32, u32, ink::OrbitSpec) {
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events() {
+            if time <= 26_000 {
+                app.apply(event, now + Duration::from_millis(time));
+            }
+        }
+        app.visible = [false, false, true, false, false];
+        app.focus = Pane::Updates;
+        let (_, scene) = render(&app, 170, 50, app.started + Duration::from_secs(60));
+        scene
+            .placements
+            .into_iter()
+            .find_map(|placement| match placement.picture {
+                page::Picture::Orbit(spec) => Some((u32::from(placement.rect.width) * 10, u32::from(placement.rect.height) * 21, *spec)),
+                _ => None,
+            })
+            .expect("the update map is drawn")
+    }
+
+    #[test]
+    fn the_map_links_end_at_the_ports_outside_the_dial() {
+        let (width, height, spec) = demo_map();
+        assert_eq!(spec.links.iter().filter(|link| link.left).count(), 24);
+        let pal = palette::Palette::paper();
+        let with = ink::orbit(&spec, &pal, width, height, 21.0).unwrap();
+        let without = ink::orbit(&ink::OrbitSpec { links: Vec::new(), ..spec }, &pal, width, height, 21.0).unwrap();
+        let (cx, cy) = (width as f32 / 2.0, height as f32 / 2.0);
+        let radius = width.min(height) as f32 / 2.0 * ink::DIAL;
+        let changed: Vec<f32> = with
+            .pixels()
+            .iter()
+            .zip(without.pixels())
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(index, _)| (((index as u32 % width) as f32 - cx).powi(2) + ((index as u32 / width) as f32 - cy).powi(2)).sqrt())
+            .collect();
+        assert!(!changed.is_empty());
+        let inside = changed.iter().filter(|distance| **distance < radius * 1.08).count();
+        assert_eq!(inside, 0, "{inside} of {} link pixels inside the dial", changed.len());
+    }
+
+    #[test]
+    fn the_map_labels_stay_inside_the_picture() {
+        let (width, height, spec) = demo_map();
+        let picture = ink::orbit(&spec, &palette::Palette::paper(), width, height, 21.0).unwrap();
+        let ground = picture.pixel(0, 0).unwrap();
+        let touched = (0..width).filter(|x| picture.pixel(*x, 0) != Some(ground) || picture.pixel(*x, height - 1) != Some(ground)).count();
+        assert_eq!(touched, 0);
+    }
+
     #[test]
     fn paused_events_keep_the_selected_line_when_new_ones_arrive() {
         let now = Instant::now();
