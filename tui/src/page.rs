@@ -1406,6 +1406,9 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
             if !problem.last.is_empty() {
                 lines.push(("last".into(), problem.last.clone(), pal.ink));
             }
+            if !problem.message.is_empty() {
+                wrapped(&mut lines, "message", &problem.message, room, pal.ink);
+            }
             if !problem.signal.is_empty() {
                 let meaning = signal_meaning(&problem.signal);
                 lines.push(("signal".into(), if meaning.is_empty() { problem.signal.clone() } else { format!("{} · {meaning}", problem.signal) }, pal.ink));

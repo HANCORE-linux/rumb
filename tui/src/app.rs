@@ -207,6 +207,8 @@ pub struct Problem {
     pub frames: String,
     #[serde(default)]
     pub last: String,
+    #[serde(default)]
+    pub message: String,
 }
 
 impl Problem {

@@ -207,7 +207,7 @@ crash_details() {
 }
 
 add_problem() {
-  local kind=$1 subject=$2 count=$3 package=$4 path=${5:-} signal=${6:-} frames=${7:-} last=${8:-} status update=""
+  local kind=$1 subject=$2 count=$3 package=$4 path=${5:-} signal=${6:-} frames=${7:-} last=${8:-} message=${9:-} status update=""
 
   if [[ $kind == config ]]; then
     status=config
@@ -222,7 +222,7 @@ add_problem() {
     status=no-update
   fi
 
-  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$kind" "${subject//[[:cntrl:]]/ }" "$count" "$package" "$status" "$update" "$signal" "${frames//[[:cntrl:]]/ }" "$last" >>"$tmp/problems.tsv"
+  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$kind" "${subject//[[:cntrl:]]/ }" "$count" "$package" "$status" "$update" "$signal" "${frames//[[:cntrl:]]/ }" "$last" "${message//[[:cntrl:]]/ }" >>"$tmp/problems.tsv"
 }
 
 tsv_json() {
@@ -429,25 +429,39 @@ collect_problems() {
 
   step problems "reading journal errors"
   journalctl -p err --since "@$query_start" -o json \
-    --output-fields=_EXE,SYSLOG_IDENTIFIER,_TRANSPORT,_COMM -q --no-pager >"$tmp/journal.json" 2>/dev/null || problem_errors+=(journal)
+    --output-fields=_EXE,SYSLOG_IDENTIFIER,_TRANSPORT,_COMM,MESSAGE -q --no-pager >"$tmp/journal.json" 2>/dev/null || problem_errors+=(journal)
+
+  journal_source='def s: if type == "string" then . else null end;
+    def recent: select((.SYSLOG_IDENTIFIER | s) != "systemd-coredump" and (.__REALTIME_TIMESTAMP | tonumber / 1000000) >= $since);
+    def source: (if (._TRANSPORT | s) == "kernel" then "kernel"
+      elif (._EXE | s) then ._EXE
+      else "ident:" + ((.SYSLOG_IDENTIFIER | s) // (._COMM | s) // "unknown") end) | gsub("[[:cntrl:]]"; " ");'
+  declare -A journal_last=() journal_message=()
+  while IFS=$'\x1f' read -r source last message; do
+    journal_last[$source]=$last
+    journal_message[$source]=$message
+  done < <(jq -rn --argjson since "$since_epoch" "$journal_source"'
+      reduce (inputs | recent) as $line ({};
+        ($line | source) as $key | ($line.__REALTIME_TIMESTAMP | tonumber) as $at
+        | if (.[$key].at // -1) < $at then .[$key] = {at: $at, message: (($line.MESSAGE | s) // "binary message")} else . end)
+      | to_entries[]
+      | [.key, (.value.at / 1000000 | floor | strflocaltime("%m-%d %H:%M")),
+         (.value.message | gsub("[[:cntrl:]]"; " ") | if length > 300 then .[:299] + "…" else . end)] | join("\u001f")' \
+    "$tmp/journal.json" 2>/dev/null)
 
   journal_total=0
   while read -r count source; do
     [[ -n $source ]] || continue
     journal_total=$((journal_total + count))
     case $source in
-      kernel) add_problem journal "kernel" "$count" "$kernel_package" ;;
+      kernel) add_problem journal "kernel" "$count" "$kernel_package" "" "" "" "${journal_last[$source]:-}" "${journal_message[$source]:-}" ;;
       /*)
         owner_of "$source"
-        add_problem journal "$source" "$count" "$REPLY" "$source"
+        add_problem journal "$source" "$count" "$REPLY" "$source" "" "" "${journal_last[$source]:-}" "${journal_message[$source]:-}"
         ;;
-      *) add_problem journal "${source#ident:}" "$count" "" ;;
+      *) add_problem journal "${source#ident:}" "$count" "" "" "" "" "${journal_last[$source]:-}" "${journal_message[$source]:-}" ;;
     esac
-  done < <(jq -r --argjson since "$since_epoch" 'def s: if type == "string" then . else null end;
-      select((.SYSLOG_IDENTIFIER | s) != "systemd-coredump" and (.__REALTIME_TIMESTAMP | tonumber / 1000000) >= $since)
-      | (if (._TRANSPORT | s) == "kernel" then "kernel"
-        elif (._EXE | s) then ._EXE
-        else "ident:" + ((.SYSLOG_IDENTIFIER | s) // (._COMM | s) // "unknown") end) | gsub("[[:cntrl:]]"; " ")' "$tmp/journal.json" 2>/dev/null |
+  done < <(jq -r --argjson since "$since_epoch" "$journal_source"' recent | source' "$tmp/journal.json" 2>/dev/null |
     sort | uniq -c | sort -rn)
   if [[ " ${problem_errors[*]} " == *" journal "* ]]; then
     done_step problems "reading journal errors" null
@@ -511,7 +525,7 @@ collect_problems() {
     done_step problems "checking Hyprland config" "$config_errors"
   fi
 
-  tsv_json "$tmp/problems.tsv" kind subject count package status update signal frames last |
+  tsv_json "$tmp/problems.tsv" kind subject count package status update signal frames last message |
     jq 'map(.count |= tonumber)' >"$tmp/problems.json"
   tsv_json "$tmp/activity.tsv" date crashes errors |
     jq 'map(.crashes |= tonumber | .errors |= tonumber)' >"$tmp/activity.json"

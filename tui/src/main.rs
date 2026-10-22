@@ -1170,6 +1170,19 @@ mod tests {
     }
 
     #[test]
+    fn a_journal_problem_shows_its_newest_message() {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [{"kind": "journal", "subject": "/usr/lib/bluetooth/bluetoothd", "count": 36, "package": "bluez", "status": "no-update", "last": "10-17 23:52", "message": "src/adapter.c: Failed to clear UUIDs: Busy (0x0a)"}], "activity": []}) }, now);
+        app.visible = [false, false, false, true, false];
+        app.focus = Pane::Problems;
+        app.overlay = true;
+        let rows = screen(&app, 170, 50);
+        assert!(rows.iter().any(|row| row.contains("last") && row.contains("10-17 23:52")), "{rows:#?}");
+        assert!(rows.iter().any(|row| row.contains("message") && row.contains("src/adapter.c: Failed to clear UUIDs: Busy (0x0a)")));
+    }
+
+    #[test]
     fn paused_events_keep_the_selected_line_when_new_ones_arrive() {
         let now = Instant::now();
         let mut app = crowded_app(now);
