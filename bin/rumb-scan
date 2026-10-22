@@ -368,6 +368,7 @@ check_updates() {
 
   # Download size and installed-size change of repo updates, read from the fresh
   # database checkupdates synced (the system database still has the old versions)
+  pending_versions='BEGIN { while ((getline row < pending) > 0) { split(row, field, "\x1f"); expected[field[1]] = field[3] } }'
   mapfile -t repo_names < <(awk -F'\x1f' '$4 == "repo" { print $1 }' "$tmp/updates.tsv")
   if ((${#repo_names[@]})); then
     size_fields='
@@ -377,10 +378,11 @@ check_updates() {
         return int(parts[1] * (unit == "KiB" ? 1024 : unit == "MiB" ? 1048576 : unit == "GiB" ? 1073741824 : 1))
       }
       /^Name / { sub(/^[^:]*: /, ""); name = $0 }
-      /^Download Size / { sub(/^[^:]*: /, ""); download[name] = bytes($0) }
-      /^Installed Size / { sub(/^[^:]*: /, ""); installed[name] = bytes($0) }'
+      /^Version / { sub(/^[^:]*: /, ""); skip = (name in installed) || (name in expected && $0 != expected[name]) }
+      /^Download Size / && !skip { sub(/^[^:]*: /, ""); download[name] = bytes($0) }
+      /^Installed Size / && !skip { sub(/^[^:]*: /, ""); installed[name] = bytes($0) }'
     LC_ALL=C COLUMNS=0 pacman -Si --dbpath "$checkup_db" -- "${repo_names[@]}" 2>/dev/null | tee -a "$tmp/new_info.txt" |
-      awk "$size_fields"' END { for (n in installed) printf "%s\x1f%d\x1f%d\n", n, download[n], installed[n] }' >"$tmp/sizes_new.tsv"
+      awk -v pending="$tmp/updates.tsv" "$pending_versions$size_fields"' END { for (n in installed) printf "%s\x1f%d\x1f%d\n", n, download[n], installed[n] }' >"$tmp/sizes_new.tsv"
     LC_ALL=C COLUMNS=0 pacman -Qi -- "${repo_names[@]}" 2>/dev/null |
       awk "$size_fields"' END { for (n in installed) printf "%s\x1f%d\n", n, installed[n] }' >"$tmp/sizes_old.tsv"
     awk -F'\x1f' 'NR == FNR { old[$1] = $2; next } { printf "%s\x1f%d\x1f%d\n", $1, $2, $3 - old[$1] }' \
@@ -641,10 +643,12 @@ collect_anatomy() {
         return out
       }
       /^Name / { sub(/^[^:]*: /, ""); name = $0 }'
-    awk "$deps_fields"'
+    awk -v pending="$tmp/updates.tsv" "$pending_versions$deps_fields"'
       /^Version / { sub(/^[^:]*: /, ""); version[name] = $0 }
-      /^Depends On / { sub(/^[^:]*: /, ""); list = names($0); printf "%s\x1f%s\x1f%d\x1f%s\n", name, version[name], kept, list }' \
-      "$tmp/new_info.txt" >"$tmp/deps_new.tsv" 2>/dev/null
+      /^Depends On / && !(name in done) && version[name] == expected[name] {
+        sub(/^[^:]*: /, ""); list = names($0); done[name] = 1
+        printf "%s\x1f%s\x1f%d\x1f%s\n", name, version[name], kept, list
+      }' "$tmp/new_info.txt" >"$tmp/deps_new.tsv" 2>/dev/null
     LC_ALL=C COLUMNS=0 pacman -Qi -- "${names[@]}" 2>/dev/null | awk -v new_file="$tmp/deps_new.tsv" "$deps_fields"'
       function missing(from, other,   parts, have, i, count, out) {
         count = split(other, parts, ",")
