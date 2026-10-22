@@ -633,7 +633,7 @@ mod tests {
             app.apply(source::Event::Activity { line: format!("upgraded {} (1.0-1 -> 2.0-1)", long(i)) }, now);
         }
         for i in 0..300 {
-            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: format!("ident-{i}"), program: String::new(), message: "x".repeat(300) }, now);
+            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: format!("ident-{i}"), program: String::new(), message: "x".repeat(300), priority: String::new(), unit: String::new() }, now);
         }
         app
     }
@@ -1038,8 +1038,8 @@ mod tests {
     fn events_from_earlier_days_show_their_date() {
         let now = Instant::now();
         let mut app = App::new(false, false, now);
-        app.apply(source::Event::Journal { time: "13:45:10".into(), day: "2000-01-02".into(), ident: "earlier".into(), program: String::new(), message: "old".into() }, now);
-        app.apply(source::Event::Journal { time: "14:00:00".into(), day: app::today(), ident: "today".into(), program: String::new(), message: "new".into() }, now);
+        app.apply(source::Event::Journal { time: "13:45:10".into(), day: "2000-01-02".into(), ident: "earlier".into(), program: String::new(), message: "old".into(), priority: String::new(), unit: String::new() }, now);
+        app.apply(source::Event::Journal { time: "14:00:00".into(), day: app::today(), ident: "today".into(), program: String::new(), message: "new".into(), priority: String::new(), unit: String::new() }, now);
         let rows = screen(&app, 150, 44);
         assert!(find(&rows, "01-02 13:45").is_some());
         assert!(find(&rows, "14:00:00").is_some());
@@ -1143,14 +1143,30 @@ mod tests {
         let now = Instant::now();
         let mut app = App::new(false, false, now);
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [{"kind": "journal", "subject": "/usr/bin/conmon", "count": 1915, "package": "conmon", "status": "no-update"}], "activity": []}) }, now);
-        app.apply(source::Event::Journal { time: "14:17:39".into(), day: String::new(), ident: "peaceful_golick".into(), program: "conmon".into(), message: "Compiling rumb".into() }, now);
-        app.apply(source::Event::Journal { time: "14:17:40".into(), day: String::new(), ident: "playerctld".into(), program: "playerctld".into(), message: "lost the bus".into() }, now);
+        app.apply(source::Event::Journal { time: "14:17:39".into(), day: String::new(), ident: "peaceful_golick".into(), program: "conmon".into(), message: "Compiling rumb".into(), priority: String::new(), unit: String::new() }, now);
+        app.apply(source::Event::Journal { time: "14:17:40".into(), day: String::new(), ident: "playerctld".into(), program: "playerctld".into(), message: "lost the bus".into(), priority: String::new(), unit: String::new() }, now);
         app.visible = [true; 5];
         app.focus = Pane::Problems;
         press(&mut app, &[KeyCode::Char('j')]);
         assert_eq!(app.focus, Pane::Events);
         let shown: Vec<&str> = app.visible_events().iter().map(|event| event.ident.as_str()).collect();
         assert_eq!(shown, vec!["peaceful_golick"]);
+    }
+
+    #[test]
+    fn a_live_journal_event_shows_its_priority_and_unit() {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        app.apply(source::Event::Journal { time: "14:20:00".into(), day: String::new(), ident: "bluetoothd".into(), program: "bluetoothd".into(), message: "Failed to set mode".into(), priority: "2".into(), unit: "bluetooth.service".into() }, now);
+        app.visible = [false, false, false, false, true];
+        app.focus = Pane::Events;
+        app.overlay = true;
+        let rows = screen(&app, 170, 50);
+        let row = |label: &str| rows.iter().find(|row| row.trim_start_matches(['│', ' ']).starts_with(label)).cloned().unwrap_or_default();
+        assert!(row("source").contains("journal"), "{rows:#?}");
+        assert!(row("priority").contains("critical"));
+        assert!(row("unit").contains("bluetooth.service"));
+        assert!(!rows.iter().any(|row| row.contains("priority error or higher")));
     }
 
     #[test]
@@ -1161,12 +1177,12 @@ mod tests {
         press(&mut app, &[KeyCode::Down, KeyCode::Down]);
         assert!(!app.follow);
         let chosen = app.visible_events()[2].ident.clone();
-        app.apply(source::Event::Journal { time: "12:00:01".into(), day: String::new(), ident: "late".into(), program: String::new(), message: "boom".into() }, now);
+        app.apply(source::Event::Journal { time: "12:00:01".into(), day: String::new(), ident: "late".into(), program: String::new(), message: "boom".into(), priority: String::new(), unit: String::new() }, now);
         assert_eq!(app.visible_events()[app.lists[2].selected].ident, chosen);
         app.lists[2].filter = "ident-1".into();
         app.select(Pane::Events, 1);
         let chosen = app.visible_events()[1].ident.clone();
-        app.apply(source::Event::Journal { time: "12:00:02".into(), day: String::new(), ident: "other".into(), program: String::new(), message: "boom".into() }, now);
+        app.apply(source::Event::Journal { time: "12:00:02".into(), day: String::new(), ident: "other".into(), program: String::new(), message: "boom".into(), priority: String::new(), unit: String::new() }, now);
         assert_eq!(app.visible_events()[app.lists[2].selected].ident, chosen);
         press(&mut app, &[KeyCode::Home]);
         assert!(app.follow);
@@ -1179,7 +1195,7 @@ mod tests {
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [], "activity": []}) }, now);
         app.apply(source::Event::Result {}, now);
         for _ in 0..3 {
-            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: "x".into(), program: String::new(), message: "y".into() }, now);
+            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: "x".into(), program: String::new(), message: "y".into(), priority: String::new(), unit: String::new() }, now);
         }
         assert_eq!(app.journal_live, 3);
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [], "activity": []}) }, now);
@@ -1191,7 +1207,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let now = Instant::now();
         let mut app = crowded_app(now);
-        app.apply(source::Event::Journal { time: "12:00:03".into(), day: String::new(), ident: "evil|ident".into(), program: String::new(), message: "red \u{1b}[31mtext\u{7}".into() }, now);
+        app.apply(source::Event::Journal { time: "12:00:03".into(), day: String::new(), ident: "evil|ident".into(), program: String::new(), message: "red \u{1b}[31mtext\u{7}".into(), priority: String::new(), unit: String::new() }, now);
         let dir = std::env::temp_dir().join(format!("rumb-export-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let first = export::write(&app, &dir, "20261019-120000").unwrap();

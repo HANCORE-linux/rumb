@@ -1445,7 +1445,24 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
             if !event.program.is_empty() && event.program != event.ident {
                 lines.push(("program".into(), event.program.clone(), pal.ink));
             }
-            lines.push(("source".into(), if event.source == Source::Pacman { "pacman log".into() } else { "journal, priority error or higher".into() }, pal.ink));
+            if event.source == Source::Pacman {
+                lines.push(("source".into(), "pacman log".into(), pal.ink));
+            } else {
+                lines.push(("source".into(), "journal".into(), pal.ink));
+                let priority = match event.priority.as_str() {
+                    "0" => "emergency",
+                    "1" => "alert",
+                    "2" => "critical",
+                    "3" => "error",
+                    _ => "",
+                };
+                if !priority.is_empty() {
+                    lines.push(("priority".into(), priority.into(), pal.ink));
+                }
+                if !event.unit.is_empty() {
+                    lines.push(("unit".into(), event.unit.clone(), pal.ink));
+                }
+            }
             wrapped(&mut lines, "message", &event.message, room, pal.ink);
         }
     }

@@ -122,6 +122,10 @@ pub struct JournalLine {
     #[serde(default, deserialize_with = "crate::source::or_empty")]
     pub program: String,
     pub message: String,
+    #[serde(default, deserialize_with = "crate::source::or_empty")]
+    pub priority: String,
+    #[serde(default, deserialize_with = "crate::source::or_empty")]
+    pub unit: String,
 }
 
 /// Facts about the installed software as a whole.
@@ -337,6 +341,8 @@ pub struct EventLine {
     pub ident: String,
     pub program: String,
     pub message: String,
+    pub priority: String,
+    pub unit: String,
 }
 
 #[derive(Default)]
@@ -489,7 +495,7 @@ impl App {
             Event::Done { label, value, .. } => self.done(&label, &value),
             Event::Result {} => self.finish(now),
             Event::Activity { line } => self.activity(&line, now),
-            Event::Journal { time, day, ident, program, message } => self.journal(JournalLine { time, day, ident, program, message }, now),
+            Event::Journal { time, day, ident, program, message, priority, unit } => self.journal(JournalLine { time, day, ident, program, message, priority, unit }, now),
         }
     }
 
@@ -520,7 +526,7 @@ impl App {
             }
             if self.events.is_empty() {
                 for line in &anatomy.journal {
-                    self.events.push(EventLine { at: now, clock: line.time.clone(), day: line.day.clone(), source: Source::Journal, ident: line.ident.clone(), program: line.program.clone(), message: line.message.trim().to_string() });
+                    self.events.push(EventLine { at: now, clock: line.time.clone(), day: line.day.clone(), source: Source::Journal, ident: line.ident.clone(), program: line.program.clone(), message: line.message.trim().to_string(), priority: line.priority.clone(), unit: line.unit.clone() });
                 }
             }
             self.anatomy = Some(anatomy);
@@ -561,7 +567,7 @@ impl App {
         if self.finished_at.is_some() {
             self.journal_live += 1;
         }
-        self.push_event(EventLine { at: now, clock: line.time, day: line.day, source: Source::Journal, ident: line.ident, program: line.program, message: line.message.trim().to_string() }, now);
+        self.push_event(EventLine { at: now, clock: line.time, day: line.day, source: Source::Journal, ident: line.ident, program: line.program, message: line.message.trim().to_string(), priority: line.priority, unit: line.unit }, now);
     }
 
     fn push_event(&mut self, event: EventLine, now: Instant) {
@@ -618,7 +624,7 @@ impl App {
             _ => {}
         }
         let clock = clock_now();
-        self.push_event(EventLine { at: now, clock, day: today(), source: Source::Pacman, ident: "pacman".into(), program: String::new(), message: line.to_string() }, now);
+        self.push_event(EventLine { at: now, clock, day: today(), source: Source::Pacman, ident: "pacman".into(), program: String::new(), message: line.to_string(), priority: String::new(), unit: String::new() }, now);
     }
 
     pub fn transacting(&self) -> bool {

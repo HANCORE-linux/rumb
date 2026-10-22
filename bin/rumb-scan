@@ -641,7 +641,7 @@ collect_anatomy() {
   upgrades_json=$(printf '%s\n' "${upgrades[@]}" | jq -sc .)
 
   journalctl -p err --since "@$since_epoch" -n 50 -o json \
-    --output-fields=SYSLOG_IDENTIFIER,_COMM,_EXE,MESSAGE,_TRANSPORT -q --no-pager 2>/dev/null |
+    --output-fields=SYSLOG_IDENTIFIER,_COMM,_EXE,MESSAGE,_TRANSPORT,PRIORITY,_SYSTEMD_UNIT,_SYSTEMD_USER_UNIT -q --no-pager 2>/dev/null |
     jq -c "$journal_line" 2>/dev/null | jq -sc . >"$tmp/journal_lines.json"
   [[ -s $tmp/journal_lines.json ]] || echo '[]' >"$tmp/journal_lines.json"
 
@@ -671,7 +671,9 @@ journal_line='def s: if type == "string" then . else null end;
      day: ($at | strflocaltime("%Y-%m-%d")),
      ident: (if (._TRANSPORT | s) == "kernel" then "kernel" else ((.SYSLOG_IDENTIFIER | s) // (._COMM | s) // "unknown") end),
      program: ((((._EXE | s) // "") | split("/") | last // "") as $exe | if $exe != "" then $exe else ((._COMM | s) // "") end),
-     message: ((.MESSAGE | s) // "binary message")}'
+     message: ((.MESSAGE | s) // "binary message"),
+     priority: ((.PRIORITY | s) // ""),
+     unit: ((._SYSTEMD_USER_UNIT | s) // (._SYSTEMD_UNIT | s) // "")}'
 
 ((stream)) && collect_anatomy
 
@@ -811,7 +813,7 @@ follow_sources() {
   local journal_pid=""
   tail -F -n0 --pid=$$ "$pacman_log" 2>/dev/null | sed -u 's/^/L /' &
   if command -v journalctl >/dev/null; then
-    journalctl -f -n0 -q -p err -o json --output-fields=SYSLOG_IDENTIFIER,_COMM,_EXE,MESSAGE,_TRANSPORT 2>/dev/null > >(sed -u 's/^/J /') &
+    journalctl -f -n0 -q -p err -o json --output-fields=SYSLOG_IDENTIFIER,_COMM,_EXE,MESSAGE,_TRANSPORT,PRIORITY,_SYSTEMD_UNIT,_SYSTEMD_USER_UNIT 2>/dev/null > >(sed -u 's/^/J /') &
     journal_pid=$!
   fi
   tail -f --pid=$$ /dev/null 2>/dev/null
