@@ -141,6 +141,7 @@ pub struct Motion {
     picked: Option<String>,
     picked_at: Option<Instant>,
     deps_at: Option<Instant>,
+    anatomy_seen: Option<Instant>,
     glances: u32,
     glow_at: Option<Instant>,
 }
@@ -265,6 +266,7 @@ impl Motion {
             picked: None,
             picked_at: None,
             deps_at: None,
+            anatomy_seen: None,
             glances: 0,
             glow_at: None,
         }
@@ -820,7 +822,8 @@ impl Motion {
             };
             self.arrived.entry(update.name.clone()).or_insert(now + WAVE * wave);
         }
-        if self.deps_at.is_none() && app.anatomy.is_some() {
+        if app.anatomy_at != self.anatomy_seen {
+            self.anatomy_seen = app.anatomy_at;
             self.deps_at = Some(now);
         }
         let updates = app.visible_updates();

@@ -1343,6 +1343,27 @@ mod tests {
     }
 
     #[test]
+    fn a_rescan_brings_the_map_names_in_again() {
+        let start = Instant::now();
+        let mut app = demo_until(26_000, start);
+        let mut motion = Motion::new(true, start);
+        motion.step(&mut app, start, 0.0);
+        let rescan = start + Duration::from_secs(5);
+        let anatomy = demo_events().into_iter().map(|(_, event)| event).find(|event| matches!(event, source::Event::Stage { stage, .. } if stage == "anatomy")).unwrap();
+        app.apply(anatomy, rescan);
+        motion.step(&mut app, rescan, 0.0);
+        let chosen = app.visible_updates()[0].name.clone();
+        let names = app.anatomy.as_ref().unwrap().deps[&chosen].depends_on.clone();
+        let shown = |after: Duration| {
+            let (_, text) = draw_map(&app, &motion, rescan + after);
+            names.iter().filter(|name| text.contains(&format!(" {name} "))).count()
+        };
+        let (early, full) = (shown(Duration::from_millis(20)), shown(Duration::from_secs(1)));
+        assert_eq!(full, names.len());
+        assert!(early < full / 2, "{early} of {full} names right after the rescan");
+    }
+
+    #[test]
     fn an_idle_glance_at_the_map_lets_its_names_light_up() {
         let start = Instant::now();
         let mut app = demo_until(26_000, start);
