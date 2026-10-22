@@ -343,12 +343,17 @@ check_updates() {
     done_step updates "checking repository updates" "$(count_source repo)"
   fi
 
+  : >"$tmp/new_info.txt"
   if ((check_aur)) && [[ -n $(pacman -Qmq 2>/dev/null) ]]; then
     aur_helper=$(command -v yay || command -v paru || true)
     if [[ -n $aur_helper ]]; then
       step updates "checking AUR updates"
       if aur_out=$("$aur_helper" -Qua 2>"$tmp/aur.err"); then
         parse_updates aur <<<"$aur_out"
+        mapfile -t aur_names < <(awk -F'\x1f' '$4 == "aur" { print $1 }' "$tmp/updates.tsv")
+        if ((stream && ${#aur_names[@]})); then
+          LC_ALL=C COLUMNS=0 "$aur_helper" -Sai -- "${aur_names[@]}" >>"$tmp/new_info.txt" 2>/dev/null || true
+        fi
         done_step updates "checking AUR updates" "$(count_source aur)"
       elif [[ -s $tmp/aur.err ]]; then
         update_errors+=(aur)
@@ -374,7 +379,7 @@ check_updates() {
       /^Name / { sub(/^[^:]*: /, ""); name = $0 }
       /^Download Size / { sub(/^[^:]*: /, ""); download[name] = bytes($0) }
       /^Installed Size / { sub(/^[^:]*: /, ""); installed[name] = bytes($0) }'
-    LC_ALL=C COLUMNS=0 pacman -Si --dbpath "$checkup_db" -- "${repo_names[@]}" 2>/dev/null |
+    LC_ALL=C COLUMNS=0 pacman -Si --dbpath "$checkup_db" -- "${repo_names[@]}" 2>/dev/null | tee -a "$tmp/new_info.txt" |
       awk "$size_fields"' END { for (n in installed) printf "%s\x1f%d\x1f%d\n", n, download[n], installed[n] }' >"$tmp/sizes_new.tsv"
     LC_ALL=C COLUMNS=0 pacman -Qi -- "${repo_names[@]}" 2>/dev/null |
       awk "$size_fields"' END { for (n in installed) printf "%s\x1f%d\n", n, installed[n] }' >"$tmp/sizes_old.tsv"
@@ -620,7 +625,7 @@ collect_anatomy() {
   mapfile -t names < <(cut -d$'\x1f' -f1 "$tmp/updates.tsv")
   : >"$tmp/deps.tsv"
   if ((${#names[@]})); then
-    LC_ALL=C COLUMNS=0 pacman -Qi -- "${names[@]}" 2>/dev/null | awk '
+    deps_fields='
       function names(text,   count, parts, i, out, item) {
         kept = 0
         out = ""
@@ -635,10 +640,43 @@ collect_anatomy() {
         }
         return out
       }
-      /^Name / { sub(/^[^:]*: /, ""); name = $0 }
+      /^Name / { sub(/^[^:]*: /, ""); name = $0 }'
+    awk "$deps_fields"'
+      /^Version / { sub(/^[^:]*: /, ""); version[name] = $0 }
+      /^Depends On / { sub(/^[^:]*: /, ""); list = names($0); printf "%s\x1f%s\x1f%d\x1f%s\n", name, version[name], kept, list }' \
+      "$tmp/new_info.txt" >"$tmp/deps_new.tsv" 2>/dev/null
+    LC_ALL=C COLUMNS=0 pacman -Qi -- "${names[@]}" 2>/dev/null | awk -v new_file="$tmp/deps_new.tsv" "$deps_fields"'
+      function missing(from, other,   parts, have, i, count, out) {
+        count = split(other, parts, ",")
+        for (i = 1; i <= count; i++) have[parts[i]] = 1
+        count = split(from, parts, ",")
+        out = ""
+        for (i = 1; i <= count; i++) if (parts[i] != "" && !(parts[i] in have)) out = out (out == "" ? "" : ",") parts[i]
+        return out
+      }
+      BEGIN {
+        while ((getline row < new_file) > 0) {
+          split(row, field, "\x1f")
+          new_version[field[1]] = field[2]
+          new_count[field[1]] = field[3]
+          new_list[field[1]] = field[4]
+        }
+      }
       /^Depends On / { sub(/^[^:]*: /, ""); depends_on[name] = names($0); depends[name] = kept }
       /^Required By / { sub(/^[^:]*: /, ""); required_names[name] = names($0); required[name] = kept }
-      END { for (n in depends) printf "%s\x1f%d\x1f%d\x1f%s\x1f%s\n", n, depends[n], required[n], depends_on[n], required_names[n] }' >"$tmp/deps.tsv"
+      END {
+        for (n in depends) {
+          version = ""; added = ""; dropped = ""; list = depends_on[n]; count = depends[n]
+          if (n in new_version) {
+            version = new_version[n]
+            added = missing(new_list[n], depends_on[n])
+            dropped = missing(depends_on[n], new_list[n])
+            list = new_list[n]
+            count = new_count[n]
+          }
+          printf "%s\x1f%d\x1f%d\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n", n, count, required[n], list, required_names[n], version, added, dropped
+        }
+      }' >"$tmp/deps.tsv"
   fi
 
   while IFS=$'\x1f' read -r day count; do
@@ -660,7 +698,9 @@ collect_anatomy() {
   [[ -s $tmp/journal_lines.json ]] || echo '[]' >"$tmp/journal_lines.json"
 
   jq -Rn '[inputs | split("\u001f") | {(.[0]): (.[1] | tonumber)}] | add // {}' <"$tmp/repos.tsv" >"$tmp/repos.json"
-  jq -Rn '[inputs | split("\u001f") | {(.[0]): {depends: (.[1] | tonumber), required_by: (.[2] | tonumber), depends_on: (.[3] // "" | split(",") | map(select(. != ""))), required_names: (.[4] // "" | split(",") | map(select(. != "")))}}] | add // {}' \
+  jq -Rn 'def list: . // "" | split(",") | map(select(. != ""));
+    [inputs | split("\u001f") | {(.[0]): {depends: (.[1] | tonumber), required_by: (.[2] | tonumber), depends_on: (.[3] | list), required_names: (.[4] | list),
+      version: (.[5] // ""), added: (.[6] | list), dropped: (.[7] | list)}}] | add // {}' \
     <"$tmp/deps.tsv" >"$tmp/deps.json"
   emit --arg hostname "$(uname -n)" --arg os "$os" --arg desktop "$desktop" --arg omarchy "$omarchy" \
     --arg kernel_running "$kernel_running" --arg kernel_installed "$kernel_installed" --arg kernel_package "$kernel_pkg" \

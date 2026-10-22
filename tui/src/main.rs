@@ -1182,6 +1182,44 @@ mod tests {
         assert!(rows.iter().any(|row| row.contains("message") && row.contains("src/adapter.c: Failed to clear UUIDs: Busy (0x0a)")));
     }
 
+    fn demo_detail(name: &str) -> App {
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events() {
+            if time <= 26_000 {
+                app.apply(event, now + Duration::from_millis(time));
+            }
+        }
+        app.focus = Pane::Updates;
+        let index = app.visible_updates().iter().position(|update| update.name == name).unwrap();
+        app.select(Pane::Updates, index as isize);
+        app.overlay = true;
+        app
+    }
+
+    #[test]
+    fn an_update_shows_the_dependencies_of_its_new_version() {
+        let rows = screen(&demo_detail("hyprland"), 170, 50);
+        let all = rows.join("\n");
+        assert!(all.contains("it will depend on 24"), "{all}");
+        assert!(all.contains("hyprwire +"));
+        assert!(rows.iter().any(|row| row.contains("dropped deps") && row.contains("libxcursor")));
+        assert_eq!(all.matches("libxcursor").count(), 1);
+        assert!(all.contains("+ new dependency"));
+    }
+
+    #[test]
+    fn a_new_dependency_with_a_problem_keeps_the_problem_colour() {
+        let app = demo_detail("quickshell");
+        let (buffer, _) = render(&app, 170, 50, app.started + Duration::from_secs(60));
+        let found = (0..50u16).find_map(|y| {
+            let row: String = (0..170u16).map(|x| buffer[(x, y)].symbol()).collect();
+            row.find("bluez +").map(|at| (row[..at].chars().count() as u16, y))
+        });
+        let (x, y) = found.expect("bluez is listed as a new dependency");
+        assert_eq!(buffer[(x, y)].fg, palette::Palette::paper().teal);
+    }
+
     #[test]
     fn paused_events_keep_the_selected_line_when_new_ones_arrive() {
         let now = Instant::now();

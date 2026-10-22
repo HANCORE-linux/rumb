@@ -111,6 +111,12 @@ pub struct Deps {
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub required_names: Vec<String>,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub added: Vec<String>,
+    #[serde(default)]
+    pub dropped: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

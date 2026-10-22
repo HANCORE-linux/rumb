@@ -345,7 +345,7 @@ pub fn fan(spec: &FanSpec, pal: &Palette, width: u32, height: u32, cell_height: 
             let x = if side < 0.0 { 5.0 * unit } else { w - 5.0 * unit };
             let (color, line) = match kind {
                 2 => (pal.teal, 0.75),
-                1 => (pal.ink, 0.6),
+                1 | 4 => (pal.ink, 0.6),
                 3 => (pal.faint, 0.3),
                 _ => (pal.ink2, 0.4),
             };
