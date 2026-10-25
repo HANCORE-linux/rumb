@@ -65,9 +65,9 @@ Usage: rumb [--demo] [--no-anim] [--theme <name>] [--since <time>] [--no-aur]
   --no-aur        Passed on to rumb-scan
 
 Keys: 1-5 show or hide the instruments, subsystems, updates, problems and
-live events; tab moves the focus between the instruments, the subsystems and
-the lists; left/right moves it between the lists, tiles or parts; up/down,
-PgUp/PgDn and Home/End select; enter opens the selection; / filters the
+live events; tab and shift+tab move the focus between the instruments, the
+subsystems and the lists; left/right selects an instrument or a part; up/down,
+PgUp/PgDn and Home/End select a row; enter opens the selection; / filters the
 focused list; j shows the journal of the selected problem; e exports a
 Markdown report to ~/rumb-exports; esc closes or clears; r rescans; q quits.
 
@@ -229,10 +229,8 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3]) -> Action {
             KeyCode::Esc if app.overlay => app.overlay = false,
             KeyCode::Left => app.move_tile(false),
             KeyCode::Right => app.move_tile(true),
-            KeyCode::Tab => app.cycle_focus(true, true),
-            KeyCode::BackTab => app.cycle_focus(false, true),
-            KeyCode::Down if !app.overlay && app.visible[1] => app.enter_band(),
-            KeyCode::Down | KeyCode::Esc if !app.overlay => app.leave_tiles(),
+            KeyCode::Tab => app.cycle_focus(true),
+            KeyCode::BackTab => app.cycle_focus(false),
             KeyCode::Enter => app.overlay = true,
             KeyCode::Char(digit @ '1'..='5') => {
                 app.press_panel(digit as usize - '1' as usize);
@@ -250,11 +248,8 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3]) -> Action {
             KeyCode::Esc if app.overlay => app.overlay = false,
             KeyCode::Left => app.move_part(false),
             KeyCode::Right => app.move_part(true),
-            KeyCode::Tab => app.cycle_focus(true, true),
-            KeyCode::BackTab => app.cycle_focus(false, true),
-            KeyCode::Up if !app.overlay && app.visible[0] => app.enter_tiles(),
-            KeyCode::Down if !app.overlay && app.lists_shown() => app.leave_band(),
-            KeyCode::Esc if !app.overlay => app.leave_band(),
+            KeyCode::Tab => app.cycle_focus(true),
+            KeyCode::BackTab => app.cycle_focus(false),
             KeyCode::Enter => app.overlay = true,
             KeyCode::Char(digit @ '1'..='5') => {
                 app.press_panel(digit as usize - '1' as usize);
@@ -276,17 +271,13 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3]) -> Action {
             app.lists[list].filter.clear();
             app.select(focus, 0);
         }
-        KeyCode::Tab => app.cycle_focus(true, true),
-        KeyCode::BackTab => app.cycle_focus(false, true),
-        KeyCode::Right => app.cycle_focus(true, false),
-        KeyCode::Left => app.cycle_focus(false, false),
+        KeyCode::Tab => app.cycle_focus(true),
+        KeyCode::BackTab => app.cycle_focus(false),
         KeyCode::Char(digit @ '1'..='5') => {
             app.press_panel(digit as usize - '1' as usize);
             app.overlay = false;
         }
         KeyCode::Down => app.select(focus, selected + 1),
-        KeyCode::Up if selected == 0 && !app.overlay && app.visible[1] => app.enter_band(),
-        KeyCode::Up if selected == 0 && !app.overlay && app.visible[0] => app.enter_tiles(),
         KeyCode::Up => app.select(focus, selected - 1),
         KeyCode::PageDown => app.select(focus, selected + step),
         KeyCode::PageUp => app.select(focus, selected - step),
@@ -633,7 +624,7 @@ mod tests {
             app.apply(source::Event::Activity { line: format!("upgraded {} (1.0-1 -> 2.0-1)", long(i)) }, now);
         }
         for i in 0..300 {
-            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: format!("ident-{i}"), program: String::new(), message: "x".repeat(300) }, now);
+            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: format!("ident-{i}"), program: String::new(), message: "x".repeat(300), priority: String::new(), unit: String::new() }, now);
         }
         app
     }
@@ -714,13 +705,7 @@ mod tests {
         assert_eq!(app.lists[0].selected, 449);
         press(&mut app, &[KeyCode::Down, KeyCode::Home, KeyCode::Up]);
         assert_eq!(app.lists[0].selected, 0);
-        assert_eq!((app.part, app.tile), (Some(0), None));
-        press(&mut app, &[KeyCode::Up]);
-        assert_eq!((app.part, app.tile), (None, Some(0)));
-        press(&mut app, &[KeyCode::Down]);
-        assert_eq!((app.part, app.tile), (Some(0), None));
-        press(&mut app, &[KeyCode::Down]);
-        assert_eq!((app.part, app.tile), (None, None));
+        assert_eq!((app.part, app.tile, app.focus), (None, None, Pane::Updates));
 
         press(&mut app, &[KeyCode::Char('/')]);
         assert!(app.editing);
@@ -745,7 +730,7 @@ mod tests {
         assert_eq!(app.focus, Pane::Problems);
         press(&mut app, &[KeyCode::Tab]);
         assert_eq!(app.focus, Pane::Events);
-        press(&mut app, &[KeyCode::Right]);
+        press(&mut app, &[KeyCode::BackTab]);
         assert_eq!(app.focus, Pane::Problems);
 
         let name = app.visible_problems()[0].name().to_string();
@@ -882,7 +867,7 @@ mod tests {
     #[test]
     fn keys_reach_the_instrument_tiles() {
         let mut app = crowded_app(Instant::now());
-        press(&mut app, &[KeyCode::Up, KeyCode::Up]);
+        press(&mut app, &[KeyCode::BackTab, KeyCode::BackTab]);
         assert_eq!(app.tile, Some(0));
         press(&mut app, &[KeyCode::Right, KeyCode::Right]);
         assert_eq!(app.tile, Some(2));
@@ -894,11 +879,6 @@ mod tests {
         press(&mut app, &[KeyCode::Esc]);
         assert!(!app.overlay);
         assert_eq!(app.tile, Some(5));
-        press(&mut app, &[KeyCode::Esc]);
-        assert_eq!(app.tile, None);
-        assert_eq!(app.focus, Pane::Updates);
-        press(&mut app, &[KeyCode::Tab, KeyCode::Tab, KeyCode::Tab]);
-        assert_eq!(app.tile, Some(5));
         press(&mut app, &[KeyCode::Tab]);
         assert_eq!((app.tile, app.part), (None, Some(0)));
         press(&mut app, &[KeyCode::Tab]);
@@ -907,10 +887,23 @@ mod tests {
         assert_eq!(app.tile, Some(5));
         press(&mut app, &[KeyCode::Char('1')]);
         assert_eq!(app.tile, None);
-        press(&mut app, &[KeyCode::Up]);
+        press(&mut app, &[KeyCode::BackTab]);
         assert_eq!((app.tile, app.part), (None, Some(0)));
-        press(&mut app, &[KeyCode::Up]);
-        assert_eq!(app.tile, None);
+        press(&mut app, &[KeyCode::BackTab]);
+        assert_eq!((app.tile, app.part, app.focus), (None, None, Pane::Events));
+    }
+
+    #[test]
+    fn arrow_keys_never_leave_the_focused_panel() {
+        let mut app = crowded_app(Instant::now());
+        for _ in 0..5 {
+            let stop = (app.tile.is_some(), app.part.is_some(), app.focus);
+            for code in [KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right, KeyCode::PageDown, KeyCode::End, KeyCode::PageUp, KeyCode::Home, KeyCode::Up, KeyCode::Esc] {
+                press(&mut app, &[code]);
+                assert_eq!((app.tile.is_some(), app.part.is_some(), app.focus), stop, "{code:?} left {stop:?}");
+            }
+            press(&mut app, &[KeyCode::Tab]);
+        }
     }
 
     fn done(label: &str, value: Value) -> source::Event {
@@ -1038,8 +1031,8 @@ mod tests {
     fn events_from_earlier_days_show_their_date() {
         let now = Instant::now();
         let mut app = App::new(false, false, now);
-        app.apply(source::Event::Journal { time: "13:45:10".into(), day: "2000-01-02".into(), ident: "earlier".into(), program: String::new(), message: "old".into() }, now);
-        app.apply(source::Event::Journal { time: "14:00:00".into(), day: app::today(), ident: "today".into(), program: String::new(), message: "new".into() }, now);
+        app.apply(source::Event::Journal { time: "13:45:10".into(), day: "2000-01-02".into(), ident: "earlier".into(), program: String::new(), message: "old".into(), priority: String::new(), unit: String::new() }, now);
+        app.apply(source::Event::Journal { time: "14:00:00".into(), day: app::today(), ident: "today".into(), program: String::new(), message: "new".into(), priority: String::new(), unit: String::new() }, now);
         let rows = screen(&app, 150, 44);
         assert!(find(&rows, "01-02 13:45").is_some());
         assert!(find(&rows, "14:00:00").is_some());
@@ -1084,7 +1077,7 @@ mod tests {
     #[test]
     fn the_subsystems_are_a_stop_between_tiles_and_lists() {
         let mut app = crowded_app(Instant::now());
-        press(&mut app, &[KeyCode::Up]);
+        press(&mut app, &[KeyCode::BackTab]);
         assert_eq!(app.part, Some(0));
         assert!(screen(&app, 358, 85).iter().any(|row| row.contains("←→ part")));
         press(&mut app, &[KeyCode::Left]);
@@ -1098,9 +1091,9 @@ mod tests {
         assert_eq!((app.overlay, app.part), (true, Some(2)));
         press(&mut app, &[KeyCode::Esc]);
         assert_eq!((app.overlay, app.part), (false, Some(2)));
-        press(&mut app, &[KeyCode::Down]);
+        press(&mut app, &[KeyCode::Tab]);
         assert_eq!((app.part, app.focus), (None, Pane::Updates));
-        press(&mut app, &[KeyCode::Up, KeyCode::Up, KeyCode::Down]);
+        press(&mut app, &[KeyCode::BackTab, KeyCode::BackTab, KeyCode::Tab]);
         assert_eq!((app.tile, app.part), (None, Some(2)));
         press(&mut app, &[KeyCode::Char('2')]);
         assert_eq!(app.part, None);
@@ -1143,14 +1136,320 @@ mod tests {
         let now = Instant::now();
         let mut app = App::new(false, false, now);
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [{"kind": "journal", "subject": "/usr/bin/conmon", "count": 1915, "package": "conmon", "status": "no-update"}], "activity": []}) }, now);
-        app.apply(source::Event::Journal { time: "14:17:39".into(), day: String::new(), ident: "peaceful_golick".into(), program: "conmon".into(), message: "Compiling rumb".into() }, now);
-        app.apply(source::Event::Journal { time: "14:17:40".into(), day: String::new(), ident: "playerctld".into(), program: "playerctld".into(), message: "lost the bus".into() }, now);
+        app.apply(source::Event::Journal { time: "14:17:39".into(), day: String::new(), ident: "peaceful_golick".into(), program: "conmon".into(), message: "Compiling rumb".into(), priority: String::new(), unit: String::new() }, now);
+        app.apply(source::Event::Journal { time: "14:17:40".into(), day: String::new(), ident: "playerctld".into(), program: "playerctld".into(), message: "lost the bus".into(), priority: String::new(), unit: String::new() }, now);
         app.visible = [true; 5];
         app.focus = Pane::Problems;
         press(&mut app, &[KeyCode::Char('j')]);
         assert_eq!(app.focus, Pane::Events);
         let shown: Vec<&str> = app.visible_events().iter().map(|event| event.ident.as_str()).collect();
         assert_eq!(shown, vec!["peaceful_golick"]);
+    }
+
+    #[test]
+    fn a_live_journal_event_shows_its_priority_and_unit() {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        app.apply(source::Event::Journal { time: "14:20:00".into(), day: String::new(), ident: "bluetoothd".into(), program: "bluetoothd".into(), message: "Failed to set mode".into(), priority: "2".into(), unit: "bluetooth.service".into() }, now);
+        app.visible = [false, false, false, false, true];
+        app.focus = Pane::Events;
+        app.overlay = true;
+        let rows = screen(&app, 170, 50);
+        let row = |label: &str| rows.iter().find(|row| row.trim_start_matches(['│', ' ']).starts_with(label)).cloned().unwrap_or_default();
+        assert!(row("source").contains("journal"), "{rows:#?}");
+        assert!(row("priority").contains("critical"));
+        assert!(row("unit").contains("bluetooth.service"));
+        assert!(!rows.iter().any(|row| row.contains("priority error or higher")));
+    }
+
+    #[test]
+    fn a_journal_problem_shows_its_newest_message() {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [{"kind": "journal", "subject": "/usr/lib/bluetooth/bluetoothd", "count": 36, "package": "bluez", "status": "no-update", "last": "10-17 23:52", "message": "src/adapter.c: Failed to clear UUIDs: Busy (0x0a)"}], "activity": []}) }, now);
+        app.visible = [false, false, false, true, false];
+        app.focus = Pane::Problems;
+        app.overlay = true;
+        let rows = screen(&app, 170, 50);
+        assert!(rows.iter().any(|row| row.contains("last") && row.contains("10-17 23:52")), "{rows:#?}");
+        assert!(rows.iter().any(|row| row.contains("message") && row.contains("src/adapter.c: Failed to clear UUIDs: Busy (0x0a)")));
+    }
+
+    fn demo_detail(name: &str) -> App {
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events() {
+            if time <= 26_000 {
+                app.apply(event, now + Duration::from_millis(time));
+            }
+        }
+        app.focus = Pane::Updates;
+        let index = app.visible_updates().iter().position(|update| update.name == name).unwrap();
+        app.select(Pane::Updates, index as isize);
+        app.overlay = true;
+        app
+    }
+
+    #[test]
+    fn an_update_shows_the_dependencies_of_its_new_version() {
+        let rows = screen(&demo_detail("hyprland"), 170, 50);
+        let all = rows.join("\n");
+        assert!(all.contains("it will depend on 24"), "{all}");
+        assert!(all.contains("hyprwire +"));
+        assert!(rows.iter().any(|row| row.contains("dropped deps") && row.contains("libxcursor")));
+        assert_eq!(all.matches("libxcursor").count(), 1);
+        assert!(all.contains("+ new dependency"));
+    }
+
+    #[test]
+    fn a_new_dependency_with_a_problem_keeps_the_problem_colour() {
+        let app = demo_detail("quickshell");
+        let (buffer, _) = render(&app, 170, 50, app.started + Duration::from_secs(60));
+        let found = (0..50u16).find_map(|y| {
+            let row: String = (0..170u16).map(|x| buffer[(x, y)].symbol()).collect();
+            row.find("bluez +").map(|at| (row[..at].chars().count() as u16, y))
+        });
+        let (x, y) = found.expect("bluez is listed as a new dependency");
+        assert_eq!(buffer[(x, y)].fg, palette::Palette::paper().teal);
+    }
+
+    fn demo_map(columns: u16, rows: u16) -> (u32, u32, ink::OrbitSpec) {
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events() {
+            if time <= 26_000 {
+                app.apply(event, now + Duration::from_millis(time));
+            }
+        }
+        app.visible = [false, false, true, false, false];
+        app.focus = Pane::Updates;
+        let (_, scene) = render(&app, columns, rows, app.started + Duration::from_secs(60));
+        scene
+            .placements
+            .into_iter()
+            .find_map(|placement| match placement.picture {
+                page::Picture::Orbit(spec) => Some((u32::from(placement.rect.width) * 10, u32::from(placement.rect.height) * 21, *spec)),
+                _ => None,
+            })
+            .expect("the update map is drawn")
+    }
+
+    #[test]
+    fn the_map_links_end_at_the_ports_outside_the_dial() {
+        let (width, height, spec) = demo_map(170, 50);
+        assert_eq!(spec.links.iter().filter(|link| link.left).count(), 24);
+        let pal = palette::Palette::paper();
+        let with = ink::orbit(&spec, &pal, width, height, 21.0).unwrap();
+        let without = ink::orbit(&ink::OrbitSpec { links: Vec::new(), ..spec }, &pal, width, height, 21.0).unwrap();
+        let (cx, cy) = (width as f32 / 2.0, height as f32 / 2.0);
+        let radius = ink::dial(width as f32, height as f32, 1.0);
+        let changed: Vec<f32> = with
+            .pixels()
+            .iter()
+            .zip(without.pixels())
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(index, _)| (((index as u32 % width) as f32 - cx).powi(2) + ((index as u32 / width) as f32 - cy).powi(2)).sqrt())
+            .collect();
+        assert!(!changed.is_empty());
+        let inside = changed.iter().filter(|distance| **distance < radius * 1.08).count();
+        assert_eq!(inside, 0, "{inside} of {} link pixels inside the dial", changed.len());
+    }
+
+    #[test]
+    fn the_map_leaves_room_for_the_links() {
+        let pal = palette::Palette::paper();
+        for (columns, rows) in [(110, 36), (130, 40), (170, 50)] {
+            let (width, height, spec) = demo_map(columns, rows);
+            let with = ink::orbit(&spec, &pal, width, height, 21.0).unwrap();
+            let without = ink::orbit(&ink::OrbitSpec { links: Vec::new(), ..spec }, &pal, width, height, 21.0).unwrap();
+            let reach = with
+                .pixels()
+                .iter()
+                .zip(without.pixels())
+                .enumerate()
+                .filter(|(_, (a, b))| a != b)
+                .map(|(index, _)| index as u32 % width)
+                .filter(|x| *x < width / 2)
+                .max()
+                .unwrap();
+            assert!(reach >= 66, "the links reach only {reach} px into a {width} px map at {columns}x{rows}");
+        }
+    }
+
+    #[test]
+    fn the_map_labels_stay_inside_the_picture() {
+        let pal = palette::Palette::paper();
+        for (columns, rows) in [(92, 31), (130, 40), (170, 50)] {
+            let (width, height, spec) = demo_map(columns, rows);
+            let labelled = ink::orbit(&spec, &pal, width, height, 21.0).unwrap();
+            let bare = ink::orbit(&ink::OrbitSpec { sectors: spec.sectors.iter().map(|(_, count)| (String::new(), *count)).collect(), ..spec }, &pal, width, height, 21.0).unwrap();
+            let label: Vec<(u32, u32)> = labelled.pixels().iter().zip(bare.pixels()).enumerate().filter(|(_, (a, b))| a != b).map(|(index, _)| (index as u32 % width, index as u32 / width)).collect();
+            assert!(!label.is_empty());
+            let on_edge = label.iter().filter(|(x, y)| *x < 1 || *x + 1 >= width || *y < 1 || *y + 1 >= height).count();
+            assert_eq!(on_edge, 0, "{on_edge} label pixels on the edge at {columns}x{rows}");
+        }
+    }
+
+    fn draw_map(app: &App, motion: &Motion, now: Instant) -> (ink::OrbitSpec, String) {
+        let pal = palette::Palette::paper();
+        let mut terminal = Terminal::new(TestBackend::new(170, 50)).unwrap();
+        let mut scene = None;
+        terminal.draw(|frame| scene = Some(page::draw(frame, app, motion, &pal, now, (10, 21)))).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text = (0..50u16).map(|y| (0..170u16).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");
+        let spec = scene
+            .unwrap()
+            .placements
+            .into_iter()
+            .find_map(|placement| match placement.picture {
+                page::Picture::Orbit(spec) => Some(*spec),
+                _ => None,
+            })
+            .expect("the update map is drawn");
+        (spec, text)
+    }
+
+    fn demo_until(millis: u64, start: Instant) -> App {
+        let mut app = App::new(true, true, start);
+        for (time, event) in demo_events() {
+            if time <= millis {
+                app.apply(event, start);
+            }
+        }
+        app.visible = [false, false, true, false, false];
+        app.focus = Pane::Updates;
+        app
+    }
+
+    #[test]
+    fn the_map_brings_new_updates_in_ring_by_ring() {
+        let start = Instant::now();
+        let mut app = demo_until(3_100, start);
+        let mut motion = Motion::new(true, start);
+        motion.step(&mut app, start, 0.0);
+        let (first, _) = draw_map(&app, &motion, start + Duration::from_millis(10));
+        assert!(!first.nodes.is_empty());
+        assert!(first.nodes.iter().all(|node| node.ring == 0 && node.faint), "{:?}", first.nodes);
+        let (settled, _) = draw_map(&app, &motion, start + Duration::from_secs(1));
+        assert_eq!(settled.nodes.len(), app.updates.len());
+        assert!(settled.nodes.iter().all(|node| !node.faint));
+    }
+
+    #[test]
+    fn a_new_selection_brings_its_names_in_from_the_ports() {
+        let start = Instant::now();
+        let mut app = demo_until(26_000, start);
+        let mut motion = Motion::new(true, start);
+        motion.step(&mut app, start, 0.0);
+        let later = start + Duration::from_secs(3);
+        app.select(Pane::Updates, 1);
+        motion.step(&mut app, later, 0.0);
+        let chosen = app.visible_updates()[1].name.clone();
+        let names = app.anatomy.as_ref().unwrap().deps[&chosen].depends_on.clone();
+        let shown = |after: Duration| {
+            let (_, text) = draw_map(&app, &motion, later + after);
+            names.iter().filter(|name| text.contains(&format!(" {name} "))).count()
+        };
+        let (early, full) = (shown(Duration::from_millis(20)), shown(Duration::from_secs(1)));
+        assert_eq!(full, names.len().min(23));
+        assert!(early < full / 2, "{early} of {full} names right after the selection");
+    }
+
+    #[test]
+    fn a_rescan_brings_the_map_names_in_again() {
+        let start = Instant::now();
+        let mut app = demo_until(26_000, start);
+        let mut motion = Motion::new(true, start);
+        motion.step(&mut app, start, 0.0);
+        let rescan = start + Duration::from_secs(5);
+        let anatomy = demo_events().into_iter().map(|(_, event)| event).find(|event| matches!(event, source::Event::Stage { stage, .. } if stage == "anatomy")).unwrap();
+        app.apply(anatomy, rescan);
+        motion.step(&mut app, rescan, 0.0);
+        let chosen = app.visible_updates()[0].name.clone();
+        let names = app.anatomy.as_ref().unwrap().deps[&chosen].depends_on.clone();
+        let shown = |after: Duration| {
+            let (_, text) = draw_map(&app, &motion, rescan + after);
+            names.iter().filter(|name| text.contains(&format!(" {name} "))).count()
+        };
+        let (early, full) = (shown(Duration::from_millis(20)), shown(Duration::from_secs(1)));
+        assert_eq!(full, names.len());
+        assert!(early < full / 2, "{early} of {full} names right after the rescan");
+    }
+
+    #[test]
+    fn scan_results_show_as_soon_as_they_arrive() {
+        let start = Instant::now();
+        let mut app = App::new(false, true, start);
+        let mut motion = Motion::new(true, start);
+        let mut at = 0;
+        for line in include_str!("../demo.ndjson").lines().filter(|line| !line.trim().is_empty()) {
+            let value: Value = serde_json::from_str(line).unwrap();
+            at += value["_delay"].as_u64().unwrap_or(0);
+            let now = start + Duration::from_millis(at);
+            motion.push(serde_json::from_str(line).unwrap(), line, &mut app, now);
+            motion.step(&mut app, now, 0.0);
+            if value["event"] == "stage" {
+                match value["stage"].as_str() {
+                    Some("updates") => assert!(!app.updates.is_empty(), "no updates right after they arrived at {at} ms"),
+                    Some("anatomy") => assert!(app.anatomy.is_some(), "no dependencies right after they arrived at {at} ms"),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn each_scan_result_is_revealed_once() {
+        let start = Instant::now();
+        let mut app = App::new(false, true, start);
+        let mut motion = Motion::new(true, start);
+        let mut stream = Vec::new();
+        let mut at = 0;
+        for line in include_str!("../demo.ndjson").lines().filter(|line| !line.trim().is_empty()) {
+            let value: Value = serde_json::from_str(line).unwrap();
+            at += value["_delay"].as_u64().unwrap_or(0);
+            stream.push((at, line));
+        }
+        let (mut next, mut first) = (0, [None; 4]);
+        for millis in (0..22_000).step_by(33) {
+            let now = start + Duration::from_millis(millis);
+            while next < stream.len() && stream[next].0 <= millis {
+                motion.push(serde_json::from_str(stream[next].1).unwrap(), stream[next].1, &mut app, now);
+                next += 1;
+            }
+            motion.step(&mut app, now, 0.033);
+            for (index, stamp) in app.stage_done_at.into_iter().enumerate() {
+                if let Some(stamp) = stamp {
+                    assert_eq!(*first[index].get_or_insert(stamp), stamp, "stage {index} was revealed again at {millis} ms");
+                }
+            }
+        }
+        assert!(first.iter().all(Option::is_some));
+    }
+
+    #[test]
+    fn an_idle_glance_at_the_map_lets_its_names_light_up() {
+        let start = Instant::now();
+        let mut app = demo_until(26_000, start);
+        let mut motion = Motion::new(true, start);
+        let mut now = start;
+        let mut glow = None;
+        while glow.is_none() && now < start + Duration::from_secs(60) {
+            now += Duration::from_millis(33);
+            motion.step(&mut app, now, 0.033);
+            if motion.map_glow(now).is_some() {
+                glow = Some(now);
+            }
+        }
+        let glow = glow.expect("an idle glance at the update list lights the names");
+        let pal = palette::Palette::paper();
+        let colours = |at: Instant| {
+            let mut terminal = Terminal::new(TestBackend::new(170, 50)).unwrap();
+            terminal.draw(|frame| drop(page::draw(frame, &app, &motion, &pal, at, (10, 21)))).unwrap();
+            terminal.backend().buffer().content().iter().map(|cell| cell.fg).collect::<std::collections::HashSet<_>>().len()
+        };
+        assert!(colours(glow + Duration::from_millis(300)) > colours(glow + Duration::from_secs(6)));
     }
 
     #[test]
@@ -1161,12 +1460,12 @@ mod tests {
         press(&mut app, &[KeyCode::Down, KeyCode::Down]);
         assert!(!app.follow);
         let chosen = app.visible_events()[2].ident.clone();
-        app.apply(source::Event::Journal { time: "12:00:01".into(), day: String::new(), ident: "late".into(), program: String::new(), message: "boom".into() }, now);
+        app.apply(source::Event::Journal { time: "12:00:01".into(), day: String::new(), ident: "late".into(), program: String::new(), message: "boom".into(), priority: String::new(), unit: String::new() }, now);
         assert_eq!(app.visible_events()[app.lists[2].selected].ident, chosen);
         app.lists[2].filter = "ident-1".into();
         app.select(Pane::Events, 1);
         let chosen = app.visible_events()[1].ident.clone();
-        app.apply(source::Event::Journal { time: "12:00:02".into(), day: String::new(), ident: "other".into(), program: String::new(), message: "boom".into() }, now);
+        app.apply(source::Event::Journal { time: "12:00:02".into(), day: String::new(), ident: "other".into(), program: String::new(), message: "boom".into(), priority: String::new(), unit: String::new() }, now);
         assert_eq!(app.visible_events()[app.lists[2].selected].ident, chosen);
         press(&mut app, &[KeyCode::Home]);
         assert!(app.follow);
@@ -1179,7 +1478,7 @@ mod tests {
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [], "activity": []}) }, now);
         app.apply(source::Event::Result {}, now);
         for _ in 0..3 {
-            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: "x".into(), program: String::new(), message: "y".into() }, now);
+            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: "x".into(), program: String::new(), message: "y".into(), priority: String::new(), unit: String::new() }, now);
         }
         assert_eq!(app.journal_live, 3);
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [], "activity": []}) }, now);
@@ -1191,7 +1490,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let now = Instant::now();
         let mut app = crowded_app(now);
-        app.apply(source::Event::Journal { time: "12:00:03".into(), day: String::new(), ident: "evil|ident".into(), program: String::new(), message: "red \u{1b}[31mtext\u{7}".into() }, now);
+        app.apply(source::Event::Journal { time: "12:00:03".into(), day: String::new(), ident: "evil|ident".into(), program: String::new(), message: "red \u{1b}[31mtext\u{7}".into(), priority: String::new(), unit: String::new() }, now);
         let dir = std::env::temp_dir().join(format!("rumb-export-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let first = export::write(&app, &dir, "20261019-120000").unwrap();
@@ -1352,6 +1651,11 @@ mod tests {
         let only: Option<Vec<u64>> = std::env::var("RUMB_ONLY").ok().map(|text| text.split(',').filter_map(|frame| frame.trim().parse().ok()).collect());
         let started = Instant::now();
         let mut app = App::new(false, true, started);
+        if let Ok(panels) = std::env::var("RUMB_PANELS") {
+            for (index, on) in panels.chars().enumerate().take(app.visible.len()) {
+                app.visible[index] = on == '1';
+            }
+        }
         let mut motion = Motion::new(true, started);
         let (mut next, mut chosen, mut last) = (0usize, 0usize, started);
         let mut costs: Vec<f64> = Vec::new();

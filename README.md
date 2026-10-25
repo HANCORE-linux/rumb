@@ -31,6 +31,8 @@ git pull && make && sudo make install      # update
 sudo make uninstall                        # uninstall
 ```
 
+`make install` puts rumb in `/usr/local`, and `/usr/local/bin` comes before `/usr/bin` in `PATH`. Before you switch to the Omarchy package, run `sudo make uninstall` in the `rumb` folder (clone it again if it is gone), or `rumb` keeps starting the old copy.
+
 Run `rumb`. The manual is `man rumb`.
 
 ## Terminals

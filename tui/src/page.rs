@@ -543,7 +543,7 @@ fn updates_title(app: &App, count: usize) -> String {
     }
 }
 
-fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut Scene) -> usize {
+fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Palette, now: Instant, scene: &mut Scene) -> usize {
     use crate::ink::{OrbitLink, OrbitNode, OrbitSpec};
     let updates = app.visible_updates();
     let title = updates_title(app, updates.len());
@@ -572,6 +572,10 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scen
         let (ring, sector) = (rank(&update.risk), sector_of(&update.name));
         let slot = seen[usize::from(sector)][usize::from(ring)];
         seen[usize::from(sector)][usize::from(ring)] += 1;
+        let dot = motion.map_dot(&update.name, now);
+        if dot == 0 {
+            continue;
+        }
         nodes.push(OrbitNode {
             ring,
             sector,
@@ -580,6 +584,7 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scen
             fixes: app.problems.iter().any(|problem| problem.status == "possibly-fixed" && problem.package == update.name),
             selected: index == selected,
             related: related.contains(update.name.as_str()),
+            faint: dot == 1,
         });
     }
     let sectors: Vec<(String, u16)> = Subsystem::ALL.iter().enumerate().map(|(index, part)| (part.label().to_string(), counts[index].iter().sum())).collect();
@@ -600,15 +605,22 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scen
     let column = (body.width / 4).clamp(16, 30);
     let pic_x = body.x + column + 1;
     let pic_w = body.width.saturating_sub(2 * column + 2);
+    let reveal = motion.map_reveal(now);
+    let idle = motion.map_glow(now);
     let mut links = Vec::new();
     let mut kinds = Vec::new();
+    let mut fresh = false;
     if let Some(deps) = deps {
         let pending: std::collections::HashSet<&str> = app.updates.iter().map(|update| update.name.as_str()).collect();
         let troubled: std::collections::HashSet<&str> = app.problems.iter().map(|problem| problem.package.as_str()).filter(|name| !name.is_empty()).collect();
-        let cap = usize::from(rows.saturating_sub(2)).clamp(2, 14);
+        let cap = usize::from(rows.saturating_sub(2)).clamp(2, 24);
         for (left, names, total) in [(true, &deps.depends_on, deps.depends), (false, &deps.required_names, deps.required_by)] {
-            let side = dep_side(names, &pending, &troubled, cap);
-            let heading = if left { format!("it depends on {total}") } else { format!("{total} {}", if total == 1 { "requires it" } else { "require it" }) };
+            let side = dep_side(names, if left { deps.added.as_slice() } else { &[] }, &pending, &troubled, cap);
+            let heading = if left {
+                format!("{} {total}", if deps.version.is_empty() { "it depends on" } else { "it will depend on" })
+            } else {
+                format!("{total} {}", if total == 1 { "requires it" } else { "require it" })
+            };
             let offset = rows.saturating_sub(side.len() as u16) / 2;
             let heading_y = top + offset.saturating_sub(1);
             if left {
@@ -619,14 +631,26 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scen
             for (index, (name, kind)) in side.iter().enumerate() {
                 let row = offset + index as u16;
                 let label = fit(&if *kind == 1 { format!("{name} ↑") } else { name.clone() }, column as usize - 1);
-                let style = Style::new().fg(match kind {
+                let color = match *kind {
                     2 => pal.teal,
-                    1 => pal.ink,
+                    1 | NEW => pal.ink,
                     _ => pal.label,
+                };
+                fresh |= name.ends_with(" +");
+                let distance = f32::from((top + 1 + row).abs_diff(top + rows.div_ceil(2)));
+                let (shown, glow) = reveal.map_or((true, false), |elapsed| (elapsed >= distance * 0.02, elapsed < distance * 0.02 + 0.15));
+                let light = idle.map_or(0.0, |elapsed| {
+                    let t = (elapsed - distance * 0.07) / 0.6;
+                    if (0.0..1.0).contains(&t) { 1.0 - (2.0 * t - 1.0).abs() } else { 0.0 }
                 });
-                if left {
-                    text(buf, (pic_x - 1).saturating_sub(label.chars().count() as u16), top + 1 + row, &label, style, column);
+                let style = if glow {
+                    Style::new().fg(pal.ink).add_modifier(Modifier::BOLD)
                 } else {
+                    Style::new().fg(mix(color, pal.ink, f64::from(light)))
+                };
+                if shown && left {
+                    text(buf, (pic_x - 1).saturating_sub(label.chars().count() as u16), top + 1 + row, &label, style, column);
+                } else if shown {
                     text(buf, pic_x + pic_w + 1, top + 1 + row, &label, style, column);
                 }
                 links.push(OrbitLink { left, row: row + 1, kind: *kind });
@@ -636,8 +660,12 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scen
     }
     scene.placements.push(Placement { rect: Rect::new(pic_x, top, pic_w, rows + 1), picture: Picture::Orbit(Box::new(OrbitSpec { nodes, links, sectors })) });
     let mut spans = Vec::new();
+    if fresh {
+        spans.push(Span::styled("+ ", Style::new().fg(pal.ink)));
+        spans.push(Span::styled("new dependency", Style::new().fg(pal.label)));
+    }
     if kinds.contains(&1) {
-        spans.push(Span::styled("↑ ", Style::new().fg(pal.ink)));
+        spans.push(Span::styled(if spans.is_empty() { "↑ " } else { "    ↑ " }, Style::new().fg(pal.ink)));
         spans.push(Span::styled("updates now, ringed", Style::new().fg(pal.label)));
     }
     if kinds.contains(&2) {
@@ -851,17 +879,9 @@ fn draw_keys(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
         pairs.extend([("e", "export"), ("r", "rescan"), ("q", "quit")]);
         pairs
     } else if app.tile.is_some() {
-        vec![("Tab", "focus"), ("←→", "select"), ("↓", if app.visible[1] { "subsystems" } else { "lists" }), ("Enter", "open"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
+        vec![("Tab", "focus"), ("←→", "select"), ("Enter", "open"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
     } else if app.part.is_some() {
-        let mut pairs = vec![("Tab", "focus"), ("←→", "part")];
-        if app.visible[0] {
-            pairs.push(("↑", "tiles"));
-        }
-        if app.lists_shown() {
-            pairs.push(("↓", "lists"));
-        }
-        pairs.extend([("Enter", "open"), ("e", "export"), ("r", "rescan"), ("q", "quit")]);
-        pairs
+        vec![("Tab", "focus"), ("←→", "part"), ("Enter", "open"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
     } else if !app.lists_shown() {
         let mut pairs = if app.visible[0] || app.visible[1] { vec![("Tab", "focus")] } else { Vec::new() };
         pairs.extend([("e", "export"), ("r", "rescan"), ("q", "quit")]);
@@ -1187,22 +1207,27 @@ struct DepBlock {
     right: Vec<(String, u8)>,
     depends: u64,
     required_by: u64,
+    new_version: bool,
 }
 
 const MORE: u8 = 3;
+const NEW: u8 = 4;
 
-fn dep_side(names: &[String], pending: &std::collections::HashSet<&str>, troubled: &std::collections::HashSet<&str>, cap: usize) -> Vec<(String, u8)> {
+fn dep_side(names: &[String], added: &[String], pending: &std::collections::HashSet<&str>, troubled: &std::collections::HashSet<&str>, cap: usize) -> Vec<(String, u8)> {
     let mut sorted: Vec<(String, u8)> = names
         .iter()
         .map(|name| {
+            let new = added.contains(name);
             let kind = if troubled.contains(name.as_str()) {
                 2
             } else if pending.contains(name.as_str()) {
                 1
+            } else if new {
+                NEW
             } else {
                 0
             };
-            (name.clone(), kind)
+            (if new { format!("{name} +") } else { name.clone() }, kind)
         })
         .collect();
     sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -1380,14 +1405,18 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
                 wrapped(&mut lines, "problem", &format!("{} × {} · {}", thousands(problem.count), kind_label(&problem.kind), problem.subject), value_w, pal.teal);
             }
             if let Some(deps) = deps {
+                if !deps.dropped.is_empty() {
+                    wrapped(&mut lines, "dropped deps", &deps.dropped.join(", "), value_w, pal.ink);
+                }
                 if listed {
                     let pending: std::collections::HashSet<&str> = app.updates.iter().map(|update| update.name.as_str()).collect();
                     let troubled: std::collections::HashSet<&str> = app.problems.iter().map(|problem| problem.package.as_str()).filter(|name| !name.is_empty()).collect();
                     block = Some(DepBlock {
-                        left: dep_side(&deps.depends_on, &pending, &troubled, 9),
-                        right: dep_side(&deps.required_names, &pending, &troubled, 9),
+                        left: dep_side(&deps.depends_on, &deps.added, &pending, &troubled, 9),
+                        right: dep_side(&deps.required_names, &[], &pending, &troubled, 9),
                         depends: deps.depends,
                         required_by: deps.required_by,
+                        new_version: !deps.version.is_empty(),
                     });
                 } else {
                     lines.push(("depends on".into(), format!("{} {}", deps.depends, if deps.depends == 1 { "package" } else { "packages" }), pal.ink));
@@ -1405,6 +1434,9 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
             lines.push(("count".into(), format!("{}{since}", thousands(problem.count)), pal.ink));
             if !problem.last.is_empty() {
                 lines.push(("last".into(), problem.last.clone(), pal.ink));
+            }
+            if !problem.message.is_empty() {
+                wrapped(&mut lines, "message", &problem.message, room, pal.ink);
             }
             if !problem.signal.is_empty() {
                 let meaning = signal_meaning(&problem.signal);
@@ -1445,7 +1477,24 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
             if !event.program.is_empty() && event.program != event.ident {
                 lines.push(("program".into(), event.program.clone(), pal.ink));
             }
-            lines.push(("source".into(), if event.source == Source::Pacman { "pacman log".into() } else { "journal, priority error or higher".into() }, pal.ink));
+            if event.source == Source::Pacman {
+                lines.push(("source".into(), "pacman log".into(), pal.ink));
+            } else {
+                lines.push(("source".into(), "journal".into(), pal.ink));
+                let priority = match event.priority.as_str() {
+                    "0" => "emergency",
+                    "1" => "alert",
+                    "2" => "critical",
+                    "3" => "error",
+                    _ => "",
+                };
+                if !priority.is_empty() {
+                    lines.push(("priority".into(), priority.into(), pal.ink));
+                }
+                if !event.unit.is_empty() {
+                    lines.push(("unit".into(), event.unit.clone(), pal.ink));
+                }
+            }
             wrapped(&mut lines, "message", &event.message, room, pal.ink);
         }
     }
@@ -1489,7 +1538,7 @@ fn facts(buf: &mut Buffer, x: u16, y: u16, width: u16, lines: &[(String, String,
 
 fn dep_rows(block: &DepBlock) -> u16 {
     let rows = block.left.len().max(block.right.len()).max(1) as u16;
-    let legend = block.left.iter().chain(&block.right).any(|(_, kind)| *kind == 1 || *kind == 2);
+    let legend = block.left.iter().chain(&block.right).any(|(name, kind)| *kind == 1 || *kind == 2 || name.ends_with(" +"));
     1 + rows + if legend { 2 } else { 0 }
 }
 
@@ -1499,12 +1548,12 @@ fn dep_block(buf: &mut Buffer, x: u16, y: u16, width: u16, block: &DepBlock, pal
     let pic_x = x + left_w + 1;
     let pic_w = width.saturating_sub(left_w + right_w + 2);
     let right_x = pic_x + pic_w + 1;
-    let left_head = format!("it depends on {}", block.depends);
+    let left_head = format!("{} {}", if block.new_version { "it will depend on" } else { "it depends on" }, block.depends);
     text(buf, (pic_x - 1).saturating_sub(left_head.chars().count() as u16), y, &left_head, Style::new().fg(pal.label), left_w);
     text(buf, right_x, y, &format!("{} {}", block.required_by, if block.required_by == 1 { "requires it" } else { "require it" }), Style::new().fg(pal.label), right_w);
     let tone = |kind: u8| match kind {
         2 => pal.teal,
-        1 => pal.ink,
+        1 | NEW => pal.ink,
         _ => pal.label,
     };
     let body = y + 1;
@@ -1528,10 +1577,15 @@ fn dep_block(buf: &mut Buffer, x: u16, y: u16, width: u16, block: &DepBlock, pal
         picture: Picture::Fan(Box::new(crate::ink::FanSpec { left: leaves(&block.left), right: leaves(&block.right), panel: true })),
     });
     let kinds: Vec<u8> = block.left.iter().chain(&block.right).map(|(_, kind)| *kind).collect();
-    if kinds.contains(&1) || kinds.contains(&2) {
+    let fresh = block.left.iter().any(|(name, _)| name.ends_with(" +"));
+    if kinds.contains(&1) || kinds.contains(&2) || fresh {
         let mut spans = Vec::new();
+        if fresh {
+            spans.push(Span::styled("+ ", Style::new().fg(pal.ink)));
+            spans.push(Span::styled("new dependency", Style::new().fg(pal.label)));
+        }
         if kinds.contains(&1) {
-            spans.push(Span::styled("↑ ", Style::new().fg(pal.ink)));
+            spans.push(Span::styled(if spans.is_empty() { "↑ " } else { "    ↑ " }, Style::new().fg(pal.ink)));
             spans.push(Span::styled("updates now", Style::new().fg(pal.label)));
         }
         if kinds.contains(&2) {
@@ -1983,7 +2037,7 @@ fn eye_log(app: &App) -> (Vec<(String, String, usize)>, bool) {
     (lines.into_iter().map(|(head, tail)| (head, tail, usize::MAX)).collect(), typing)
 }
 
-fn draw_lists(buf: &mut Buffer, rect: Rect, app: &App, pal: &Palette, now: Instant, scene: &mut Scene) -> Vec<(Pane, Rect)> {
+fn draw_lists(buf: &mut Buffer, rect: Rect, app: &App, motion: &Motion, pal: &Palette, now: Instant, scene: &mut Scene) -> Vec<(Pane, Rect)> {
     let panes: Vec<Pane> = Pane::ALL.into_iter().filter(|pane| app.visible[pane.panel()]).collect();
     let mut rects = Vec::new();
     if panes.is_empty() || rect.height < 6 {
@@ -1997,7 +2051,7 @@ fn draw_lists(buf: &mut Buffer, rect: Rect, app: &App, pal: &Palette, now: Insta
         scene.rows[pane.index()] = match pane {
             Pane::Updates => {
                 scene.map_fits = map_fits(area);
-                if app.updates_map && scene.map_fits { draw_updates_map(buf, area, app, pal, scene) } else { draw_updates(buf, area, app, pal, scene) }
+                if app.updates_map && scene.map_fits { draw_updates_map(buf, area, app, motion, pal, now, scene) } else { draw_updates(buf, area, app, pal, scene) }
             }
             Pane::Problems => draw_problems(buf, area, app, pal, scene),
             Pane::Events => draw_events(buf, area, app, pal, now, scene),
@@ -2109,7 +2163,7 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
     scene.band = band_visible.then_some(band);
     let lists_top = if band_visible { band.bottom() + 1 } else { y };
     let lists_area = Rect::new(area.x, lists_top, area.width, keys.y.saturating_sub(lists_top));
-    let lists = draw_lists(buf, lists_area, app, pal, now, scene);
+    let lists = draw_lists(buf, lists_area, app, motion, pal, now, scene);
     for (pane, rect) in &lists {
         if held(Target::List(pane.index() as u8)) {
             for row in rect.y + 2..rect.bottom().saturating_sub(2) {
