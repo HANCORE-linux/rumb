@@ -247,11 +247,7 @@ pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_heig
             }
         }
         let core = r * 0.07;
-        for k in -6..=6 {
-            let offset = k as f32 / 7.0 * core;
-            let half = (core * core - offset * offset).max(0.0).sqrt();
-            pen.line((c.0 - half + offset * 0.4, c.1 + offset), (c.0 + half + offset * 0.4, c.1 + offset), ink(0.55), 0.6);
-        }
+        pen.disc(c.0, c.1, core, ink(0.3));
         pen.circle(c.0, c.1, core, ink(0.9), 1.0, None);
         let place = |node: &OrbitNode| ring_position(node, &spans);
         for node in spec.nodes.iter().filter(|node| node.fixes) {
