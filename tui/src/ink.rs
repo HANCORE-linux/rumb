@@ -199,7 +199,7 @@ pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_heig
     let (mut pixmap, unit) = canvas(width, height, ground, cell_height)?;
     let (w, h) = (width as f32, height as f32);
     let c = (w / 2.0, h / 2.0);
-    let r = w.min(h) / 2.0 * DIAL;
+    let r = dial(w, h, unit);
     let at = |x: f32, y: f32| (c.0 + x * r, c.1 + y * r);
     let ink = |alpha: f32| sk(pal.ink, alpha);
     let spans = sector_spans(&spec.sectors);
@@ -326,27 +326,94 @@ pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_heig
         }
     }
     if let Some(atlas) = sized_atlas(16.0 * cell_height / 21.0) {
-        let advance = atlas.advance as f32;
-        let ascent = atlas.ascent as f32;
-        for (sector, ((name, count), (start, span))) in spec.sectors.iter().zip(&spans).enumerate() {
-            if *count == 0 {
-                continue;
-            }
-            let (sin, cos) = (start + span / 2.0).sin_cos();
-            let (x, y) = (c.0 + cos * r * 1.2, c.1 + sin * r * 1.2);
-            let line: Vec<(char, SkColor)> = name.chars().map(|ch| (ch, sk(pal.label, 1.0))).collect();
-            let length = line.len() as f32 * advance;
-            let (left, y) = if sin.abs() < 0.35 {
-                let rim = c.0 + cos.signum() * r * 1.06;
-                let ray_above = spec.nodes.iter().any(|node| node.fixes && usize::from(node.sector) == sector && ring_position(node, &spans).1 < 0.0);
-                ((if cos < 0.0 { rim - length } else { rim }).clamp(2.0, (w - length - 2.0).max(2.0)), c.1 + if ray_above { 1.0 } else { -1.0 } * ascent * 2.2)
-            } else {
-                ((x - length / 2.0).clamp(2.0, (w - length - 2.0).max(2.0)), y.clamp(ascent / 2.0 + 2.0, h - ascent / 2.0 - 4.0))
-            };
-            type_line(&mut pixmap, atlas, left, y + ascent / 2.0, &line, &|_, _| 1.0);
+        for label in sector_labels(spec, &spans, c, r, (w, h), atlas, pal) {
+            type_line(&mut pixmap, atlas, label.left, label.y + atlas.ascent as f32 / 2.0, &label.line, &|_, _| 1.0);
         }
     }
     Some(pixmap)
+}
+
+fn dial(w: f32, h: f32, unit: f32) -> f32 {
+    (w.min(h) / 2.0 * DIAL).min((w / 2.0 - 72.0 * unit) / 1.15).max(w.min(h) * 0.15)
+}
+
+struct SectorLabel {
+    left: f32,
+    y: f32,
+    length: f32,
+    line: Glyphs,
+    toward: Option<(f32, f32)>,
+}
+
+fn sector_labels(spec: &OrbitSpec, spans: &[(f32, f32)], c: (f32, f32), r: f32, (w, h): (f32, f32), atlas: &Atlas, pal: &Palette) -> Vec<SectorLabel> {
+    let advance = atlas.advance as f32;
+    let ascent = atlas.ascent as f32;
+    let height = atlas.height as f32;
+    let mut labels = Vec::new();
+    for (sector, ((name, count), (start, span))) in spec.sectors.iter().zip(spans).enumerate() {
+        if *count == 0 {
+            continue;
+        }
+        let (sin, cos) = (start + span / 2.0).sin_cos();
+        let (x, y) = (c.0 + cos * r * 1.2, c.1 + sin * r * 1.2);
+        let line: Glyphs = name.chars().map(|ch| (ch, sk(pal.label, 1.0))).collect();
+        let length = line.len() as f32 * advance;
+        let (left, y) = if sin.abs() < 0.35 {
+            let rim = c.0 + cos.signum() * r * 1.06;
+            let ray_above = spec.nodes.iter().any(|node| node.fixes && usize::from(node.sector) == sector && ring_position(node, spans).1 < 0.0);
+            ((if cos < 0.0 { rim - length } else { rim }).clamp(2.0, (w - length - 2.0).max(2.0)), c.1 + if ray_above { 1.0 } else { -1.0 } * ascent * 2.2)
+        } else {
+            ((x - length / 2.0).clamp(2.0, (w - length - 2.0).max(2.0)), y.clamp(ascent / 2.0 + 2.0, h - ascent / 2.0 - 4.0))
+        };
+        labels.push(SectorLabel { left, y, length, line, toward: (sin.abs() >= 0.35).then_some((cos, sin)) });
+    }
+    for _ in 0..4 {
+        for label in &mut labels {
+            let Some((cos, sin)) = label.toward else { continue };
+            for _ in 0..8 {
+                let top = label.y - ascent / 2.0;
+                let (px, py) = (c.0.clamp(label.left, label.left + label.length), c.1.clamp(top, top + height));
+                let near = ((px - c.0).powi(2) + (py - c.1).powi(2)).sqrt();
+                if near >= 1.1 * r {
+                    break;
+                }
+                let step = 1.1 * r - near + 0.5;
+                label.left = (label.left + cos * step).clamp(2.0, (w - label.length - 2.0).max(2.0));
+                label.y = (label.y + sin * step).clamp(ascent / 2.0 + 2.0, h - ascent / 2.0 - 4.0);
+            }
+        }
+        spread(&mut labels, advance, height, w);
+    }
+    labels
+}
+
+fn spread(labels: &mut [SectorLabel], gap: f32, height: f32, w: f32) {
+    for _ in 0..64 {
+        let mut order: Vec<usize> = (0..labels.len()).collect();
+        order.sort_by(|a, b| (labels[*a].left + labels[*a].length / 2.0).total_cmp(&(labels[*b].left + labels[*b].length / 2.0)));
+        let mut moved = false;
+        for (index, &a) in order.iter().enumerate() {
+            for &b in &order[index + 1..] {
+                if (labels[a].y - labels[b].y).abs() >= height {
+                    continue;
+                }
+                let overlap = labels[a].left + labels[a].length + gap - labels[b].left;
+                if overlap <= 0.01 {
+                    continue;
+                }
+                let room_a = (labels[a].left - 2.0).max(0.0);
+                let room_b = (w - 2.0 - labels[b].left - labels[b].length).max(0.0);
+                let right = (overlap - (overlap / 2.0).min(room_a)).min(room_b);
+                let left = (overlap - right).min(room_a);
+                labels[a].left -= left;
+                labels[b].left += right;
+                moved |= left + right > 0.01;
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
 }
 
 pub fn fan(spec: &FanSpec, pal: &Palette, width: u32, height: u32, cell_height: f32) -> Option<Pixmap> {
@@ -1172,6 +1239,34 @@ mod tests {
                 let (x, y) = ring_position(&OrbitNode { ring, sector: 3, slot, count, fixes: false, selected: false, related: false, faint: false }, &spans);
                 let radius = x.hypot(y);
                 assert!((0.25..0.9).contains(&radius), "{ring} {slot} {radius}");
+            }
+        }
+    }
+
+    #[test]
+    fn sector_labels_keep_apart_and_off_the_dial() {
+        let pal = Palette::paper();
+        for counts in [[1u16, 0, 0, 1, 0, 3, 132], [1, 1, 1, 1, 1, 1, 133]] {
+            let sectors = Subsystem::ALL.iter().zip(counts).map(|(part, count)| (part.label().to_string(), count)).collect();
+            let spec = OrbitSpec { nodes: Vec::new(), links: Vec::new(), sectors };
+            let spans = sector_spans(&spec.sectors);
+            for (w, h, cell) in [(392.0f32, 578.0f32, 17.0f32), (420.0, 504.0, 21.0), (520.0, 525.0, 21.0), (640.0, 609.0, 21.0)] {
+                let r = dial(w, h, (cell / 21.0).max(0.6));
+                let atlas = sized_atlas(16.0 * cell / 21.0).unwrap();
+                let (advance, height) = (atlas.advance as f32, atlas.height as f32);
+                let labels = sector_labels(&spec, &spans, (w / 2.0, h / 2.0), r, (w, h), atlas, &pal);
+                assert_eq!(labels.len(), counts.iter().filter(|count| **count > 0).count());
+                for (index, a) in labels.iter().enumerate() {
+                    for b in labels[index + 1..].iter().filter(|b| (a.y - b.y).abs() < height) {
+                        let gap = (b.left - a.left - a.length).max(a.left - b.left - b.length);
+                        assert!(gap >= advance - 0.01, "labels {gap} px apart in a {w}x{h} map");
+                    }
+                    if a.toward.is_some() {
+                        let top = a.y - atlas.ascent as f32 / 2.0;
+                        let near = ((w / 2.0).clamp(a.left, a.left + a.length) - w / 2.0).hypot((h / 2.0).clamp(top, top + height) - h / 2.0);
+                        assert!(near >= 1.08 * r, "a label {near} px from the middle of a {r} px dial in a {w}x{h} map");
+                    }
+                }
             }
         }
     }

@@ -613,7 +613,7 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pa
     if let Some(deps) = deps {
         let pending: std::collections::HashSet<&str> = app.updates.iter().map(|update| update.name.as_str()).collect();
         let troubled: std::collections::HashSet<&str> = app.problems.iter().map(|problem| problem.package.as_str()).filter(|name| !name.is_empty()).collect();
-        let cap = usize::from(rows.saturating_sub(2)).clamp(2, 40);
+        let cap = usize::from(rows.saturating_sub(2)).clamp(2, 24);
         for (left, names, total) in [(true, &deps.depends_on, deps.depends), (false, &deps.required_names, deps.required_by)] {
             let side = dep_side(names, if left { deps.added.as_slice() } else { &[] }, &pending, &troubled, cap);
             let heading = if left {

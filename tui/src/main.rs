@@ -1264,6 +1264,27 @@ mod tests {
     }
 
     #[test]
+    fn the_map_leaves_room_for_the_links() {
+        let pal = palette::Palette::paper();
+        for (columns, rows) in [(110, 36), (130, 40), (170, 50)] {
+            let (width, height, spec) = demo_map(columns, rows);
+            let with = ink::orbit(&spec, &pal, width, height, 21.0).unwrap();
+            let without = ink::orbit(&ink::OrbitSpec { links: Vec::new(), ..spec }, &pal, width, height, 21.0).unwrap();
+            let reach = with
+                .pixels()
+                .iter()
+                .zip(without.pixels())
+                .enumerate()
+                .filter(|(_, (a, b))| a != b)
+                .map(|(index, _)| index as u32 % width)
+                .filter(|x| *x < width / 2)
+                .max()
+                .unwrap();
+            assert!(reach >= 66, "the links reach only {reach} px into a {width} px map at {columns}x{rows}");
+        }
+    }
+
+    #[test]
     fn the_map_labels_stay_inside_the_picture() {
         let pal = palette::Palette::paper();
         for (columns, rows) in [(92, 31), (130, 40), (170, 50)] {
@@ -1338,7 +1359,7 @@ mod tests {
             names.iter().filter(|name| text.contains(&format!(" {name} "))).count()
         };
         let (early, full) = (shown(Duration::from_millis(20)), shown(Duration::from_secs(1)));
-        assert_eq!(full, names.len());
+        assert_eq!(full, names.len().min(23));
         assert!(early < full / 2, "{early} of {full} names right after the selection");
     }
 
