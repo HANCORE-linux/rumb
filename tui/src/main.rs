@@ -65,9 +65,9 @@ Usage: rumb [--demo] [--no-anim] [--theme <name>] [--since <time>] [--no-aur]
   --no-aur        Passed on to rumb-scan
 
 Keys: 1-5 show or hide the instruments, subsystems, updates, problems and
-live events; tab moves the focus between the instruments, the subsystems and
-the lists; left/right moves it between the lists, tiles or parts; up/down,
-PgUp/PgDn and Home/End select; enter opens the selection; / filters the
+live events; tab and shift+tab move the focus between the instruments, the
+subsystems and the lists; left/right selects an instrument or a part; up/down,
+PgUp/PgDn and Home/End select a row; enter opens the selection; / filters the
 focused list; j shows the journal of the selected problem; e exports a
 Markdown report to ~/rumb-exports; esc closes or clears; r rescans; q quits.
 
@@ -229,10 +229,8 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3]) -> Action {
             KeyCode::Esc if app.overlay => app.overlay = false,
             KeyCode::Left => app.move_tile(false),
             KeyCode::Right => app.move_tile(true),
-            KeyCode::Tab => app.cycle_focus(true, true),
-            KeyCode::BackTab => app.cycle_focus(false, true),
-            KeyCode::Down if !app.overlay && app.visible[1] => app.enter_band(),
-            KeyCode::Down | KeyCode::Esc if !app.overlay => app.leave_tiles(),
+            KeyCode::Tab => app.cycle_focus(true),
+            KeyCode::BackTab => app.cycle_focus(false),
             KeyCode::Enter => app.overlay = true,
             KeyCode::Char(digit @ '1'..='5') => {
                 app.press_panel(digit as usize - '1' as usize);
@@ -250,11 +248,8 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3]) -> Action {
             KeyCode::Esc if app.overlay => app.overlay = false,
             KeyCode::Left => app.move_part(false),
             KeyCode::Right => app.move_part(true),
-            KeyCode::Tab => app.cycle_focus(true, true),
-            KeyCode::BackTab => app.cycle_focus(false, true),
-            KeyCode::Up if !app.overlay && app.visible[0] => app.enter_tiles(),
-            KeyCode::Down if !app.overlay && app.lists_shown() => app.leave_band(),
-            KeyCode::Esc if !app.overlay => app.leave_band(),
+            KeyCode::Tab => app.cycle_focus(true),
+            KeyCode::BackTab => app.cycle_focus(false),
             KeyCode::Enter => app.overlay = true,
             KeyCode::Char(digit @ '1'..='5') => {
                 app.press_panel(digit as usize - '1' as usize);
@@ -276,17 +271,13 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3]) -> Action {
             app.lists[list].filter.clear();
             app.select(focus, 0);
         }
-        KeyCode::Tab => app.cycle_focus(true, true),
-        KeyCode::BackTab => app.cycle_focus(false, true),
-        KeyCode::Right => app.cycle_focus(true, false),
-        KeyCode::Left => app.cycle_focus(false, false),
+        KeyCode::Tab => app.cycle_focus(true),
+        KeyCode::BackTab => app.cycle_focus(false),
         KeyCode::Char(digit @ '1'..='5') => {
             app.press_panel(digit as usize - '1' as usize);
             app.overlay = false;
         }
         KeyCode::Down => app.select(focus, selected + 1),
-        KeyCode::Up if selected == 0 && !app.overlay && app.visible[1] => app.enter_band(),
-        KeyCode::Up if selected == 0 && !app.overlay && app.visible[0] => app.enter_tiles(),
         KeyCode::Up => app.select(focus, selected - 1),
         KeyCode::PageDown => app.select(focus, selected + step),
         KeyCode::PageUp => app.select(focus, selected - step),
@@ -714,13 +705,7 @@ mod tests {
         assert_eq!(app.lists[0].selected, 449);
         press(&mut app, &[KeyCode::Down, KeyCode::Home, KeyCode::Up]);
         assert_eq!(app.lists[0].selected, 0);
-        assert_eq!((app.part, app.tile), (Some(0), None));
-        press(&mut app, &[KeyCode::Up]);
-        assert_eq!((app.part, app.tile), (None, Some(0)));
-        press(&mut app, &[KeyCode::Down]);
-        assert_eq!((app.part, app.tile), (Some(0), None));
-        press(&mut app, &[KeyCode::Down]);
-        assert_eq!((app.part, app.tile), (None, None));
+        assert_eq!((app.part, app.tile, app.focus), (None, None, Pane::Updates));
 
         press(&mut app, &[KeyCode::Char('/')]);
         assert!(app.editing);
@@ -745,7 +730,7 @@ mod tests {
         assert_eq!(app.focus, Pane::Problems);
         press(&mut app, &[KeyCode::Tab]);
         assert_eq!(app.focus, Pane::Events);
-        press(&mut app, &[KeyCode::Right]);
+        press(&mut app, &[KeyCode::BackTab]);
         assert_eq!(app.focus, Pane::Problems);
 
         let name = app.visible_problems()[0].name().to_string();
@@ -882,7 +867,7 @@ mod tests {
     #[test]
     fn keys_reach_the_instrument_tiles() {
         let mut app = crowded_app(Instant::now());
-        press(&mut app, &[KeyCode::Up, KeyCode::Up]);
+        press(&mut app, &[KeyCode::BackTab, KeyCode::BackTab]);
         assert_eq!(app.tile, Some(0));
         press(&mut app, &[KeyCode::Right, KeyCode::Right]);
         assert_eq!(app.tile, Some(2));
@@ -894,11 +879,6 @@ mod tests {
         press(&mut app, &[KeyCode::Esc]);
         assert!(!app.overlay);
         assert_eq!(app.tile, Some(5));
-        press(&mut app, &[KeyCode::Esc]);
-        assert_eq!(app.tile, None);
-        assert_eq!(app.focus, Pane::Updates);
-        press(&mut app, &[KeyCode::Tab, KeyCode::Tab, KeyCode::Tab]);
-        assert_eq!(app.tile, Some(5));
         press(&mut app, &[KeyCode::Tab]);
         assert_eq!((app.tile, app.part), (None, Some(0)));
         press(&mut app, &[KeyCode::Tab]);
@@ -907,10 +887,23 @@ mod tests {
         assert_eq!(app.tile, Some(5));
         press(&mut app, &[KeyCode::Char('1')]);
         assert_eq!(app.tile, None);
-        press(&mut app, &[KeyCode::Up]);
+        press(&mut app, &[KeyCode::BackTab]);
         assert_eq!((app.tile, app.part), (None, Some(0)));
-        press(&mut app, &[KeyCode::Up]);
-        assert_eq!(app.tile, None);
+        press(&mut app, &[KeyCode::BackTab]);
+        assert_eq!((app.tile, app.part, app.focus), (None, None, Pane::Events));
+    }
+
+    #[test]
+    fn arrow_keys_never_leave_the_focused_panel() {
+        let mut app = crowded_app(Instant::now());
+        for _ in 0..5 {
+            let stop = (app.tile.is_some(), app.part.is_some(), app.focus);
+            for code in [KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right, KeyCode::PageDown, KeyCode::End, KeyCode::PageUp, KeyCode::Home, KeyCode::Up, KeyCode::Esc] {
+                press(&mut app, &[code]);
+                assert_eq!((app.tile.is_some(), app.part.is_some(), app.focus), stop, "{code:?} left {stop:?}");
+            }
+            press(&mut app, &[KeyCode::Tab]);
+        }
     }
 
     fn done(label: &str, value: Value) -> source::Event {
@@ -1084,7 +1077,7 @@ mod tests {
     #[test]
     fn the_subsystems_are_a_stop_between_tiles_and_lists() {
         let mut app = crowded_app(Instant::now());
-        press(&mut app, &[KeyCode::Up]);
+        press(&mut app, &[KeyCode::BackTab]);
         assert_eq!(app.part, Some(0));
         assert!(screen(&app, 358, 85).iter().any(|row| row.contains("←→ part")));
         press(&mut app, &[KeyCode::Left]);
@@ -1098,9 +1091,9 @@ mod tests {
         assert_eq!((app.overlay, app.part), (true, Some(2)));
         press(&mut app, &[KeyCode::Esc]);
         assert_eq!((app.overlay, app.part), (false, Some(2)));
-        press(&mut app, &[KeyCode::Down]);
+        press(&mut app, &[KeyCode::Tab]);
         assert_eq!((app.part, app.focus), (None, Pane::Updates));
-        press(&mut app, &[KeyCode::Up, KeyCode::Up, KeyCode::Down]);
+        press(&mut app, &[KeyCode::BackTab, KeyCode::BackTab, KeyCode::Tab]);
         assert_eq!((app.tile, app.part), (None, Some(2)));
         press(&mut app, &[KeyCode::Char('2')]);
         assert_eq!(app.part, None);

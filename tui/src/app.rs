@@ -815,7 +815,7 @@ impl App {
         self.tile.is_none() && self.part.is_none() && self.focus == pane
     }
 
-    pub fn cycle_focus(&mut self, forward: bool, stops: bool) {
+    pub fn cycle_focus(&mut self, forward: bool) {
         #[derive(Clone, Copy, PartialEq)]
         enum Stop {
             Tiles,
@@ -823,10 +823,10 @@ impl App {
             List(Pane),
         }
         let mut order = Vec::new();
-        if stops && self.visible[0] {
+        if self.visible[0] {
             order.push(Stop::Tiles);
         }
-        if stops && self.visible[1] {
+        if self.visible[1] {
             order.push(Stop::Band);
         }
         order.extend(Pane::ALL.into_iter().filter(|pane| self.visible[pane.panel()]).map(Stop::List));

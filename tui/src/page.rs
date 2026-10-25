@@ -879,17 +879,9 @@ fn draw_keys(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
         pairs.extend([("e", "export"), ("r", "rescan"), ("q", "quit")]);
         pairs
     } else if app.tile.is_some() {
-        vec![("Tab", "focus"), ("←→", "select"), ("↓", if app.visible[1] { "subsystems" } else { "lists" }), ("Enter", "open"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
+        vec![("Tab", "focus"), ("←→", "select"), ("Enter", "open"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
     } else if app.part.is_some() {
-        let mut pairs = vec![("Tab", "focus"), ("←→", "part")];
-        if app.visible[0] {
-            pairs.push(("↑", "tiles"));
-        }
-        if app.lists_shown() {
-            pairs.push(("↓", "lists"));
-        }
-        pairs.extend([("Enter", "open"), ("e", "export"), ("r", "rescan"), ("q", "quit")]);
-        pairs
+        vec![("Tab", "focus"), ("←→", "part"), ("Enter", "open"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
     } else if !app.lists_shown() {
         let mut pairs = if app.visible[0] || app.visible[1] { vec![("Tab", "focus")] } else { Vec::new() };
         pairs.extend([("e", "export"), ("r", "rescan"), ("q", "quit")]);
