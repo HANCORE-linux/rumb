@@ -399,7 +399,7 @@ impl Motion {
                 self.feed_from(at, raw);
                 self.act(now, Act::Apply(Box::new(event), now));
                 if let Some((index, arrival)) = effects {
-                    self.act(at, Act::Done(index, arrival));
+                    self.act(now, Act::Done(index, arrival));
                 }
                 self.cursor = self.cursor.max(at + GAP);
             }

@@ -1400,6 +1400,35 @@ mod tests {
     }
 
     #[test]
+    fn each_scan_result_is_revealed_once() {
+        let start = Instant::now();
+        let mut app = App::new(false, true, start);
+        let mut motion = Motion::new(true, start);
+        let mut stream = Vec::new();
+        let mut at = 0;
+        for line in include_str!("../demo.ndjson").lines().filter(|line| !line.trim().is_empty()) {
+            let value: Value = serde_json::from_str(line).unwrap();
+            at += value["_delay"].as_u64().unwrap_or(0);
+            stream.push((at, line));
+        }
+        let (mut next, mut first) = (0, [None; 4]);
+        for millis in (0..22_000).step_by(33) {
+            let now = start + Duration::from_millis(millis);
+            while next < stream.len() && stream[next].0 <= millis {
+                motion.push(serde_json::from_str(stream[next].1).unwrap(), stream[next].1, &mut app, now);
+                next += 1;
+            }
+            motion.step(&mut app, now, 0.033);
+            for (index, stamp) in app.stage_done_at.into_iter().enumerate() {
+                if let Some(stamp) = stamp {
+                    assert_eq!(*first[index].get_or_insert(stamp), stamp, "stage {index} was revealed again at {millis} ms");
+                }
+            }
+        }
+        assert!(first.iter().all(Option::is_some));
+    }
+
+    #[test]
     fn an_idle_glance_at_the_map_lets_its_names_light_up() {
         let start = Instant::now();
         let mut app = demo_until(26_000, start);
