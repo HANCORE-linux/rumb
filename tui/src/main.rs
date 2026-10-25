@@ -1385,6 +1385,28 @@ mod tests {
     }
 
     #[test]
+    fn scan_results_show_as_soon_as_they_arrive() {
+        let start = Instant::now();
+        let mut app = App::new(false, true, start);
+        let mut motion = Motion::new(true, start);
+        let mut at = 0;
+        for line in include_str!("../demo.ndjson").lines().filter(|line| !line.trim().is_empty()) {
+            let value: Value = serde_json::from_str(line).unwrap();
+            at += value["_delay"].as_u64().unwrap_or(0);
+            let now = start + Duration::from_millis(at);
+            motion.push(serde_json::from_str(line).unwrap(), line, &mut app, now);
+            motion.step(&mut app, now, 0.0);
+            if value["event"] == "stage" {
+                match value["stage"].as_str() {
+                    Some("updates") => assert!(!app.updates.is_empty(), "no updates right after they arrived at {at} ms"),
+                    Some("anatomy") => assert!(app.anatomy.is_some(), "no dependencies right after they arrived at {at} ms"),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
     fn an_idle_glance_at_the_map_lets_its_names_light_up() {
         let start = Instant::now();
         let mut app = demo_until(26_000, start);

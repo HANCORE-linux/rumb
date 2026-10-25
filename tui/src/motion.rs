@@ -397,7 +397,7 @@ impl Motion {
                 let stage = stage.clone();
                 let effects = self.stage_effects(&stage, data, at);
                 self.feed_from(at, raw);
-                self.act(at, Act::Apply(Box::new(event), now));
+                self.act(now, Act::Apply(Box::new(event), now));
                 if let Some((index, arrival)) = effects {
                     self.act(at, Act::Done(index, arrival));
                 }
