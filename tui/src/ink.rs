@@ -329,7 +329,7 @@ pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_heig
     Some(pixmap)
 }
 
-fn dial(w: f32, h: f32, unit: f32) -> f32 {
+pub fn dial(w: f32, h: f32, unit: f32) -> f32 {
     (w.min(h) / 2.0 * DIAL).min((w / 2.0 - 72.0 * unit) / 1.15).max(w.min(h) * 0.15)
 }
 

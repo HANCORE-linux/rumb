@@ -1242,7 +1242,7 @@ mod tests {
         let with = ink::orbit(&spec, &pal, width, height, 21.0).unwrap();
         let without = ink::orbit(&ink::OrbitSpec { links: Vec::new(), ..spec }, &pal, width, height, 21.0).unwrap();
         let (cx, cy) = (width as f32 / 2.0, height as f32 / 2.0);
-        let radius = width.min(height) as f32 / 2.0 * ink::DIAL;
+        let radius = ink::dial(width as f32, height as f32, 1.0);
         let changed: Vec<f32> = with
             .pixels()
             .iter()
