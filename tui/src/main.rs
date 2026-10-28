@@ -396,6 +396,8 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
         theme.refresh(now);
         motion.step(&mut app, now, now.saturating_duration_since(last_frame).as_secs_f32());
         last_frame = now;
+        let size = terminal.size()?;
+        app.fit_page(page::fits(&app, size.width, size.height));
         let cell = pictures.as_ref().map_or((10, 21), pictures::Pictures::cell);
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         let drawn = terminal.draw(|frame| {
@@ -836,6 +838,27 @@ mod tests {
             press(&mut app, &[KeyCode::Esc]);
             assert!(!app.options);
         }
+    }
+
+    #[test]
+    fn a_window_too_small_for_the_eye_keeps_the_options_shut() {
+        let now = Instant::now();
+        let mut app = crowded_app(now);
+        assert!(!page::fits(&app, 80, 24) && page::fits(&app, 170, 50));
+        app.fit_page(page::fits(&app, 80, 24));
+        assert!(screen(&app, 80, 24).iter().any(|row| row.contains("Terminal size too small:")));
+        assert_eq!(press(&mut app, &[KeyCode::Esc]), Action::Nothing);
+        assert!(!app.options);
+        assert_eq!(press(&mut app, &[KeyCode::Char('q')]), Action::Quit);
+
+        app.fit_page(page::fits(&app, 170, 50));
+        press(&mut app, &[KeyCode::Esc]);
+        assert!(app.options);
+        app.fit_page(page::fits(&app, 80, 24));
+        assert!(!app.options && app.dilation(now) == 0.0);
+        assert_eq!(press(&mut app, &[KeyCode::Char('q')]), Action::Quit);
+        app.fit_page(page::fits(&app, 170, 50));
+        assert!(!app.options && screen(&app, 170, 50).last().unwrap().trim().ends_with("q quit   Esc options"));
     }
 
     #[test]

@@ -77,9 +77,8 @@ pub fn draw(frame: &mut Frame, app: &App, motion: &Motion, pal: &Palette, now: I
     let buf = frame.buffer_mut();
     fill(buf, area, pal.page);
     let mut scene = Scene::default();
-    let needed = min_size(app);
-    if area.width < needed.0 || area.height < needed.1 {
-        draw_too_small(buf, area, pal, needed);
+    if !fits(app, area.width, area.height) {
+        draw_too_small(buf, area, pal, min_size(app));
         return scene;
     }
     draw_nerve(buf, area, app, motion, pal, now, cell, &mut scene);
@@ -1665,6 +1664,11 @@ pub fn min_size(app: &App) -> (u16, u16) {
     let width = if tiles || band { 150 } else { (50 * lists).max(50) };
     let height = 2 + if tiles { TILES_HEIGHT } else { 0 } + if tiles && band { 2 } else { 0 } + if band { 15 } else { 0 } + if lists > 0 { 11 } else { 0 };
     (width, height)
+}
+
+pub fn fits(app: &App, width: u16, height: u16) -> bool {
+    let (min_width, min_height) = min_size(app);
+    width >= min_width && height >= min_height
 }
 
 fn draw_too_small(buf: &mut Buffer, area: Rect, pal: &Palette, (min_width, min_height): (u16, u16)) {

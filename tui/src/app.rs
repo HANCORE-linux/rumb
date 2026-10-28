@@ -413,6 +413,7 @@ pub struct App {
     pub last_part: usize,
     pub updates_map: bool,
     pub map_fits: bool,
+    pub page_fits: bool,
     pub pictures: bool,
     pub follow: bool,
     pub status: Option<(String, bool, Instant)>,
@@ -471,6 +472,7 @@ impl App {
             last_part: 0,
             updates_map: true,
             map_fits: false,
+            page_fits: true,
             pictures: true,
             follow: true,
             status: None,
@@ -916,7 +918,14 @@ impl App {
     }
 
     pub fn eye_shown(&self) -> bool {
-        self.visible[1] && self.pictures
+        self.visible[1] && self.pictures && self.page_fits
+    }
+
+    pub fn fit_page(&mut self, fits: bool) {
+        self.page_fits = fits;
+        if self.options && !self.eye_shown() {
+            (self.options, self.options_from) = (false, (0.0, None));
+        }
     }
 
     pub fn toggle_options(&mut self, now: Instant) {
