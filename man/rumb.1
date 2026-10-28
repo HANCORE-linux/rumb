@@ -73,13 +73,15 @@ Show the results without animation.
 .TP
 .BI \-\-theme " name"
 Colors to use.
-By default rumb uses the current Omarchy theme and follows it when it changes;
-without Omarchy it uses labra.
+By default rumb uses the theme chosen in the options (see
+.BR esc );
+otherwise it uses the current Omarchy theme and follows it when it changes,
+and labra without Omarchy.
 .B omarchy
 selects the current Omarchy theme explicitly.
 .TP
 .B \-\-themes
-List the theme names.
+List the theme names, own Omarchy themes included.
 .TP
 .BI \-\-since " time"
 Look for problems since
@@ -123,12 +125,18 @@ Filter the focused list.
 .B j
 Show the journal of the selected problem.
 .TP
+.B c
+Copy the text of the open window.
+.TP
 .B e
 Export a Markdown report to
 .IR ~/rumb\-exports .
 .TP
 .B esc
 Close or clear.
+With nothing open, show the options in the eye:
+.BR left " and " right
+change the theme at once, and rumb remembers it for the next start.
 .TP
 .B r
 Scan again.
@@ -174,6 +182,14 @@ to run.
 .B NO_COLOR
 When set and not empty, print the plain text report.
 .SH FILES
+.TP
+.I ~/.config/rumb/theme
+The theme chosen in the options
+.RI ( $XDG_CONFIG_HOME/rumb/theme
+when that is set).
+.TP
+.I ~/.config/omarchy/themes
+Own Omarchy themes, offered next to the bundled ones.
 .TP
 .I ~/.local/state/omarchy/current/theme/colors.toml
 The current Omarchy theme

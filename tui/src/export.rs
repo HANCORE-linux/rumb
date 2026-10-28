@@ -3,6 +3,7 @@ use std::fs::{DirBuilder, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use crate::app::{App, Source, Subsystem};
 use crate::page::{bytes, thousands};
@@ -27,6 +28,19 @@ pub fn write(app: &App, dir: &Path, stamp: &str) -> io::Result<PathBuf> {
         }
     }
     Err(io::Error::new(io::ErrorKind::AlreadyExists, "too many exports in one second"))
+}
+
+pub fn copy(text: &str) -> io::Result<()> {
+    let (wayland, x11) = (std::env::var_os("WAYLAND_DISPLAY").is_some(), std::env::var_os("DISPLAY").is_some());
+    let tools: [(&str, &[&str], bool); 3] = [("wl-copy", &[], wayland), ("xclip", &["-selection", "clipboard"], x11), ("xsel", &["--clipboard", "--input"], x11)];
+    let found = |name: &str| std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()));
+    let Some((program, args, _)) = tools.into_iter().find(|(program, _, usable)| *usable && found(program)) else {
+        return Err(io::Error::other("needs wl-copy, xclip or xsel"));
+    };
+    let mut child = Command::new(program).args(args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+    child.stdin.take().ok_or_else(|| io::Error::other("no input pipe"))?.write_all(text.as_bytes())?;
+    let status = child.wait()?;
+    if status.success() { Ok(()) } else { Err(io::Error::other(format!("{program} {status}"))) }
 }
 
 fn signed(value: i64) -> String {

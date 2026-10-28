@@ -57,9 +57,9 @@ Usage: rumb [--demo] [--no-anim] [--theme <name>] [--since <time>] [--no-aur]
 
   --demo          Play bundled demo data instead of checking this system
   --no-anim       Show the results without animation
-  --theme <name>  Colors to use; by default the current Omarchy theme, live,
-                  and labra without Omarchy
-  --themes        List the theme names
+  --theme <name>  Colors to use; by default the theme chosen with esc, else
+                  the current Omarchy theme, live, and labra without Omarchy
+  --themes        List the theme names, own Omarchy themes included
   --version       Print the version
   --since <time>  Passed on to rumb-scan
   --no-aur        Passed on to rumb-scan
@@ -68,8 +68,10 @@ Keys: 1-5 show or hide the instruments, subsystems, updates, problems and
 live events; tab and shift+tab move the focus between the instruments, the
 subsystems and the lists; left/right selects an instrument or a part; up/down,
 PgUp/PgDn and Home/End select a row; enter opens the selection; / filters the
-focused list; j shows the journal of the selected problem; e exports a
-Markdown report to ~/rumb-exports; esc closes or clears; r rescans; q quits.
+focused list; j shows the journal of the selected problem; c copies the text
+of the open window; e exports a Markdown report to ~/rumb-exports; esc closes
+or clears, and with nothing open shows the options in the eye, where left/right
+change the theme that rumb remembers; r rescans; q quits.
 
 The dashboard needs a terminal of at least 150x44; a smaller one shows the
 size it needs. Without a terminal (or with NO_COLOR set) rumb prints the plain
@@ -92,7 +94,7 @@ fn parse_args() -> Result<Options, String> {
             "--no-aur" => options.args.push(arg),
             "--theme" => options.theme = Some(args.next().ok_or("--theme needs a name")?),
             "--themes" => {
-                println!("omarchy\n{}", theme::names().join("\n"));
+                println!("{}", theme::choices().join("\n"));
                 std::process::exit(0);
             }
             "-V" | "--version" => {
@@ -197,11 +199,22 @@ enum Action {
     Quit,
     Rescan,
     Export,
+    Copy,
+    Theme(bool),
 }
 
-fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3]) -> Action {
+fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3], now: Instant) -> Action {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Action::Quit;
+    }
+    if app.options {
+        match key.code {
+            KeyCode::Left => return Action::Theme(false),
+            KeyCode::Right => return Action::Theme(true),
+            KeyCode::Esc => app.toggle_options(now),
+            _ => {}
+        }
+        return Action::Nothing;
     }
     let focus = app.focus;
     let list = focus.index();
@@ -225,8 +238,10 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3]) -> Action {
         match key.code {
             KeyCode::Char('q') => return Action::Quit,
             KeyCode::Char('e') => return Action::Export,
+            KeyCode::Char('c') if app.overlay => return Action::Copy,
             KeyCode::Char('r') if app.finished_at.is_some() => return Action::Rescan,
             KeyCode::Esc if app.overlay => app.overlay = false,
+            KeyCode::Esc if app.eye_shown() => app.toggle_options(now),
             KeyCode::Left => app.move_tile(false),
             KeyCode::Right => app.move_tile(true),
             KeyCode::Tab => app.cycle_focus(true),
@@ -244,8 +259,10 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3]) -> Action {
         match key.code {
             KeyCode::Char('q') => return Action::Quit,
             KeyCode::Char('e') => return Action::Export,
+            KeyCode::Char('c') if app.overlay => return Action::Copy,
             KeyCode::Char('r') if app.finished_at.is_some() => return Action::Rescan,
             KeyCode::Esc if app.overlay => app.overlay = false,
+            KeyCode::Esc if app.eye_shown() => app.toggle_options(now),
             KeyCode::Left => app.move_part(false),
             KeyCode::Right => app.move_part(true),
             KeyCode::Tab => app.cycle_focus(true),
@@ -265,12 +282,14 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3]) -> Action {
     match key.code {
         KeyCode::Char('q') => return Action::Quit,
         KeyCode::Char('e') => return Action::Export,
+        KeyCode::Char('c') if app.overlay => return Action::Copy,
         KeyCode::Char('r') if app.finished_at.is_some() => return Action::Rescan,
         KeyCode::Esc if app.overlay => app.overlay = false,
         KeyCode::Esc if !app.lists[list].filter.is_empty() => {
             app.lists[list].filter.clear();
             app.select(focus, 0);
         }
+        KeyCode::Esc if app.eye_shown() => app.toggle_options(now),
         KeyCode::Tab => app.cycle_focus(true),
         KeyCode::BackTab => app.cycle_focus(false),
         KeyCode::Char(digit @ '1'..='5') => {
@@ -302,6 +321,17 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3]) -> Action {
     Action::Nothing
 }
 
+fn step_theme(theme: &mut Theme, forward: bool) {
+    let choices = theme::choices();
+    let count = choices.len();
+    let index = choices.iter().position(|name| *name == theme.name).unwrap_or(0);
+    for step in 1..count {
+        if theme.switch(&choices[(index + if forward { step } else { count - step }) % count]) {
+            return;
+        }
+    }
+}
+
 fn tilde(path: &std::path::Path) -> String {
     let text = path.display().to_string();
     match std::env::var("HOME") {
@@ -314,6 +344,7 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
     let (mut child, mut rx) = start_source(options, script.as_ref())?;
     let mut app = App::new(options.demo, !options.no_anim, Instant::now());
     app.pictures = pictures.is_some();
+    app.theme.clone_from(&theme.name);
     let mut motion = Motion::new(!options.no_anim, Instant::now());
     let mut source_open = true;
     let mut rows = [10; 3];
@@ -384,7 +415,7 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
         }
         let before = (app.focus, app.lists[app.focus.index()].selected, app.tile, app.part);
         match event::read()? {
-            TermEvent::Key(key) if key.kind == KeyEventKind::Press => match on_key(&mut app, key, rows) {
+            TermEvent::Key(key) if key.kind == KeyEventKind::Press => match on_key(&mut app, key, rows, Instant::now()) {
                 Action::Nothing => {
                     if (app.focus, app.lists[app.focus.index()].selected, app.tile, app.part) != before {
                         motion.select(&app, Instant::now());
@@ -398,6 +429,8 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
                     let mut fresh = App::new(options.demo, !options.no_anim, Instant::now());
                     fresh.visible = app.visible;
                     fresh.focus = app.focus;
+                    fresh.pictures = app.pictures;
+                    fresh.theme.clone_from(&theme.name);
                     for (list, old) in fresh.lists.iter_mut().zip(&app.lists) {
                         list.filter.clone_from(&old.filter);
                     }
@@ -410,6 +443,22 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
                         Ok(path) => (format!("exported {}", tilde(&path)), true, Instant::now()),
                         Err(error) => (format!("export failed: {error}"), false, Instant::now()),
                     });
+                }
+                Action::Theme(forward) => {
+                    step_theme(theme, forward);
+                    app.theme.clone_from(&theme.name);
+                    if let Err(error) = theme::save(&theme.name) {
+                        app.status = Some((format!("theme not saved: {error}"), false, Instant::now()));
+                    }
+                }
+                Action::Copy => {
+                    if let Some(text) = page::overlay_text(&app, &theme.palette) {
+                        let lines = text.lines().count();
+                        app.status = Some(match export::copy(&text) {
+                            Ok(()) => (format!("copied {} {}", page::thousands(lines as u64), if lines == 1 { "line" } else { "lines" }), true, Instant::now()),
+                            Err(error) => (format!("copy failed: {error}"), false, Instant::now()),
+                        });
+                    }
                 }
             },
             TermEvent::Resize(..) => {}
@@ -503,7 +552,7 @@ mod tests {
 
         let (cell_w, cell_h) = (u32::from(cell.0), u32::from(cell.1));
         let mut images = Vec::new();
-        for (index, placement) in scene.placements.iter().enumerate() {
+        for (index, placement) in scene.placements.iter().filter(|_| app.pictures).enumerate() {
             let (w, h) = (u32::from(placement.rect.width) * cell_w, u32::from(placement.rect.height) * cell_h);
             let pixmap = page::paint(&placement.picture, pal, w, h, cell_h as f32).or_else(|| tiny_skia::Pixmap::new(w, h));
             let file = format!("{name}-image-{index}.png");
@@ -544,7 +593,7 @@ mod tests {
     fn press(app: &mut App, codes: &[KeyCode]) -> Action {
         let mut last = Action::Nothing;
         for code in codes {
-            last = on_key(app, key(*code), [10; 3]);
+            last = on_key(app, key(*code), [10; 3], Instant::now());
         }
         last
     }
@@ -724,6 +773,9 @@ mod tests {
         press(&mut app, &[KeyCode::Esc]);
         assert!(app.lists[0].filter.is_empty());
         assert_eq!(press(&mut app, &[KeyCode::Esc]), Action::Nothing);
+        assert!(app.options);
+        assert_eq!(press(&mut app, &[KeyCode::Esc]), Action::Nothing);
+        assert!(!app.options);
 
         press(&mut app, &[KeyCode::Char('3')]);
         assert!(!app.visible[2]);
@@ -741,7 +793,61 @@ mod tests {
         assert_eq!(press(&mut app, &[KeyCode::Char('e')]), Action::Export);
         assert_eq!(press(&mut app, &[KeyCode::Char('r')]), Action::Rescan);
         assert_eq!(press(&mut app, &[KeyCode::Char('q')]), Action::Quit);
-        assert_eq!(on_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), [10; 3]), Action::Quit);
+        assert_eq!(on_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), [10; 3], Instant::now()), Action::Quit);
+    }
+
+    #[test]
+    fn escape_opens_the_options_in_the_eye() {
+        let now = Instant::now();
+        let mut app = crowded_app(now);
+        let keys = |app: &App| screen(app, 170, 50).last().unwrap().trim().to_string();
+        assert!(keys(&app).ends_with("q quit   Esc options"), "{}", keys(&app));
+        press(&mut app, &[KeyCode::Esc]);
+        assert!(app.options);
+        assert_eq!(keys(&app), "←→ change   Esc close");
+        assert_eq!(press(&mut app, &[KeyCode::Char('3'), KeyCode::Down, KeyCode::Char('q')]), Action::Nothing);
+        assert!(app.visible[2] && app.lists[0].selected == 0);
+        assert_eq!(press(&mut app, &[KeyCode::Left]), Action::Theme(false));
+        assert_eq!(press(&mut app, &[KeyCode::Right]), Action::Theme(true));
+        press(&mut app, &[KeyCode::Esc]);
+        assert!(!app.options);
+
+        app.lists[0].filter = "pkg".into();
+        assert!(!keys(&app).contains("Esc options"));
+        press(&mut app, &[KeyCode::Esc]);
+        assert!(!app.options && app.lists[0].filter.is_empty());
+        press(&mut app, &[KeyCode::Enter, KeyCode::Esc]);
+        assert!(!app.options && !app.overlay);
+        press(&mut app, &[KeyCode::BackTab, KeyCode::BackTab, KeyCode::Esc]);
+        assert!(app.tile.is_some() && app.options);
+        press(&mut app, &[KeyCode::Esc]);
+
+        for hide in [|app: &mut App| app.pictures = false, |app: &mut App| app.visible[1] = false] {
+            let mut app = crowded_app(now);
+            hide(&mut app);
+            assert!(!keys(&app).contains("Esc options"));
+            press(&mut app, &[KeyCode::Esc]);
+            assert!(!app.options);
+        }
+    }
+
+    #[test]
+    fn the_pupil_opens_and_closes_in_one_calm_motion() {
+        let now = Instant::now();
+        let mut app = App::new(true, true, now);
+        assert_eq!(app.dilation(now), 0.0);
+        app.toggle_options(now);
+        let at = |ms: u64| app.dilation(now + Duration::from_millis(ms));
+        let opening: Vec<f32> = (0..=12).map(|step| at(step * 30)).collect();
+        assert!(opening.windows(2).all(|pair| pair[1] >= pair[0]) && opening[0] == 0.0 && at(360) == 1.0, "{opening:?}");
+        assert!(app.dilating(now + Duration::from_millis(300)) && !app.dilating(now + Duration::from_millis(400)));
+        let half = at(180);
+        app.toggle_options(now + Duration::from_millis(180));
+        assert!((app.dilation(now + Duration::from_millis(180)) - half).abs() < 1e-6);
+        assert_eq!(app.dilation(now + Duration::from_millis(540)), 0.0);
+        let mut still = App::new(true, false, now);
+        still.toggle_options(now);
+        assert_eq!(still.dilation(now), 1.0);
     }
 
     #[test]
@@ -1128,7 +1234,55 @@ mod tests {
         for gone in ["owner         unknown", "not a verified fix"] {
             assert!(!rows.iter().any(|row| row.contains(gone)), "{gone} shown");
         }
-        assert!(rows.iter().any(|row| row.contains("j journal") && row.contains("r rescan")));
+        assert!(rows.iter().any(|row| row.contains("j journal") && row.contains("c copy") && row.contains("r rescan")));
+    }
+
+    #[test]
+    fn c_copies_the_open_window_as_text_in_one_piece() {
+        let pal = palette::Palette::labra();
+        let started = Instant::now();
+        let mut app = App::new(true, false, started);
+        for (time, event) in demo_events() {
+            if time <= 30_000 {
+                app.apply(event, started + Duration::from_millis(time));
+            }
+        }
+        app.focus = Pane::Problems;
+        app.select(Pane::Problems, 0);
+        assert_eq!(press(&mut app, &[KeyCode::Char('c')]), Action::Nothing);
+        assert_eq!(page::overlay_text(&app, &pal), None);
+        app.overlay = true;
+        assert_eq!(press(&mut app, &[KeyCode::Char('c')]), Action::Copy);
+        assert_eq!(
+            page::overlay_text(&app, &pal).unwrap().lines().collect::<Vec<_>>(),
+            [
+                "dbus-broker-launch",
+                "subject       /usr/bin/dbus-broker-launch",
+                "kind          error",
+                "count         151 since 10-03 21:10",
+                "last          10-17 23:38",
+                "message       Activation request for 'org.freedesktop.home1' failed: The systemd unit 'dbus-org.freedesktop.home1.service' could not be found.",
+                "owner         dbus-broker",
+                "status        no update pending for the owner",
+            ]
+        );
+        app.focus = Pane::Updates;
+        app.select(Pane::Updates, 0);
+        let text = page::overlay_text(&app, &pal).unwrap();
+        for line in ["risk          high · critical package, minor version jump", "+ new dependency    ↑ updates now"] {
+            assert!(text.lines().any(|row| row == line), "{line} missing in\n{text}");
+        }
+        assert!(text.lines().any(|row| row.starts_with("it will depend on 24: hyprwire +, mesa ↑, ")), "{text}");
+        app.overlay = false;
+        app.tile = Some(5);
+        assert_eq!(press(&mut app, &[KeyCode::Char('c')]), Action::Nothing);
+        app.overlay = true;
+        assert_eq!(press(&mut app, &[KeyCode::Char('c')]), Action::Copy);
+        assert!(page::overlay_text(&app, &pal).unwrap().starts_with("BEFORE YOU UPDATE\nrisk          2 high\n"));
+        app.tile = None;
+        app.part = Some(0);
+        assert_eq!(press(&mut app, &[KeyCode::Char('c')]), Action::Copy);
+        assert!(page::overlay_text(&app, &pal).unwrap().starts_with("kernel\nrunning       6.17.2-arch1-1\n"));
     }
 
     #[test]
@@ -1633,7 +1787,7 @@ mod tests {
         let number = |name: &str, default: u64| std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default);
         let size = (number("RUMB_COLUMNS", 170) as u16, number("RUMB_ROWS", 50) as u16);
         let cell = (number("RUMB_CELL_WIDTH", 10) as u16, number("RUMB_CELL_HEIGHT", 21) as u16);
-        let pal = theme::pick(Some(&std::env::var("RUMB_THEME").unwrap_or_else(|_| "labra".into()))).expect("known theme").palette;
+        let mut theme = theme::pick(Some(&std::env::var("RUMB_THEME").unwrap_or_else(|_| "labra".into()))).expect("known theme");
         let recorded = std::env::var_os("RUMB_EVENTS").map(|path| std::fs::read_to_string(path).expect("readable RUMB_EVENTS file"));
         let mut at = 0u64;
         let stream: Vec<(u64, String)> = recorded
@@ -1648,16 +1802,38 @@ mod tests {
             })
             .collect();
         let selections: Vec<(u64, usize)> = std::env::var("RUMB_SELECT").ok().map(|text| text.split(',').filter_map(|pair| pair.split_once(':')).filter_map(|(time, row)| Some((time.parse().ok()?, row.parse().ok()?))).collect()).unwrap_or_default();
+        let keys: Vec<(u64, KeyCode)> = std::env::var("RUMB_KEYS")
+            .ok()
+            .map(|text| {
+                text.split(',')
+                    .filter_map(|pair| pair.split_once(':'))
+                    .filter_map(|(time, name)| {
+                        let code = match name {
+                            "esc" => KeyCode::Esc,
+                            "left" => KeyCode::Left,
+                            "right" => KeyCode::Right,
+                            "enter" => KeyCode::Enter,
+                            "tab" => KeyCode::Tab,
+                            "backtab" => KeyCode::BackTab,
+                            other => KeyCode::Char(other.chars().next()?),
+                        };
+                        Some((time.parse().ok()?, code))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let only: Option<Vec<u64>> = std::env::var("RUMB_ONLY").ok().map(|text| text.split(',').filter_map(|frame| frame.trim().parse().ok()).collect());
         let started = Instant::now();
         let mut app = App::new(false, true, started);
+        app.theme.clone_from(&theme.name);
+        app.pictures = std::env::var_os("RUMB_NO_PICTURES").is_none();
         if let Ok(panels) = std::env::var("RUMB_PANELS") {
             for (index, on) in panels.chars().enumerate().take(app.visible.len()) {
                 app.visible[index] = on == '1';
             }
         }
         let mut motion = Motion::new(true, started);
-        let (mut next, mut chosen, mut last) = (0usize, 0usize, started);
+        let (mut next, mut chosen, mut pressed, mut last) = (0usize, 0usize, 0usize, started);
         let mut costs: Vec<f64> = Vec::new();
         for frame in 0..=number("RUMB_SECONDS", 40) * fps {
             let millis = frame * 1000 / fps;
@@ -1673,15 +1849,27 @@ mod tests {
                 motion.select(&app, now);
                 chosen += 1;
             }
+            while pressed < keys.len() && keys[pressed].0 <= millis {
+                let before = (app.focus, app.lists[app.focus.index()].selected, app.tile, app.part);
+                match on_key(&mut app, key(keys[pressed].1), [10; 3], now) {
+                    Action::Theme(forward) => {
+                        step_theme(&mut theme, forward);
+                        app.theme.clone_from(&theme.name);
+                    }
+                    _ if (app.focus, app.lists[app.focus.index()].selected, app.tile, app.part) != before => motion.select(&app, now),
+                    _ => {}
+                }
+                pressed += 1;
+            }
             motion.step(&mut app, now, now.saturating_duration_since(last).as_secs_f32());
             last = now;
             if only.as_ref().is_none_or(|only| only.contains(&frame)) {
                 let begun = Instant::now();
-                write_frame(&dir, &format!("video-{frame:04}"), size, &app, &motion, &pal, now, cell);
+                write_frame(&dir, &format!("video-{frame:04}"), size, &app, &motion, &theme.palette, now, cell);
                 costs.push(begun.elapsed().as_secs_f64() * 1000.0);
             } else {
                 let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).unwrap();
-                terminal.draw(|f| drop(page::draw(f, &app, &motion, &pal, now, cell))).unwrap();
+                terminal.draw(|f| drop(page::draw(f, &app, &motion, &theme.palette, now, cell))).unwrap();
             }
         }
         costs.sort_by(f64::total_cmp);

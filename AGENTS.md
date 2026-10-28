@@ -56,7 +56,7 @@ The look of rumb is the maintainer's. **Design changes are not allowed, only pro
 - Every text on screen is data, a legend or a key hint. No filler.
 - A value that is not known yet stays empty. No guessed or placeholder values.
 - Each fact appears once per screen. A detail window adds information instead of repeating what is visible.
-- Colour is a signal only: red means act, yellow means look, the theme accent (pink in Labra) means problem, green means "belongs to the selected update". Everything else is neutral ink.
+- Colour is a signal only: red means act, yellow means look, green (the theme's color2) means ok and, in the update map, "belongs to the selected update", the theme accent (pink in Labra) means problem. The open options fill the pupil with the theme's color9. Everything else is neutral ink.
 - Text stays readable: at least 4.5:1 contrast in every bundled palette (tested in `tui/src/theme.rs`).
 - UI text is English and every term is accurate: units, plurals, full numbers as `1,915`, dates as `MM-DD HH:MM`.
 - Colours come from the current Omarchy theme, with Labra as the fallback.
@@ -77,4 +77,4 @@ The look of rumb is the maintainer's. **Design changes are not allowed, only pro
 | `RUMB_THEME` | theme name, like `--theme` |
 | `RUMB_EVENTS` | a recorded stream for the frame tests instead of the demo |
 | `RUMB_DUMP` | output directory for the `mockup_frames` test: cell grid as JSON plus pictures |
-| `RUMB_VIDEO` | output directory for the `motion_frames` test, with `RUMB_ONLY`, `RUMB_SECONDS`, `RUMB_COLUMNS`, `RUMB_ROWS`, `RUMB_CELL_WIDTH`, `RUMB_CELL_HEIGHT`, `RUMB_SELECT` and `RUMB_PANELS` (five digits, 1 shows the panel, like keys 1–5) |
+| `RUMB_VIDEO` | output directory for the `motion_frames` test, with `RUMB_ONLY`, `RUMB_SECONDS`, `RUMB_COLUMNS`, `RUMB_ROWS`, `RUMB_CELL_WIDTH`, `RUMB_CELL_HEIGHT`, `RUMB_SELECT`, `RUMB_PANELS` (five digits, 1 shows the panel, like keys 1–5), `RUMB_KEYS` (keys pressed at a time, like `28000:esc,28500:right`) and `RUMB_NO_PICTURES` (a terminal without pictures) |

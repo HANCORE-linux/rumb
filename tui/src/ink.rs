@@ -600,6 +600,8 @@ pub struct EyeSpec {
     pub turn: f32,
     pub rain: Option<Rain>,
     pub sight: Vec<(u8, u16, f32)>,
+    pub options: Option<String>,
+    pub dilate: f32,
 }
 
 #[derive(Clone)]
@@ -876,7 +878,10 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
     let glyphs = atlas(cell_height);
 
     let ri = half_width * 0.54;
-    let rp = ri * 0.52;
+    let open = spec.dilate.clamp(0.0, 1.0);
+    let (hide, show) = ((1.0 - open * 2.0).clamp(0.0, 1.0), (open * 2.0 - 1.0).clamp(0.0, 1.0));
+    let rest = ri * 0.52;
+    let rp = rest + ri * 0.23 * open;
     let ic = (c.0 + spec.gaze.0 * half_width * 0.27, c.1 + spec.gaze.1 * half_width * 0.07);
     let mut pupil_drops: Vec<(f32, f32, char, Color, f32)> = Vec::new();
     if let (Some(rain), Some(atlas)) = (&spec.rain, glyphs) {
@@ -1024,25 +1029,39 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
     pen.circle(ic.0, ic.1, ri * 1.025, ink(0.25), 0.6, None);
     pen.circle(ic.0, ic.1, rp * 1.14, ink(0.45), 0.6, None);
     let dark = brightness(pal.page) < brightness(pal.ink);
-    let pupil = if dark { pal.page } else { pal.ink };
-    pen.disc(ic.0, ic.1, rp, sk(pupil, 1.0));
+    let (pupil, head_tone, tail_tone) = pupil_inks(pal);
+    pen.disc(ic.0, ic.1, rp, sk(mix(pupil, pal.options, f64::from(open)), 1.0));
     pen.mask = None;
-    if let Some(atlas) = glyphs {
-        let clip = |px: f32, py: f32| (((rp - 2.0 * unit) - (px - ic.0).hypot(py - ic.1)) / (5.0 * unit)).clamp(0.0, 1.0);
+    let clip = |px: f32, py: f32| (((rp - 2.0 * unit) - (px - ic.0).hypot(py - ic.1)) / (5.0 * unit)).clamp(0.0, 1.0);
+    if let Some(atlas) = glyphs.filter(|_| hide > 0.0) {
         for (x, baseline, ch, tone, alpha) in &pupil_drops {
-            type_line(pen.pixmap, atlas, *x, *baseline, &[(*ch, sk(if dark { *tone } else { pal.page }, *alpha))], &clip);
+            type_line(pen.pixmap, atlas, *x, *baseline, &[(*ch, sk(if dark { *tone } else { pal.page }, *alpha * hide))], &clip);
         }
     }
-    let calm = 1.0 - spec.rain.as_ref().map_or(0.0, |rain| rain.pupil);
+    if let (Some(value), Some(atlas)) = (&spec.options, glyphs.filter(|_| show > 0.0)) {
+        let line_height = atlas.height as f32 + 2.0;
+        let top = ic.1 - line_height * 2.0 + atlas.ascent as f32;
+        let middle = top + line_height * 3.0 - atlas.ascent as f32 / 2.0;
+        let chord = (rp * rp - (middle - ic.1).powi(2)).max(0.0).sqrt();
+        let room = ((2.0 * chord - 2.0 * (4.0 * unit).round()) / atlas.advance as f32).floor() as usize;
+        let value: String = if value.chars().count() + 4 > room { value.chars().take(room.saturating_sub(5)).chain(['…']).collect() } else { value.clone() };
+        let lines = ["OPTIONS".to_string(), String::new(), "theme".to_string(), format!("← {value} →")];
+        for (index, line) in lines.iter().enumerate() {
+            let chars: Vec<(char, SkColor)> = line.chars().map(|ch| (ch, sk(pal.page, show))).collect();
+            let x = (ic.0 - chars.len() as f32 * atlas.advance as f32 / 2.0).round();
+            type_line(pen.pixmap, atlas, x, top + index as f32 * line_height, &chars, &clip);
+        }
+    }
+    let calm = (1.0 - spec.rain.as_ref().map_or(0.0, |rain| rain.pupil)) * hide;
     if let Some(atlas) = glyphs.filter(|_| calm > 0.0) {
         let line_height = atlas.height as f32 - 1.0;
         let advance = atlas.advance as f32;
         let pad = (8.0 * unit).round();
         let mut rows: Vec<(f32, usize)> = Vec::new();
-        let mut baseline = ic.1 + rp * 0.56;
-        while baseline - atlas.ascent as f32 > ic.1 - rp + 3.0 * unit {
+        let mut baseline = ic.1 + rest * 0.56;
+        while baseline - atlas.ascent as f32 > ic.1 - rest + 3.0 * unit {
             let middle = baseline - atlas.ascent as f32 / 2.0;
-            let chord = (rp * rp - (middle - ic.1).powi(2)).max(0.0).sqrt();
+            let chord = (rest * rest - (middle - ic.1).powi(2)).max(0.0).sqrt();
             let room = ((2.0 * chord - 2.0 * pad) / advance).floor().max(0.0) as usize;
             if room >= 3 {
                 rows.push((baseline, room));
@@ -1054,11 +1073,11 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
         for (index, (head, tail, shown)) in spec.code.iter().enumerate() {
             let age = count - 1 - index;
             let fade = if age == 0 { 1.0 } else { (0.82 - 0.12 * age as f32).max(0.26) } * calm;
-            let mut chars: Vec<(char, SkColor)> = head.chars().map(|ch| (ch, sk(pal.ink2, fade))).collect();
+            let mut chars: Vec<(char, SkColor)> = head.chars().map(|ch| (ch, sk(head_tone, fade))).collect();
             let split = (!tail.is_empty()).then_some(chars.len());
             if !tail.is_empty() {
-                chars.extend("  ".chars().map(|ch| (ch, sk(pal.ink, fade))));
-                chars.extend(tail.chars().map(|ch| (ch, sk(pal.ink, fade))));
+                chars.extend("  ".chars().map(|ch| (ch, sk(tail_tone, fade))));
+                chars.extend(tail.chars().map(|ch| (ch, sk(tail_tone, fade))));
             }
             if chars.len() > 34 {
                 let tone = chars[33].1;
@@ -1095,8 +1114,8 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
             for (k, (start, end)) in (slot..slot + used).rev().zip(spans.iter().copied()) {
                 let mut line: Vec<(char, SkColor)> = chars[start..end].to_vec();
                 match cursor {
-                    Some(at) if (start..end).contains(at) => line[at - start] = ('▌', sk(pal.ink, calm)),
-                    Some(at) if *at == chars.len() && end == chars.len() => line.push(('▌', sk(pal.ink, calm))),
+                    Some(at) if (start..end).contains(at) => line[at - start] = ('▌', sk(tail_tone, calm)),
+                    Some(at) if *at == chars.len() && end == chars.len() => line.push(('▌', sk(tail_tone, calm))),
                     _ => {}
                 }
                 placed.push((k, end - start, line));
@@ -1107,7 +1126,7 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
             slot += used;
         }
         let shift = spec.scroll.clamp(0.0, 1.0) * newest_rows as f32 * line_height;
-        let clip = |px: f32, py: f32| (((rp - 2.0 * unit) - ((px - ic.0).powi(2) + (py - ic.1).powi(2)).sqrt()) / (5.0 * unit)).clamp(0.0, 1.0);
+        let clip = |px: f32, py: f32| (((rest - 2.0 * unit) - ((px - ic.0).powi(2) + (py - ic.1).powi(2)).sqrt()) / (5.0 * unit)).clamp(0.0, 1.0);
         for (row, span, line) in &placed {
             let (y, _) = rows[*row];
             let x = (ic.0 - *span as f32 * advance / 2.0).round();
@@ -1181,6 +1200,14 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
     Some(pixmap)
 }
 
+pub fn pupil_inks(pal: &Palette) -> (Color, Color, Color) {
+    if brightness(pal.page) < brightness(pal.ink) {
+        (pal.page, pal.ink2, pal.ink)
+    } else {
+        (pal.ink, crate::theme::readable(mix(pal.ink, pal.page, 0.7), &[pal.ink], crate::theme::TEXT_CONTRAST, pal.page), pal.page)
+    }
+}
+
 fn brightness(color: Color) -> f32 {
     match color {
         Color::Rgb(r, g, b) => 0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b),
@@ -1204,6 +1231,7 @@ impl EyeSpec {
             (side, column, reach.to_bits()).hash(hasher);
         }
         format!("{:?}", self.rain).hash(hasher);
+        (&self.options, self.dilate.to_bits()).hash(hasher);
     }
 }
 
