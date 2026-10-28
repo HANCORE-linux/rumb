@@ -4,9 +4,12 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::app::{App, Source, Subsystem};
 use crate::page::{bytes, thousands};
+
+const COPY_WAIT: Duration = Duration::from_secs(2);
 
 pub fn dir() -> Option<PathBuf> {
     std::env::var_os("HOME").filter(|home| !home.is_empty()).map(|home| PathBuf::from(home).join("rumb-exports"))
@@ -30,16 +33,33 @@ pub fn write(app: &App, dir: &Path, stamp: &str) -> io::Result<PathBuf> {
     Err(io::Error::new(io::ErrorKind::AlreadyExists, "too many exports in one second"))
 }
 
-pub fn copy(text: &str) -> io::Result<()> {
+pub fn copy(text: String) -> io::Result<()> {
     let (wayland, x11) = (std::env::var_os("WAYLAND_DISPLAY").is_some(), std::env::var_os("DISPLAY").is_some());
     let tools: [(&str, &[&str], bool); 3] = [("wl-copy", &[], wayland), ("xclip", &["-selection", "clipboard"], x11), ("xsel", &["--clipboard", "--input"], x11)];
     let found = |name: &str| std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()));
     let Some((program, args, _)) = tools.into_iter().find(|(program, _, usable)| *usable && found(program)) else {
         return Err(io::Error::other("needs wl-copy, xclip or xsel"));
     };
+    pipe(program, args, text, COPY_WAIT)
+}
+
+fn pipe(program: &str, args: &[&str], text: String, wait: Duration) -> io::Result<()> {
     let mut child = Command::new(program).args(args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
-    child.stdin.take().ok_or_else(|| io::Error::other("no input pipe"))?.write_all(text.as_bytes())?;
-    let status = child.wait()?;
+    let mut input = child.stdin.take().ok_or_else(|| io::Error::other("no input pipe"))?;
+    let writer = std::thread::spawn(move || input.write_all(text.as_bytes()));
+    let deadline = Instant::now() + wait;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            return Err(io::Error::other(format!("{program} did not finish in {} s", wait.as_secs())));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    writer.join().map_err(|_| io::Error::other("input not written"))??;
     if status.success() { Ok(()) } else { Err(io::Error::other(format!("{program} {status}"))) }
 }
 
@@ -192,4 +212,24 @@ pub fn report(app: &App) -> String {
         let _ = writeln!(out, "    {when} {tag} {}: {}", clean(&event.ident), clean(&event.message));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_clipboard_tool_gets_the_whole_text_and_two_seconds() {
+        let copied = std::env::temp_dir().join(format!("rumb-copy-test-{}", std::process::id()));
+        pipe("sh", &["-c", "cat > \"$0\"", copied.to_str().unwrap()], "two\nlines".into(), COPY_WAIT).unwrap();
+        let text = std::fs::read_to_string(&copied).unwrap();
+        std::fs::remove_file(&copied).unwrap();
+        assert_eq!(text, "two\nlines");
+        assert_eq!(pipe("sh", &["-c", "cat > /dev/null; exit 3"], "x".into(), COPY_WAIT).unwrap_err().to_string(), "sh exit status: 3");
+        let start = Instant::now();
+        let error = pipe("sh", &["-c", "exec sleep 10"], "x".repeat(1 << 20), COPY_WAIT).unwrap_err();
+        let took = start.elapsed();
+        assert_eq!(error.to_string(), "sh did not finish in 2 s");
+        assert!(took >= COPY_WAIT && took < COPY_WAIT + Duration::from_secs(1), "{took:?}");
+    }
 }

@@ -350,6 +350,8 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
     let mut rows = [10; 3];
     let mut map_fits = false;
     let mut last_frame = Instant::now();
+    let (copy_done, copies) = std::sync::mpsc::channel();
+    let mut copying = 0;
 
     loop {
         if SIGNAL.load(Ordering::Relaxed) != 0 {
@@ -383,6 +385,13 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
                 }
             }
         }
+        while let Ok((lines, result)) = copies.try_recv() {
+            copying -= 1;
+            app.status = Some(match result {
+                Ok(()) => (format!("copied {} {}", page::thousands(lines as u64), if lines == 1 { "line" } else { "lines" }), true, Instant::now()),
+                Err(error) => (format!("copy failed: {error}"), false, Instant::now()),
+            });
+        }
 
         theme.refresh(now);
         motion.step(&mut app, now, now.saturating_duration_since(last_frame).as_secs_f32());
@@ -404,7 +413,7 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
 
         let timeout = if page::moving(&app, &motion, now) {
             pictures::FRAME
-        } else if app.finished_at.is_none() {
+        } else if app.finished_at.is_none() || copying > 0 {
             Duration::from_millis(100)
         } else {
             motion.wake(now).map_or(Duration::from_millis(500), |wake| wake.clamp(Duration::from_millis(10), Duration::from_millis(500)))
@@ -453,11 +462,9 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
                 }
                 Action::Copy => {
                     if let Some(text) = page::overlay_text(&app, &theme.palette) {
-                        let lines = text.lines().count();
-                        app.status = Some(match export::copy(&text) {
-                            Ok(()) => (format!("copied {} {}", page::thousands(lines as u64), if lines == 1 { "line" } else { "lines" }), true, Instant::now()),
-                            Err(error) => (format!("copy failed: {error}"), false, Instant::now()),
-                        });
+                        let (lines, done) = (text.lines().count(), copy_done.clone());
+                        std::thread::spawn(move || done.send((lines, export::copy(text))));
+                        copying += 1;
                     }
                 }
             },
