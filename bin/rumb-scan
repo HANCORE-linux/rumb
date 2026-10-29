@@ -140,6 +140,37 @@ owner_of() {
   REPLY=${owner_cache[$1]}
 }
 
+# Fills owner_cache for many paths with one pacman call. pacman prints a path
+# with its directory resolved, so paths it would print differently are left to owner_of.
+owners_of() {
+  local path dir line i
+  local -a ask=() dirs=() real=()
+  local -A seen=() owner=()
+  for path; do
+    [[ -z ${seen[$path]+set} ]] || continue
+    seen[$path]=1
+    [[ $path == /* && $path != */ && -z ${owner_cache[$path]+set} && ! -d $path ]] || continue
+    ask+=("$path")
+    dir=${path%/*}
+    dirs+=("${dir:-/}")
+  done
+  ((${#ask[@]})) || return 0
+  while IFS= read -r line; do
+    [[ $line == *" is owned by "* ]] || continue
+    path=${line% is owned by *}
+    line=${line##* is owned by }
+    [[ -n ${owner[$path]+set} ]] || owner[$path]=${line%% *}
+  done < <(LC_ALL=C pacman -Qo -- "${ask[@]}" 2>/dev/null)
+  mapfile -d '' -t real < <(realpath -mz -- "${dirs[@]}")
+  for i in "${!ask[@]}"; do
+    if [[ -n ${owner[${ask[i]}]+set} ]]; then
+      owner_cache[${ask[i]}]=${owner[${ask[i]}]}
+    elif [[ ${real[i]:-} == "${dirs[i]}" ]]; then
+      owner_cache[${ask[i]}]=""
+    fi
+  done
+}
+
 declare -A pending=()
 update_errors=()
 
@@ -403,8 +434,8 @@ check_updates
 # --- Current problems ---
 
 collect_problems() {
-  local count exe source scope unit fragment package units config_errors day today journal_total failed_total
-  local -a scope_flag
+  local count exe source scope unit fragment package units config_errors day today journal_total failed_total row
+  local -a scope_flag paths rows fragments
   local -A crash_days=() error_days=()
   problem_errors=()
   : >"$tmp/problems.tsv"
@@ -417,22 +448,22 @@ collect_problems() {
       ! grep -q 'No coredumps found' "$tmp/cores.err"; then
       problem_errors+=(crashes)
     fi
+    jq -r --argjson since "$since_epoch" '.[]? | select(.time / 1000000 >= $since) | .exe // empty | gsub("[[:cntrl:]]"; " ")' "$tmp/cores.json" 2>/dev/null | sort >"$tmp/crashes.txt"
+    mapfile -t paths < <(uniq "$tmp/crashes.txt")
+    owners_of "${paths[@]}"
     while read -r count exe; do
       [[ -n $exe ]] || continue
       owner_of "$exe"
       package=$REPLY
       crash_details "$exe"
       add_problem crash "$exe" "$count" "$package" "$exe" "$crash_signal" "$crash_frames" "$crash_last"
-    done < <(jq -r --argjson since "$since_epoch" '.[]? | select(.time / 1000000 >= $since) | .exe // empty | gsub("[[:cntrl:]]"; " ")' "$tmp/cores.json" 2>/dev/null | sort | uniq -c | sort -rn)
+    done < <(uniq -c "$tmp/crashes.txt" | sort -rn)
     if [[ " ${problem_errors[*]} " == *" crashes "* ]]; then
       done_step problems "reading crash reports" null
     else
       done_step problems "reading crash reports" "$(jq --argjson since "$since_epoch" '[.[]? | select(.time / 1000000 >= $since)] | length' "$tmp/cores.json" 2>/dev/null || echo 0)"
     fi
   fi
-
-  owner_of "/usr/lib/modules/$(uname -r)/vmlinuz"
-  kernel_package=$REPLY
 
   step problems "reading journal errors"
   journalctl -p err --since "@$query_start" -o json \
@@ -456,6 +487,12 @@ collect_problems() {
          (.value.message | gsub("[[:cntrl:]]"; " ") | if length > 300 then .[:299] + "…" else . end)] | join("\u001f")' \
     "$tmp/journal.json" 2>/dev/null)
 
+  jq -r --argjson since "$since_epoch" "$journal_source"' recent | source' "$tmp/journal.json" 2>/dev/null | sort >"$tmp/sources.txt"
+  mapfile -t paths < <(uniq "$tmp/sources.txt")
+  owners_of "/usr/lib/modules/$(uname -r)/vmlinuz" "${paths[@]}"
+  owner_of "/usr/lib/modules/$(uname -r)/vmlinuz"
+  kernel_package=$REPLY
+
   journal_total=0
   while read -r count source; do
     [[ -n $source ]] || continue
@@ -468,8 +505,7 @@ collect_problems() {
         ;;
       *) add_problem journal "${source#ident:}" "$count" "" "" "" "" "${journal_last[$source]:-}" "${journal_message[$source]:-}" ;;
     esac
-  done < <(jq -r --argjson since "$since_epoch" "$journal_source"' recent | source' "$tmp/journal.json" 2>/dev/null |
-    sort | uniq -c | sort -rn)
+  done < <(uniq -c "$tmp/sources.txt" | sort -rn)
   if [[ " ${problem_errors[*]} " == *" journal "* ]]; then
     done_step problems "reading journal errors" null
   else
@@ -503,15 +539,22 @@ collect_problems() {
     fi
     while read -r unit _; do
       [[ -n $unit ]] || continue
-      package=""
       fragment=$(systemctl "${scope_flag[@]}" show -P FragmentPath -- "$unit" 2>/dev/null)
-      if [[ -n $fragment ]]; then
-        owner_of "$fragment"
-        package=$REPLY
-      fi
-      add_problem failed-unit "$unit" 1 "$package" "$fragment"
-      failed_total=$((failed_total + 1))
+      rows+=("$unit"$'\x1f'"$fragment")
+      fragments+=("$fragment")
     done <<<"$units"
+  done
+  owners_of "${fragments[@]}"
+  for row in "${rows[@]}"; do
+    unit=${row%%$'\x1f'*}
+    fragment=${row#*$'\x1f'}
+    package=""
+    if [[ -n $fragment ]]; then
+      owner_of "$fragment"
+      package=$REPLY
+    fi
+    add_problem failed-unit "$unit" 1 "$package" "$fragment"
+    failed_total=$((failed_total + 1))
   done
   if [[ " ${problem_errors[*]} " == *" units "* ]]; then
     done_step problems "checking failed units" null
