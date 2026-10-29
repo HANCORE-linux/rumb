@@ -147,7 +147,7 @@ owners_of() {
   local -a ask=() dirs=() real=()
   local -A seen=() owner=()
   for path; do
-    [[ -z ${seen[$path]+set} ]] || continue
+    [[ -n $path && -z ${seen[$path]+set} ]] || continue
     seen[$path]=1
     [[ $path == /* && $path != */ && -z ${owner_cache[$path]+set} && ! -d $path ]] || continue
     ask+=("$path")
