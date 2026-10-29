@@ -890,7 +890,7 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
     let (hide, show) = ((1.0 - open * 2.0).clamp(0.0, 1.0), (open * 2.0 - 1.0).clamp(0.0, 1.0));
     let rest = ri * 0.52;
     let rp = rest + ri * 0.10 * open;
-    let ic = (c.0 + spec.gaze.0 * half_width * 0.27, c.1 + spec.gaze.1 * half_width * 0.07);
+    let ic = (c.0 + (spec.gaze.0 * half_width * 0.27).round(), c.1 + (spec.gaze.1 * half_width * 0.07).round());
     let mut pupil_drops: Vec<(f32, f32, char, Color, f32)> = Vec::new();
     if let (Some(rain), Some(atlas)) = (&spec.rain, glyphs) {
         let (pitch_x, pitch_y) = (atlas.advance as f32 + (3.0 * unit).round(), (12.0 * unit).round().max(6.0));
@@ -1329,6 +1329,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_options_text_holds_still_in_the_moving_pupil() {
+        let pal = Palette::paper();
+        let paint = |gaze: f32| {
+            let options = Options { theme: "labra".into(), filter: String::new(), position: 1, matches: 49 };
+            let spec = EyeSpec { gaze: (gaze, 0.1), columns: 72, dilate: 1.0, options: Some(options), ..EyeSpec::default() };
+            eye(&spec, &pal, 504, 340, 17.0).unwrap().data().to_vec()
+        };
+        assert!(paint(0.5) == paint(0.503), "a gaze within the same pixel moved the eye");
+        assert!(paint(0.5) != paint(0.52), "a gaze one pixel further did not move the eye");
     }
 
     #[test]
