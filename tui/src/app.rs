@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -360,6 +360,7 @@ pub struct ListState {
 }
 
 pub const MAX_EVENTS: usize = 10_000;
+pub const DILATE: Duration = Duration::from_millis(360);
 
 pub fn ease_out_cubic(t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
@@ -403,12 +404,17 @@ pub struct App {
     pub lists: [ListState; 3],
     pub editing: bool,
     pub overlay: bool,
+    pub options: bool,
+    pub options_from: (f32, Option<Instant>),
+    pub theme_filter: String,
+    pub theme: String,
     pub tile: Option<usize>,
     pub last_tile: usize,
     pub part: Option<usize>,
     pub last_part: usize,
     pub updates_map: bool,
     pub map_fits: bool,
+    pub page_fits: bool,
     pub pictures: bool,
     pub follow: bool,
     pub status: Option<(String, bool, Instant)>,
@@ -458,12 +464,17 @@ impl App {
             lists: Default::default(),
             editing: false,
             overlay: false,
+            options: false,
+            options_from: (0.0, None),
+            theme_filter: String::new(),
+            theme: String::new(),
             tile: None,
             last_tile: 0,
             part: None,
             last_part: 0,
             updates_map: true,
             map_fits: false,
+            page_fits: true,
             pictures: true,
             follow: true,
             status: None,
@@ -906,6 +917,36 @@ impl App {
             self.last_part = part;
         }
         self.overlay = false;
+    }
+
+    pub fn eye_shown(&self) -> bool {
+        self.visible[1] && self.pictures && self.page_fits
+    }
+
+    pub fn fit_page(&mut self, fits: bool) {
+        self.page_fits = fits;
+        if self.options && !self.eye_shown() {
+            (self.options, self.options_from) = (false, (0.0, None));
+            self.theme_filter.clear();
+        }
+    }
+
+    pub fn toggle_options(&mut self, now: Instant) {
+        self.options_from = (self.dilation(now), Some(now));
+        self.options = !self.options;
+        self.theme_filter.clear();
+    }
+
+    pub fn dilation(&self, now: Instant) -> f32 {
+        let goal = if self.options { 1.0 } else { 0.0 };
+        let (from, at) = self.options_from;
+        let Some(at) = at.filter(|_| !self.skipped) else { return goal };
+        let t = (now.saturating_duration_since(at).as_secs_f32() / DILATE.as_secs_f32()).clamp(0.0, 1.0);
+        from + (goal - from) * t * t * (3.0 - 2.0 * t)
+    }
+
+    pub fn dilating(&self, now: Instant) -> bool {
+        self.options_from.1.is_some_and(|at| now.saturating_duration_since(at) < DILATE)
     }
 
     pub fn move_part(&mut self, forward: bool) {

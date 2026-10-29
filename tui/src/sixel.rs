@@ -6,7 +6,7 @@ use tiny_skia::Pixmap;
 use crate::palette::{Palette, mix};
 
 pub struct Encoder {
-    key: [u32; 16],
+    key: [u32; 17],
     colors: Vec<[u8; 3]>,
     lookup: Vec<u16>,
 }
@@ -18,12 +18,12 @@ fn rgb(color: Color) -> [u8; 3] {
     }
 }
 
-fn key_of(pal: &Palette) -> [u32; 16] {
+fn key_of(pal: &Palette) -> [u32; 17] {
     let pack = |color: Color| {
         let [r, g, b] = rgb(color);
         u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
     };
-    [pal.page, pal.panel, pal.kpi, pal.bar, pal.bar_text, pal.ink, pal.ink2, pal.label, pal.faint, pal.rule, pal.grid, pal.teal, pal.select, pal.alert, pal.warn, pal.relation].map(pack)
+    [pal.page, pal.panel, pal.kpi, pal.bar, pal.bar_text, pal.ink, pal.ink2, pal.label, pal.faint, pal.rule, pal.grid, pal.teal, pal.select, pal.alert, pal.warn, pal.relation, pal.options].map(pack)
 }
 
 impl Encoder {
@@ -54,6 +54,9 @@ impl Encoder {
             for step in 1..=4 {
                 add(mix(a, b, f64::from(step) / 5.0));
             }
+        }
+        for step in 1..=10 {
+            add(mix(pal.page, pal.options, f64::from(step) / 10.0));
         }
         colors.truncate(256);
         Encoder { key: key_of(pal), colors, lookup: vec![0; 1 << 18] }
@@ -291,14 +294,16 @@ mod tests {
 
     #[test]
     fn palette_holds_the_theme_colors() {
-        let pal = Palette::labra();
-        let mut encoder = Encoder::new(&pal);
-        for color in [pal.page, pal.ink, pal.alert, pal.warn, pal.teal, pal.relation] {
-            let [r, g, b] = rgb(color);
-            let index = encoder.index(r, g, b);
-            let [pr, pg, pb] = encoder.colors[usize::from(index)];
-            assert!(r.abs_diff(pr) <= 3 && g.abs_diff(pg) <= 3 && b.abs_diff(pb) <= 3, "{color:?}");
+        for name in crate::theme::names() {
+            let pal = crate::theme::pick(Some(&name)).unwrap().palette;
+            let mut encoder = Encoder::new(&pal);
+            for color in [pal.page, pal.ink, pal.alert, pal.warn, pal.teal, pal.relation, pal.options] {
+                let [r, g, b] = rgb(color);
+                let index = encoder.index(r, g, b);
+                let [pr, pg, pb] = encoder.colors[usize::from(index)];
+                assert!(r.abs_diff(pr) <= 3 && g.abs_diff(pg) <= 3 && b.abs_diff(pb) <= 3, "{name} {color:?}");
+            }
+            assert!(encoder.colors.len() <= 256);
         }
-        assert!(encoder.colors.len() <= 256);
     }
 }

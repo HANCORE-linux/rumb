@@ -2,11 +2,12 @@
 
 set -uo pipefail
 
-keys=(mode background foreground accent muted selection lighter_background dark_foreground light_foreground bright_foreground red green yellow blue magenta cyan)
+keys=(mode background foreground accent muted selection lighter_background dark_foreground light_foreground bright_foreground red green yellow blue magenta cyan bright_red)
 out=${1:-"$(dirname "$0")/themes.json"}
 
 declare -A taken=()
-published=(banish labra)
+published=(banish batou blackgold blackmoney blackturq demon dos-moos greek-noir harbor harbordark inkypinky kanso labra mechanoonna
+  moodpeak oxford oxocarbon roseofdune ryu saga sapphire shadesofjade soft-echoes thegreek turbonite velvetnight whitegold)
 entries=()
 add() {
   local name=$1 dir=$2

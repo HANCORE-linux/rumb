@@ -11,6 +11,7 @@ const BUNDLED: &str = include_str!("../themes.json");
 pub struct Theme {
     pub palette: Palette,
     pub generation: u64,
+    pub name: String,
     live: Option<Live>,
 }
 
@@ -22,8 +23,16 @@ struct Live {
 }
 
 impl Theme {
-    fn fixed(palette: Palette) -> Self {
-        Theme { palette: readable_text(palette), generation: 0, live: None }
+    fn fixed(name: &str, palette: Palette) -> Self {
+        Theme { palette: readable_text(palette), generation: 0, name: name.to_string(), live: None }
+    }
+
+    pub fn switch(&mut self, name: &str) -> bool {
+        let Ok(next) = pick(Some(name)) else { return false };
+        let generation = self.generation + 1;
+        *self = next;
+        self.generation = generation;
+        true
     }
 
     pub fn refresh(&mut self, now: Instant) -> bool {
@@ -49,38 +58,77 @@ fn bundled() -> BTreeMap<String, HashMap<String, String>> {
 }
 
 pub fn names() -> Vec<String> {
-    let mut names: Vec<String> = ["labra", "paper"].into_iter().map(String::from).chain(bundled().into_keys()).collect();
+    let mut names: Vec<String> = std::iter::once("labra".to_string()).chain(bundled().into_keys()).collect();
     names.sort();
     names.dedup();
     names
 }
 
+pub fn choices() -> Vec<String> {
+    let mut names = names();
+    if current().is_some() {
+        names.insert(0, "system".to_string());
+    }
+    names
+}
+
+pub fn matches(name: &str, filter: &str) -> bool {
+    name.to_lowercase().contains(&filter.to_lowercase())
+}
+
+pub fn matching(filter: &str) -> Vec<String> {
+    choices().into_iter().filter(|name| matches(name, filter)).collect()
+}
+
 pub fn pick(requested: Option<&str>) -> Result<Theme, String> {
     match requested {
-        Some("omarchy") => live().ok_or_else(|| "no Omarchy theme found".to_string()),
-        Some(name) => named(name).map(Theme::fixed).ok_or_else(|| format!("unknown theme: {name} (rumb --themes lists them)")),
-        None => Ok(live().unwrap_or_else(|| Theme::fixed(Palette::labra()))),
+        Some("system" | "omarchy") => live().ok_or_else(|| "no Omarchy theme found".to_string()),
+        Some(name) => named(name).map(|palette| Theme::fixed(name, palette)).ok_or_else(|| format!("unknown theme: {name} (rumb --themes lists them)")),
+        None => Ok(saved().and_then(|name| pick(Some(&name)).ok()).or_else(live).unwrap_or_else(|| Theme::fixed("labra", Palette::labra()))),
     }
+}
+
+fn saved_file() -> Option<PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|dir| dir.is_absolute()).or_else(|| home().map(|home| home.join(".config")))?;
+    Some(config.join("rumb/theme"))
+}
+
+fn saved() -> Option<String> {
+    let name = std::fs::read_to_string(saved_file()?).ok()?;
+    Some(name.trim().to_string()).filter(|name| !name.is_empty())
+}
+
+pub fn save(name: &str) -> std::io::Result<()> {
+    let file = saved_file().ok_or_else(|| std::io::Error::other("HOME is not set"))?;
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(file, format!("{name}\n"))
+}
+
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").filter(|home| !home.is_empty()).map(PathBuf::from)
 }
 
 fn named(name: &str) -> Option<Palette> {
     match name {
         "labra" => Some(Palette::labra()),
         "paper" => Some(Palette::paper()),
-        _ => derive(bundled().get(name)?),
+        _ => bundled().get(name).and_then(derive),
     }
 }
 
+fn current() -> Option<PathBuf> {
+    let home = home()?;
+    [".local/state/omarchy/current", ".config/omarchy/current"].into_iter().map(|dir| home.join(dir)).find(|dir| dir.join("theme/colors.toml").is_file())
+}
+
 fn live() -> Option<Theme> {
-    let home = PathBuf::from(std::env::var_os("HOME")?);
-    let current = [".local/state/omarchy/current", ".config/omarchy/current"]
-        .into_iter()
-        .map(|dir| home.join(dir))
-        .find(|dir| dir.join("theme/colors.toml").is_file())?;
+    let current = current()?;
     let mut live = Live { colors: current.join("theme/colors.toml"), name: current.join("theme.name"), stamp: None, checked: Instant::now() };
     live.stamp = stamp(&live);
     let palette = read_live(&live)?;
-    Some(Theme { palette, generation: 0, live: Some(live) })
+    Some(Theme { palette, generation: 0, name: "system".to_string(), live: Some(live) })
 }
 
 fn stamp(live: &Live) -> Option<(SystemTime, String, bool)> {
@@ -144,7 +192,7 @@ fn resolve(mut c: HashMap<String, String>, light_file: bool) -> HashMap<String, 
             c.insert(key.to_string(), value);
         }
     }
-    for (key, from) in [("red", "color1"), ("green", "color2"), ("yellow", "color3"), ("blue", "color4"), ("magenta", "color5"), ("cyan", "color6"), ("magenta", "purple")] {
+    for (key, from) in [("red", "color1"), ("green", "color2"), ("yellow", "color3"), ("blue", "color4"), ("magenta", "color5"), ("cyan", "color6"), ("bright_red", "color9"), ("magenta", "purple")] {
         alias(&mut c, key, from);
     }
     for (key, chain) in [
@@ -184,6 +232,7 @@ fn derive(c: &HashMap<String, String>) -> Option<Palette> {
         .find(|candidate| apart(*candidate, red) && apart(*candidate, yellow))
         .unwrap_or(theme_accent);
     let accent = legible(signal, panel, ink);
+    let relation = legible(color("green").unwrap_or(ink), panel, ink);
     Some(Palette {
         page,
         panel,
@@ -200,7 +249,9 @@ fn derive(c: &HashMap<String, String>) -> Option<Palette> {
         select: mix(page, ink, 0.12),
         alert: legible(red, panel, ink),
         warn: legible(yellow, panel, ink),
-        relation: legible(color("green").unwrap_or(ink), panel, ink),
+        relation,
+        ok: relation,
+        options: color("bright_red").unwrap_or_else(|| mix(red, Color::Rgb(255, 255, 255), 0.2)),
     })
 }
 
@@ -256,14 +307,14 @@ fn legible(color: Color, against: Color, toward: Color) -> Color {
     (0..=10).map(|step| mix(color, toward, f64::from(step) / 10.0)).find(|candidate| contrast(*candidate, against) >= 3.0).unwrap_or(toward)
 }
 
-const TEXT_CONTRAST: f64 = 4.5;
+pub const TEXT_CONTRAST: f64 = 4.5;
 const TEXT_STEP: f64 = 1.25;
 
 fn worst_contrast(color: Color, backgrounds: &[Color]) -> f64 {
     backgrounds.iter().map(|background| contrast(color, *background)).fold(f64::INFINITY, f64::min)
 }
 
-fn readable(color: Color, backgrounds: &[Color], target: f64, toward: Color) -> Color {
+pub fn readable(color: Color, backgrounds: &[Color], target: f64, toward: Color) -> Color {
     (0..=40).map(|step| mix(color, toward, f64::from(step) / 40.0)).find(|candidate| worst_contrast(*candidate, backgrounds) >= target).unwrap_or(toward)
 }
 
@@ -277,6 +328,8 @@ fn readable_text(mut pal: Palette) -> Palette {
     pal.teal = readable(pal.teal, &rows, TEXT_CONTRAST, pal.ink);
     pal.alert = readable(pal.alert, &rows, TEXT_CONTRAST, pal.ink);
     pal.warn = readable(pal.warn, &rows, TEXT_CONTRAST, pal.ink);
+    pal.ok = readable(pal.ok, &rows, TEXT_CONTRAST, pal.ink);
+    pal.options = readable(pal.options, &[pal.page], TEXT_CONTRAST, pal.ink);
     let (white, black) = (Color::Rgb(255, 255, 255), Color::Rgb(0, 0, 0));
     let away = if contrast(white, pal.bar) >= contrast(black, pal.bar) { white } else { black };
     pal.bar_text = readable(pal.bar_text, &[pal.bar], TEXT_CONTRAST, away);
@@ -304,8 +357,8 @@ mod tests {
     #[test]
     fn every_bundled_theme_gives_a_palette() {
         let themes = bundled();
-        assert!(themes.len() >= 24);
-        assert!(["banish", "labra", "catppuccin", "solitude"].iter().all(|name| themes.contains_key(*name)));
+        assert!(themes.len() >= 49);
+        assert!(["banish", "blackturq", "labra", "catppuccin", "solitude", "whitegold"].iter().all(|name| themes.contains_key(*name)));
         for (name, colors) in &themes {
             assert!(derive(colors).is_some(), "{name}");
         }
@@ -316,15 +369,24 @@ mod tests {
 
     #[test]
     fn every_palette_keeps_text_readable_and_graded() {
-        for name in names() {
+        for name in names().into_iter().chain(["paper".to_string()]) {
             let pal = readable_text(named(&name).unwrap());
             let tiles = [pal.page, pal.panel, pal.kpi];
             let rows = [pal.page, pal.panel, pal.kpi, pal.select];
             let (faint, label, ink2) = (worst_contrast(pal.faint, &tiles), worst_contrast(pal.label, &tiles), worst_contrast(pal.ink2, &tiles));
-            for (role, value) in [("faint", faint), ("label", label), ("ink2", ink2), ("teal", worst_contrast(pal.teal, &rows)), ("alert", worst_contrast(pal.alert, &rows)), ("warn", worst_contrast(pal.warn, &rows)), ("ink on select", contrast(pal.ink, pal.select)), ("bar_text", contrast(pal.bar_text, pal.bar))] {
+            for (role, value) in [("faint", faint), ("label", label), ("ink2", ink2), ("teal", worst_contrast(pal.teal, &rows)), ("alert", worst_contrast(pal.alert, &rows)), ("warn", worst_contrast(pal.warn, &rows)), ("ok", worst_contrast(pal.ok, &rows)), ("page on options", contrast(pal.page, pal.options)), ("ink on select", contrast(pal.ink, pal.select)), ("bar_text", contrast(pal.bar_text, pal.bar))] {
                 assert!(value >= TEXT_CONTRAST, "{name} {role} {value:.2}");
             }
             assert!(faint < label && label <= ink2, "{name}: {faint:.2} {label:.2} {ink2:.2}");
+        }
+    }
+
+    #[test]
+    fn the_pupil_code_stays_readable_in_every_theme() {
+        for name in names().into_iter().chain(["paper".to_string()]) {
+            let (fill, head, tail) = crate::ink::pupil_inks(&readable_text(named(&name).unwrap()));
+            let (head, tail) = (contrast(head, fill), contrast(tail, fill));
+            assert!(head >= TEXT_CONTRAST && tail >= TEXT_CONTRAST, "{name}: head {head:.2} tail {tail:.2}");
         }
     }
 
@@ -351,6 +413,8 @@ mod tests {
     fn resolves_like_omarchy() {
         let ansi = resolve(parse("background = \"#101010\"\ncolor1 = '#aa0000'\ncolor8 = \"#555555\" # muted\n"), false);
         assert_eq!(ansi["red"], "#aa0000");
+        assert!(!ansi.contains_key("bright_red"));
+        assert_eq!(resolve(parse("color9 = \"#ff5555\"\n"), false)["bright_red"], "#ff5555");
         assert_eq!(ansi["muted"], "#555555");
         assert_eq!(ansi["dark_foreground"], "#555555");
         assert_eq!(ansi["mode"], "dark");
