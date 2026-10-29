@@ -593,9 +593,11 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pa
         "medium" => pal.warn,
         _ => pal.ink,
     };
+    let (old, new) = (short_version(&chosen.old), short_version(&chosen.new));
+    let change = if old == new { format!("{old} rebuild") } else { format!("{old} → {new}") };
     let head = vec![
         Span::styled(format!("▸ {}", chosen.name), Style::new().fg(pal.ink).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("  {} → {} · ", short_version(&chosen.old), short_version(&chosen.new)), Style::new().fg(pal.label)),
+        Span::styled(format!("  {change} · "), Style::new().fg(pal.label)),
         Span::styled(chosen.risk.clone(), Style::new().fg(risk_color)),
     ];
     let head_w = self::width(&head);

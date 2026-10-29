@@ -1238,6 +1238,16 @@ mod tests {
     }
 
     #[test]
+    fn the_map_head_line_calls_a_rebuild_a_rebuild() {
+        let now = Instant::now();
+        let mut app = crowded_app(now);
+        app.apply(stage("updates", json!({"updates": [{"name": "mesa", "old": "1:25.2.4-1", "new": "1:25.2.4-2", "source": "repo", "bump": "rebuild", "risk": "low"}]})), now);
+        let rows = screen(&app, 358, 85);
+        assert!(rows.iter().any(|row| row.contains("▸ mesa  1:25.2.4 rebuild · low")));
+        assert!(!rows.iter().any(|row| row.contains("1:25.2.4 → 1:25.2.4")));
+    }
+
+    #[test]
     fn problems_without_an_owner_belong_to_other() {
         use app::{Subsystem, problem_part};
         assert_eq!(problem_part("journal", "hancore", ""), Subsystem::Apps);
