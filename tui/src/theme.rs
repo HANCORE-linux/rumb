@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::style::Color;
@@ -58,7 +58,7 @@ fn bundled() -> BTreeMap<String, HashMap<String, String>> {
 }
 
 pub fn names() -> Vec<String> {
-    let mut names: Vec<String> = ["labra", "paper"].into_iter().map(String::from).chain(bundled().into_keys()).collect();
+    let mut names: Vec<String> = std::iter::once("labra".to_string()).chain(bundled().into_keys()).collect();
     names.sort();
     names.dedup();
     names
@@ -66,9 +66,6 @@ pub fn names() -> Vec<String> {
 
 pub fn choices() -> Vec<String> {
     let mut names = names();
-    names.extend(own().into_iter().map(|(name, _)| name));
-    names.sort();
-    names.dedup();
     if current().is_some() {
         names.insert(0, "omarchy".to_string());
     }
@@ -105,29 +102,11 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").filter(|home| !home.is_empty()).map(PathBuf::from)
 }
 
-fn own() -> Vec<(String, PathBuf)> {
-    home().map(|home| themes_in(&home.join(".config/omarchy/themes"))).unwrap_or_default()
-}
-
-fn themes_in(dir: &Path) -> Vec<(String, PathBuf)> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|theme| theme.join("colors.toml").is_file())
-        .filter_map(|theme| Some((theme.file_name()?.to_str()?.to_string(), theme)))
-        .collect()
-}
-
 fn named(name: &str) -> Option<Palette> {
     match name {
         "labra" => Some(Palette::labra()),
         "paper" => Some(Palette::paper()),
-        _ => bundled().get(name).and_then(derive).or_else(|| {
-            let (_, dir) = own().into_iter().find(|(own, _)| own == name)?;
-            let text = std::fs::read_to_string(dir.join("colors.toml")).ok()?;
-            derive(&resolve(parse(&text), dir.join("light.mode").is_file()))
-        }),
+        _ => bundled().get(name).and_then(derive),
     }
 }
 
@@ -368,22 +347,10 @@ mod tests {
     }
 
     #[test]
-    fn own_themes_need_their_colors() {
-        let dir = std::env::temp_dir().join(format!("rumb-own-themes-{}", std::process::id()));
-        for name in ["dusk", "empty"] {
-            std::fs::create_dir_all(dir.join(name)).unwrap();
-        }
-        std::fs::write(dir.join("dusk/colors.toml"), "background = \"#101010\"\n").unwrap();
-        let found = themes_in(&dir);
-        std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(found.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["dusk"]);
-    }
-
-    #[test]
     fn every_bundled_theme_gives_a_palette() {
         let themes = bundled();
-        assert!(themes.len() >= 24);
-        assert!(["banish", "labra", "catppuccin", "solitude"].iter().all(|name| themes.contains_key(*name)));
+        assert!(themes.len() >= 49);
+        assert!(["banish", "blackturq", "labra", "catppuccin", "solitude", "whitegold"].iter().all(|name| themes.contains_key(*name)));
         for (name, colors) in &themes {
             assert!(derive(colors).is_some(), "{name}");
         }
@@ -394,7 +361,7 @@ mod tests {
 
     #[test]
     fn every_palette_keeps_text_readable_and_graded() {
-        for name in names() {
+        for name in names().into_iter().chain(["paper".to_string()]) {
             let pal = readable_text(named(&name).unwrap());
             let tiles = [pal.page, pal.panel, pal.kpi];
             let rows = [pal.page, pal.panel, pal.kpi, pal.select];
@@ -408,7 +375,7 @@ mod tests {
 
     #[test]
     fn the_pupil_code_stays_readable_in_every_theme() {
-        for name in names() {
+        for name in names().into_iter().chain(["paper".to_string()]) {
             let (fill, head, tail) = crate::ink::pupil_inks(&readable_text(named(&name).unwrap()));
             let (head, tail) = (contrast(head, fill), contrast(tail, fill));
             assert!(head >= TEXT_CONTRAST && tail >= TEXT_CONTRAST, "{name}: head {head:.2} tail {tail:.2}");

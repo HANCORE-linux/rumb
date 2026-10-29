@@ -59,7 +59,8 @@ Usage: rumb [--demo] [--no-anim] [--theme <name>] [--since <time>] [--no-aur]
   --no-anim       Show the results without animation
   --theme <name>  Colors to use; by default the theme chosen with esc, else
                   the current Omarchy theme, live, and labra without Omarchy
-  --themes        List the theme names, own Omarchy themes included
+  --themes        List the theme names: the official Omarchy themes and the
+                  HANCORE themes
   --version       Print the version
   --since <time>  Passed on to rumb-scan
   --no-aur        Passed on to rumb-scan

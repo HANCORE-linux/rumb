@@ -81,7 +81,13 @@ and labra without Omarchy.
 selects the current Omarchy theme explicitly.
 .TP
 .B \-\-themes
-List the theme names, own Omarchy themes included.
+List the theme names: the official Omarchy themes and the HANCORE themes,
+with
+.B omarchy
+first when Omarchy is in use.
+Any other Omarchy theme shows through
+.B omarchy
+while it is the current one.
 .TP
 .BI \-\-since " time"
 Look for problems since
@@ -187,9 +193,6 @@ When set and not empty, print the plain text report.
 The theme chosen in the options
 .RI ( $XDG_CONFIG_HOME/rumb/theme
 when that is set).
-.TP
-.I ~/.config/omarchy/themes
-Own Omarchy themes, offered next to the bundled ones.
 .TP
 .I ~/.local/state/omarchy/current/theme/colors.toml
 The current Omarchy theme
