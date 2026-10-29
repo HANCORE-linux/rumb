@@ -67,7 +67,7 @@ pub fn names() -> Vec<String> {
 pub fn choices() -> Vec<String> {
     let mut names = names();
     if current().is_some() {
-        names.insert(0, "omarchy".to_string());
+        names.insert(0, "system".to_string());
     }
     names
 }
@@ -82,7 +82,7 @@ pub fn matching(filter: &str) -> Vec<String> {
 
 pub fn pick(requested: Option<&str>) -> Result<Theme, String> {
     match requested {
-        Some("omarchy") => live().ok_or_else(|| "no Omarchy theme found".to_string()),
+        Some("system" | "omarchy") => live().ok_or_else(|| "no Omarchy theme found".to_string()),
         Some(name) => named(name).map(|palette| Theme::fixed(name, palette)).ok_or_else(|| format!("unknown theme: {name} (rumb --themes lists them)")),
         None => Ok(saved().and_then(|name| pick(Some(&name)).ok()).or_else(live).unwrap_or_else(|| Theme::fixed("labra", Palette::labra()))),
     }
@@ -128,7 +128,7 @@ fn live() -> Option<Theme> {
     let mut live = Live { colors: current.join("theme/colors.toml"), name: current.join("theme.name"), stamp: None, checked: Instant::now() };
     live.stamp = stamp(&live);
     let palette = read_live(&live)?;
-    Some(Theme { palette, generation: 0, name: "omarchy".to_string(), live: Some(live) })
+    Some(Theme { palette, generation: 0, name: "system".to_string(), live: Some(live) })
 }
 
 fn stamp(live: &Live) -> Option<(SystemTime, String, bool)> {
