@@ -627,7 +627,7 @@ collect_anatomy() {
     step anatomy "reading the running Hyprland"
     hyprland_running=$(hyprctl version -j 2>/dev/null | jq -r '.version // empty' 2>/dev/null)
     hyprland_bin=$(command -v Hyprland || command -v hyprland || true)
-    [[ -n $hyprland_bin ]] && hyprland_installed=$(pacman -Qo "$hyprland_bin" 2>/dev/null | awk '{ print $NF }')
+    [[ -n $hyprland_bin ]] && hyprland_installed=$(LC_ALL=C pacman -Qo "$hyprland_bin" 2>/dev/null | awk '{ print $NF }')
     desktop="Hyprland $hyprland_running"
     desktop=${desktop% }
     done_step anatomy "reading the running Hyprland" "$(jq -cn --arg running "$hyprland_running" --arg installed "$hyprland_installed" \
@@ -664,7 +664,7 @@ collect_anatomy() {
   fi
   done_step anatomy "measuring the package cache" "$cache_freeable"
 
-  pacman -Sl 2>/dev/null | awk '$4 ~ /^\[installed/ { print $1 }' | sort | uniq -c |
+  LC_ALL=C pacman -Sl 2>/dev/null | awk '$4 ~ /^\[installed/ { print $1 }' | sort | uniq -c |
     awk '{ printf "%s\x1f%d\n", $2, $1 }' >"$tmp/repos.tsv"
   foreign=$(grep -c . <<<"$foreign_names")
   ((foreign > 0)) && printf 'aur\x1f%d\n' "$foreign" >>"$tmp/repos.tsv"
