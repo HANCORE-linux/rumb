@@ -72,6 +72,14 @@ pub fn choices() -> Vec<String> {
     names
 }
 
+pub fn matches(name: &str, filter: &str) -> bool {
+    name.to_lowercase().contains(&filter.to_lowercase())
+}
+
+pub fn matching(filter: &str) -> Vec<String> {
+    choices().into_iter().filter(|name| matches(name, filter)).collect()
+}
+
 pub fn pick(requested: Option<&str>) -> Result<Theme, String> {
     match requested {
         Some("omarchy") => live().ok_or_else(|| "no Omarchy theme found".to_string()),

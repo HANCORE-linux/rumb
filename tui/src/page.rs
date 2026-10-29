@@ -868,7 +868,7 @@ fn draw_keys(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
         put_right(buf, area.right() - 1, area.y, vec![span]);
     }
     let pairs: Vec<(&str, &str)> = if app.options {
-        vec![("←→", "change"), ("Esc", "close")]
+        vec![("type", "to filter"), ("←→", "change"), ("Esc", if app.theme_filter.is_empty() { "close" } else { "clear" })]
     } else if app.editing {
         vec![("type", "to filter"), ("Enter", "keep"), ("Esc", "clear")]
     } else if app.overlay && (app.tile.is_some() || app.part.is_some()) {
@@ -2475,7 +2475,9 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
     spec.turn = motion.turn();
     spec.dilate = app.dilation(now);
     if spec.dilate > 0.0 {
-        spec.options = Some(app.theme.clone());
+        let matches = crate::theme::matching(&app.theme_filter);
+        let position = matches.iter().position(|name| *name == app.theme).map_or(0, |index| index + 1);
+        spec.options = Some(crate::ink::Options { theme: app.theme.clone(), filter: app.theme_filter.clone(), position, matches: matches.len() });
     }
     if spec.dilate >= 1.0 {
         (spec.code, spec.typing, spec.scroll) = (Vec::new(), false, 0.0);

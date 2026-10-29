@@ -72,7 +72,8 @@ PgUp/PgDn and Home/End select a row; enter opens the selection; / filters the
 focused list; j shows the journal of the selected problem; c copies the text
 of the open window; e exports a Markdown report to ~/rumb-exports; esc closes
 or clears, and with nothing open shows the options in the eye, where left/right
-change the theme that rumb remembers; r rescans; q quits.
+change the theme that rumb remembers and typing filters the themes; r rescans;
+q quits.
 
 The dashboard needs a terminal of at least 150x44; a smaller one shows the
 size it needs. Without a terminal (or with NO_COLOR set) rumb prints the plain
@@ -202,6 +203,7 @@ enum Action {
     Export,
     Copy,
     Theme(bool),
+    ThemeFilter,
 }
 
 fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3], now: Instant) -> Action {
@@ -212,7 +214,16 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3], now: Instant) -> Actio
         match key.code {
             KeyCode::Left => return Action::Theme(false),
             KeyCode::Right => return Action::Theme(true),
+            KeyCode::Esc if !app.theme_filter.is_empty() => app.theme_filter.clear(),
             KeyCode::Esc => app.toggle_options(now),
+            KeyCode::Backspace => {
+                app.theme_filter.pop();
+                return Action::ThemeFilter;
+            }
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.theme_filter.push(ch);
+                return Action::ThemeFilter;
+            }
             _ => {}
         }
         return Action::Nothing;
@@ -322,12 +333,28 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3], now: Instant) -> Actio
     Action::Nothing
 }
 
-fn step_theme(theme: &mut Theme, forward: bool) {
-    let choices = theme::choices();
+fn step_theme(theme: &mut Theme, forward: bool, filter: &str) {
+    let choices = theme::matching(filter);
     let count = choices.len();
-    let index = choices.iter().position(|name| *name == theme.name).unwrap_or(0);
-    for step in 1..count {
-        if theme.switch(&choices[(index + if forward { step } else { count - step }) % count]) {
+    let index = choices.iter().position(|name| *name == theme.name);
+    for step in 1..=count {
+        let next = match index {
+            Some(index) => (index + if forward { step } else { count - step }) % count,
+            None if forward => step - 1,
+            None => count - step,
+        };
+        if Some(next) != index && theme.switch(&choices[next]) {
+            return;
+        }
+    }
+}
+
+fn filter_theme(theme: &mut Theme, filter: &str) {
+    if theme::matches(&theme.name, filter) {
+        return;
+    }
+    for name in theme::matching(filter) {
+        if theme.switch(&name) {
             return;
         }
     }
@@ -456,8 +483,11 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
                         Err(error) => (format!("export failed: {error}"), false, Instant::now()),
                     });
                 }
-                Action::Theme(forward) => {
-                    step_theme(theme, forward);
+                action @ (Action::Theme(_) | Action::ThemeFilter) => {
+                    match action {
+                        Action::Theme(forward) => step_theme(theme, forward, &app.theme_filter),
+                        _ => filter_theme(theme, &app.theme_filter),
+                    }
                     app.theme.clone_from(&theme.name);
                     if let Err(error) = theme::save(&theme.name) {
                         app.status = Some((format!("theme not saved: {error}"), false, Instant::now()));
@@ -814,11 +844,16 @@ mod tests {
         assert!(keys(&app).ends_with("q quit   Esc options"), "{}", keys(&app));
         press(&mut app, &[KeyCode::Esc]);
         assert!(app.options);
-        assert_eq!(keys(&app), "←→ change   Esc close");
-        assert_eq!(press(&mut app, &[KeyCode::Char('3'), KeyCode::Down, KeyCode::Char('q')]), Action::Nothing);
+        assert_eq!(keys(&app), "type to filter   ←→ change   Esc close");
+        assert_eq!(press(&mut app, &[KeyCode::Char('3'), KeyCode::Down, KeyCode::Char('q')]), Action::ThemeFilter);
         assert!(app.visible[2] && app.lists[0].selected == 0);
+        assert_eq!((app.theme_filter.as_str(), keys(&app).as_str()), ("3q", "type to filter   ←→ change   Esc clear"));
+        assert_eq!(press(&mut app, &[KeyCode::Backspace]), Action::ThemeFilter);
+        assert_eq!(app.theme_filter, "3");
         assert_eq!(press(&mut app, &[KeyCode::Left]), Action::Theme(false));
         assert_eq!(press(&mut app, &[KeyCode::Right]), Action::Theme(true));
+        press(&mut app, &[KeyCode::Esc]);
+        assert!(app.options && app.theme_filter.is_empty());
         press(&mut app, &[KeyCode::Esc]);
         assert!(!app.options);
 
@@ -839,6 +874,24 @@ mod tests {
             press(&mut app, &[KeyCode::Esc]);
             assert!(!app.options);
         }
+    }
+
+    #[test]
+    fn typed_letters_pick_and_step_through_the_matching_themes() {
+        assert_eq!(theme::matching("BLACK"), ["blackgold", "blackmoney", "blackturq", "matte-black", "vantablack"]);
+        let mut theme = theme::pick(Some("labra")).unwrap();
+        filter_theme(&mut theme, "black");
+        assert_eq!(theme.name, "blackgold");
+        step_theme(&mut theme, true, "black");
+        assert_eq!(theme.name, "blackmoney");
+        step_theme(&mut theme, false, "black");
+        step_theme(&mut theme, false, "black");
+        assert_eq!(theme.name, "vantablack");
+        filter_theme(&mut theme, "anta");
+        assert_eq!(theme.name, "vantablack");
+        filter_theme(&mut theme, "xyz");
+        step_theme(&mut theme, true, "xyz");
+        assert_eq!(theme.name, "vantablack");
     }
 
     #[test]
@@ -1884,7 +1937,11 @@ mod tests {
                 let before = (app.focus, app.lists[app.focus.index()].selected, app.tile, app.part);
                 match on_key(&mut app, key(keys[pressed].1), [10; 3], now) {
                     Action::Theme(forward) => {
-                        step_theme(&mut theme, forward);
+                        step_theme(&mut theme, forward, &app.theme_filter);
+                        app.theme.clone_from(&theme.name);
+                    }
+                    Action::ThemeFilter => {
+                        filter_theme(&mut theme, &app.theme_filter);
                         app.theme.clone_from(&theme.name);
                     }
                     _ if (app.focus, app.lists[app.focus.index()].selected, app.tile, app.part) != before => motion.select(&app, now),

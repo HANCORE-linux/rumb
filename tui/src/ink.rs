@@ -600,8 +600,16 @@ pub struct EyeSpec {
     pub turn: f32,
     pub rain: Option<Rain>,
     pub sight: Vec<(u8, u16, f32)>,
-    pub options: Option<String>,
+    pub options: Option<Options>,
     pub dilate: f32,
+}
+
+#[derive(Debug, Hash)]
+pub struct Options {
+    pub theme: String,
+    pub filter: String,
+    pub position: usize,
+    pub matches: usize,
 }
 
 #[derive(Clone)]
@@ -881,7 +889,7 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
     let open = spec.dilate.clamp(0.0, 1.0);
     let (hide, show) = ((1.0 - open * 2.0).clamp(0.0, 1.0), (open * 2.0 - 1.0).clamp(0.0, 1.0));
     let rest = ri * 0.52;
-    let rp = rest + ri * 0.23 * open;
+    let rp = rest + ri * 0.10 * open;
     let ic = (c.0 + spec.gaze.0 * half_width * 0.27, c.1 + spec.gaze.1 * half_width * 0.07);
     let mut pupil_drops: Vec<(f32, f32, char, Color, f32)> = Vec::new();
     if let (Some(rain), Some(atlas)) = (&spec.rain, glyphs) {
@@ -1038,15 +1046,15 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
             type_line(pen.pixmap, atlas, *x, *baseline, &[(*ch, sk(if dark { *tone } else { pal.page }, *alpha * hide))], &clip);
         }
     }
-    if let (Some(value), Some(atlas)) = (&spec.options, glyphs.filter(|_| show > 0.0)) {
+    if let (Some(options), Some(atlas)) = (&spec.options, glyphs.filter(|_| show > 0.0)) {
         let line_height = atlas.height as f32 + 2.0;
         let top = ic.1 - line_height * 2.0 + atlas.ascent as f32;
-        let middle = top + line_height * 3.0 - atlas.ascent as f32 / 2.0;
-        let chord = (rp * rp - (middle - ic.1).powi(2)).max(0.0).sqrt();
-        let room = ((2.0 * chord - 2.0 * (4.0 * unit).round()) / atlas.advance as f32).floor() as usize;
-        let value: String = if value.chars().count() + 4 > room { value.chars().take(room.saturating_sub(5)).chain(['…']).collect() } else { value.clone() };
-        let lines = ["OPTIONS".to_string(), String::new(), "theme".to_string(), format!("← {value} →")];
-        for (index, line) in lines.iter().enumerate() {
+        let room = |line: f32| {
+            let middle = top + line_height * line - atlas.ascent as f32 / 2.0;
+            let chord = (rp * rp - (middle - ic.1).powi(2)).max(0.0).sqrt();
+            ((2.0 * chord - 2.0 * (4.0 * unit).round()) / atlas.advance as f32).floor() as usize
+        };
+        for (index, line) in option_lines(options, room(1.0), room(3.0)).iter().enumerate() {
             let chars: Vec<(char, SkColor)> = line.chars().map(|ch| (ch, sk(pal.page, show))).collect();
             let x = (ic.0 - chars.len() as f32 * atlas.advance as f32 / 2.0).round();
             type_line(pen.pixmap, atlas, x, top + index as f32 * line_height, &chars, &clip);
@@ -1235,9 +1243,37 @@ impl EyeSpec {
     }
 }
 
+/// The options in the pupil, for `room_up` characters on the filter line and `room` on the theme line.
+fn option_lines(options: &Options, room_up: usize, room: usize) -> [String; 4] {
+    let value = &options.theme;
+    let value: String = if value.chars().count() + 4 > room { value.chars().take(room.saturating_sub(5)).chain(['…']).collect() } else { value.clone() };
+    let typed = format!("filter {}▌", options.filter);
+    let count = typed.chars().count();
+    let typed: String = if count > room_up { "filter …".chars().chain(typed.chars().skip(count + 8 - room_up.max(9))).collect() } else { typed };
+    let (second, third) = if options.filter.is_empty() {
+        (String::new(), "theme".to_string())
+    } else if options.matches == 0 {
+        (typed, "no match".to_string())
+    } else {
+        (typed, format!("theme · {} of {}", options.position, options.matches))
+    };
+    ["OPTIONS".to_string(), second, third, format!("← {value} →")]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pupil_options_show_the_filter_and_its_matches() {
+        let options = |filter: &str, position, matches| Options { theme: "blackgold".into(), filter: filter.into(), position, matches };
+        assert_eq!(option_lines(&options("", 12, 50), 20, 20), ["OPTIONS", "", "theme", "← blackgold →"]);
+        assert_eq!(option_lines(&options("black", 1, 5), 20, 20), ["OPTIONS", "filter black▌", "theme · 1 of 5", "← blackgold →"]);
+        assert_eq!(option_lines(&options("xyz", 0, 0), 20, 20)[2], "no match");
+        let long = option_lines(&options("catppuccin-latte", 1, 1), 16, 12);
+        assert_eq!(long[1], "filter …n-latte▌");
+        assert_eq!(long[3], "← blackgo… →");
+    }
 
     fn lines(text: &str, split: Option<usize>, rooms: &[usize]) -> Vec<String> {
         let chars: Vec<(char, SkColor)> = text.chars().map(|ch| (ch, SkColor::BLACK)).collect();

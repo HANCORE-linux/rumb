@@ -406,6 +406,7 @@ pub struct App {
     pub overlay: bool,
     pub options: bool,
     pub options_from: (f32, Option<Instant>),
+    pub theme_filter: String,
     pub theme: String,
     pub tile: Option<usize>,
     pub last_tile: usize,
@@ -465,6 +466,7 @@ impl App {
             overlay: false,
             options: false,
             options_from: (0.0, None),
+            theme_filter: String::new(),
             theme: String::new(),
             tile: None,
             last_tile: 0,
@@ -925,12 +927,14 @@ impl App {
         self.page_fits = fits;
         if self.options && !self.eye_shown() {
             (self.options, self.options_from) = (false, (0.0, None));
+            self.theme_filter.clear();
         }
     }
 
     pub fn toggle_options(&mut self, now: Instant) {
         self.options_from = (self.dilation(now), Some(now));
         self.options = !self.options;
+        self.theme_filter.clear();
     }
 
     pub fn dilation(&self, now: Instant) -> f32 {
