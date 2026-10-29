@@ -2497,7 +2497,7 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
     });
     scene.placements.push(Placement { rect: eye, picture: Picture::Eye(Box::new(spec)) });
     if !app.pictures {
-        for (k, (line, color)) in [("this terminal shows no pictures", pal.label), ("foot and kitty show the eye", pal.faint)].into_iter().enumerate() {
+        for (k, (line, color)) in [("this terminal shows no pictures", pal.label), ("foot, kitty and Ghostty show the eye", pal.faint)].into_iter().enumerate() {
             let x = eye.x + eye.width.saturating_sub(line.chars().count() as u16) / 2;
             text(buf, x, (eye.y + eye.height / 2).saturating_sub(1) + k as u16, line, Style::new().fg(color), eye.width);
         }

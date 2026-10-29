@@ -1832,7 +1832,7 @@ mod tests {
         for (time, event) in demo_events() {
             app.apply(event, now + Duration::from_millis(time));
         }
-        let note = |app: &App| screen(app, 170, 50).iter().filter(|row| row.contains("this terminal shows no pictures") || row.contains("foot and kitty show the eye")).count();
+        let note = |app: &App| screen(app, 170, 50).iter().filter(|row| row.contains("this terminal shows no pictures") || row.contains("foot, kitty and Ghostty show the eye")).count();
         assert_eq!(note(&app), 0);
         app.pictures = false;
         assert_eq!(note(&app), 2);
