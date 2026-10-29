@@ -375,7 +375,9 @@ check_updates() {
   fi
 
   : >"$tmp/new_info.txt"
-  if ((check_aur)) && [[ -n $(pacman -Qmq 2>/dev/null) ]]; then
+  foreign_names=""
+  ((check_aur || stream)) && foreign_names=$(pacman -Qqm 2>/dev/null)
+  if ((check_aur)) && [[ -n $foreign_names ]]; then
     aur_helper=$(command -v yay || command -v paru || true)
     if [[ -n $aur_helper ]]; then
       step updates "checking AUR updates"
@@ -664,7 +666,7 @@ collect_anatomy() {
 
   pacman -Sl 2>/dev/null | awk '$4 ~ /^\[installed/ { print $1 }' | sort | uniq -c |
     awk '{ printf "%s\x1f%d\n", $2, $1 }' >"$tmp/repos.tsv"
-  foreign=$(pacman -Qqm 2>/dev/null | wc -l)
+  foreign=$(grep -c . <<<"$foreign_names")
   ((foreign > 0)) && printf 'aur\x1f%d\n' "$foreign" >>"$tmp/repos.tsv"
 
   mapfile -t names < <(cut -d$'\x1f' -f1 "$tmp/updates.tsv")
