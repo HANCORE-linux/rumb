@@ -107,12 +107,18 @@ pub fn draw(frame: &mut Frame, app: &App, motion: &Motion, pal: &Palette, now: I
 fn uncovered_marks(rect: Rect, spec: &crate::ink::MarksSpec, around: Rect) -> Vec<Placement> {
     let above = around.y.saturating_sub(rect.y).min(rect.height);
     let below = around.bottom().saturating_sub(rect.y).min(rect.height);
-    [(0, above), (below, rect.height)]
+    let left = around.x.saturating_sub(rect.x).min(rect.width);
+    let right = around.right().saturating_sub(rect.x).min(rect.width);
+    let share = |cells: u16| (u16::from(spec.columns) * cells / rect.width.max(1)) as u8;
+    [(0, above, 0, rect.width), (below, rect.height, 0, rect.width), (above, below, 0, left), (above, below, right, rect.width)]
         .into_iter()
-        .filter(|(from, to)| from < to)
-        .map(|(from, to)| Placement {
-            rect: Rect::new(rect.x, rect.y + from, rect.width, to - from),
-            picture: Picture::Marks(Box::new(crate::ink::MarksSpec { columns: spec.columns, rows: spec.rows[usize::from(from)..usize::from(to)].to_vec() })),
+        .filter(|(top, bottom, from, to)| top < bottom && from < to)
+        .map(|(top, bottom, from, to)| Placement {
+            rect: Rect::new(rect.x + from, rect.y + top, to - from, bottom - top),
+            picture: Picture::Marks(Box::new(crate::ink::MarksSpec {
+                columns: share(to - from),
+                rows: spec.rows[usize::from(top)..usize::from(bottom)].iter().map(|&(lit, color, bg)| (lit.saturating_sub(share(from)), color, bg)).collect(),
+            })),
         })
         .collect()
 }

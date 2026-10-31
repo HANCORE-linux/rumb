@@ -1164,20 +1164,34 @@ mod tests {
     }
 
     #[test]
-    fn a_detail_window_keeps_the_dots_of_the_rows_it_leaves_free() {
+    fn a_detail_window_keeps_the_dots_it_leaves_free() {
         let now = Instant::now();
         let mut app = App::new(true, false, now);
         for (time, event) in demo_events() {
             app.apply(event, now + Duration::from_millis(time));
         }
-        app.focus = Pane::Problems;
-        app.overlay = true;
-        let (_, scene) = render(&app, 271, 85, now + Duration::from_secs(60));
-        let window = scene.overlay.expect("a detail window");
-        let around = ratatui::layout::Rect::new(window.x.saturating_sub(1), window.y.saturating_sub(1), window.width + 2, window.height + 2);
-        let marks: Vec<_> = scene.placements.iter().filter(|placement| matches!(placement.picture, page::Picture::Marks(_))).collect();
-        assert!(marks.iter().all(|placement| placement.rect.intersection(around).is_empty()));
-        assert!(marks.iter().any(|placement| placement.rect.y >= around.bottom()));
+        let pal = palette::Palette::paper();
+        let marks = |scene: &page::Scene| -> Vec<(ratatui::layout::Rect, tiny_skia::Pixmap)> {
+            scene.placements.iter().filter(|placement| matches!(placement.picture, page::Picture::Marks(_))).map(|placement| (placement.rect, page::paint(&placement.picture, &pal, u32::from(placement.rect.width) * 10, u32::from(placement.rect.height) * 21, 21.0).unwrap())).collect()
+        };
+        for (width, height, pane, beside) in [(271, 85, Pane::Problems, false), (172, 50, Pane::Events, true)] {
+            app.focus = pane;
+            app.overlay = false;
+            let closed = marks(&render(&app, width, height, now + Duration::from_secs(60)).1);
+            app.overlay = true;
+            let (_, scene) = render(&app, width, height, now + Duration::from_secs(60));
+            let window = scene.overlay.expect("a detail window");
+            let around = ratatui::layout::Rect::new(window.x.saturating_sub(1), window.y.saturating_sub(1), window.width + 2, window.height + 2);
+            let open = marks(&scene);
+            assert!(open.iter().all(|(rect, _)| rect.intersection(around).is_empty()));
+            let free: Vec<_> = closed.iter().flat_map(|(rect, full)| rect.positions().filter(|cell| !around.contains(*cell)).map(move |cell| (cell, rect, full))).collect();
+            for (cell, rect, full) in &free {
+                let (part, kept) = open.iter().find(|(part, _)| part.contains(*cell)).expect("the dots of a free cell");
+                let (fx, fy, kx, ky) = (u32::from(cell.x - rect.x) * 10, u32::from(cell.y - rect.y) * 21, u32::from(cell.x - part.x) * 10, u32::from(cell.y - part.y) * 21);
+                assert!((0..21).all(|y| (0..10).all(|x| full.pixel(fx + x, fy + y) == kept.pixel(kx + x, ky + y))), "{width}x{height} {cell:?}");
+            }
+            assert!(free.iter().any(|(cell, _, _)| if beside { (around.y..around.bottom()).contains(&cell.y) } else { cell.y >= around.bottom() }));
+        }
     }
 
     #[test]
