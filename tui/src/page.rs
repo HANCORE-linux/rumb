@@ -91,11 +91,30 @@ pub fn draw(frame: &mut Frame, app: &App, motion: &Motion, pal: &Palette, now: I
         let kept: Vec<Placement> = scene.placements.drain(..).filter(|placement| matches!(placement.picture, Picture::Ring(_) | Picture::Marks(_))).collect();
         draw_overlay(buf, area, app, pal, &mut scene);
         if let Some(rect) = scene.overlay {
-            let ring = Rect::new(rect.x.saturating_sub(1), rect.y.saturating_sub(1), rect.width + 2, rect.height + 2);
-            scene.placements.extend(kept.into_iter().filter(|placement| placement.rect.intersection(ring).is_empty()));
+            let around = Rect::new(rect.x.saturating_sub(1), rect.y.saturating_sub(1), rect.width + 2, rect.height + 2);
+            for placement in kept {
+                if placement.rect.intersection(around).is_empty() {
+                    scene.placements.push(placement);
+                } else if let Picture::Marks(spec) = placement.picture {
+                    scene.placements.extend(uncovered_marks(placement.rect, &spec, around));
+                }
+            }
         }
     }
     scene
+}
+
+fn uncovered_marks(rect: Rect, spec: &crate::ink::MarksSpec, around: Rect) -> Vec<Placement> {
+    let above = around.y.saturating_sub(rect.y).min(rect.height);
+    let below = around.bottom().saturating_sub(rect.y).min(rect.height);
+    [(0, above), (below, rect.height)]
+        .into_iter()
+        .filter(|(from, to)| from < to)
+        .map(|(from, to)| Placement {
+            rect: Rect::new(rect.x, rect.y + from, rect.width, to - from),
+            picture: Picture::Marks(Box::new(crate::ink::MarksSpec { columns: spec.columns, rows: spec.rows[usize::from(from)..usize::from(to)].to_vec() })),
+        })
+        .collect()
 }
 
 fn draw_header(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant) {
@@ -356,9 +375,8 @@ fn ring_since(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Insta
         (minutes, "min".to_string())
     };
     let per = 3u16;
-    let midnight = last.get(..10).zip(last.get(19..)).and_then(|(date, zone)| epoch(&format!("{date}T00:00:00{zone}")));
     let (slots, turn, ticks, full) = if days > 0 {
-        (30 * per, (scan_epoch + live - midnight.unwrap_or(last_epoch)) as f64 / (30.0 * 86400.0), 30, "30 days")
+        (30 * per, elapsed as f64 / (30.0 * 86400.0), 30, "30 days")
     } else if hours > 0 {
         (96, elapsed as f64 / 86400.0, 24, "24 hours")
     } else {
@@ -2746,6 +2764,7 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
     let lists = draw_lists(buf, lists_area, app, motion, pal, now, scene);
     for (pane, rect) in &lists {
         if held(Target::List(pane.index() as u8)) {
+            scene.placements.retain(|placement| placement.rect.intersection(*rect).is_empty());
             for row in rect.y + 2..rect.bottom().saturating_sub(2) {
                 for x in rect.x + 1..rect.right() - 1 {
                     buf[(x, row)].set_symbol(" ").set_bg(pal.page);

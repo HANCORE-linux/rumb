@@ -1153,6 +1153,34 @@ mod tests {
     }
 
     #[test]
+    fn the_since_ring_sweeps_the_time_since_the_upgrade() {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        let upgrade = "2026-10-16T22:58:12+02:00";
+        app.apply(source::Event::Start { last_upgrade: Some(upgrade.into()), problems_since: upgrade.into(), now: Some("2026-10-17T23:58:12+02:00".into()), omarchy: false, last_upgraded: Vec::new() }, now);
+        let (_, scene) = render(&app, 358, 85, now + Duration::from_secs(60));
+        let hands: Vec<u16> = scene.placements.iter().filter_map(|placement| if let page::Picture::Ring(spec) = &placement.picture { spec.hand } else { None }).collect();
+        assert_eq!(hands, [35]);
+    }
+
+    #[test]
+    fn a_detail_window_keeps_the_dots_of_the_rows_it_leaves_free() {
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events() {
+            app.apply(event, now + Duration::from_millis(time));
+        }
+        app.focus = Pane::Problems;
+        app.overlay = true;
+        let (_, scene) = render(&app, 271, 85, now + Duration::from_secs(60));
+        let window = scene.overlay.expect("a detail window");
+        let around = ratatui::layout::Rect::new(window.x.saturating_sub(1), window.y.saturating_sub(1), window.width + 2, window.height + 2);
+        let marks: Vec<_> = scene.placements.iter().filter(|placement| matches!(placement.picture, page::Picture::Marks(_))).collect();
+        assert!(marks.iter().all(|placement| placement.rect.intersection(around).is_empty()));
+        assert!(marks.iter().any(|placement| placement.rect.y >= around.bottom()));
+    }
+
+    #[test]
     fn a_detail_window_hides_only_the_rings_it_covers() {
         let now = Instant::now();
         let mut app = system_app(now);
