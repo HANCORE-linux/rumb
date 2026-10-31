@@ -197,6 +197,14 @@ fn fingerprint(picture: &Picture, generation: u64) -> u64 {
             4u8.hash(&mut hasher);
             spec.hash(&mut hasher);
         }
+        Picture::Ring(spec) => {
+            5u8.hash(&mut hasher);
+            spec.hash(&mut hasher);
+        }
+        Picture::Marks(spec) => {
+            6u8.hash(&mut hasher);
+            spec.hash(&mut hasher);
+        }
         Picture::Specimen { subsystem, signal, glow, aim } => {
             (2u8, subsystem.label(), signal, glow.map(|(color, strength)| (format!("{color:?}"), strength.to_bits())), aim.to_bits()).hash(&mut hasher);
         }

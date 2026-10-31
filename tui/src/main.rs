@@ -1131,6 +1131,41 @@ mod tests {
     }
 
     #[test]
+    fn every_tile_and_list_has_a_thin_frame_and_the_focus_gets_corners() {
+        let now = Instant::now();
+        let pal = palette::Palette::paper();
+        let mut app = system_app(now);
+        let later = now + Duration::from_secs(60);
+        let (buffer, _) = render(&app, 358, 85, later);
+        let rows: Vec<String> = (0..85).map(|y| (0..358).map(|x| buffer[(x, y)].symbol()).collect()).collect();
+        assert_eq!(rows[1].matches('┌').count(), 6);
+        assert_eq!(rows[1].matches('┐').count(), 6);
+        let (_, title) = find(&rows, ":: ³UPDATES").unwrap();
+        assert_eq!(rows[usize::from(title) - 1].matches('┌').count(), 3);
+        app.focus = Pane::Problems;
+        app.tile = Some(2);
+        let (buffer, _) = render(&app, 358, 85, later);
+        let corners: Vec<u16> = (0..358).filter(|x| buffer[(*x, 1)].symbol() == "┌").collect();
+        for (index, x) in corners.iter().enumerate() {
+            let color = if index == 2 { pal.ink } else { pal.rule };
+            assert_eq!([buffer[(*x, 1)].fg, buffer[(*x + 2, 1)].fg, buffer[(*x, 2)].fg], [color; 3], "tile {index}");
+        }
+    }
+
+    #[test]
+    fn a_detail_window_hides_only_the_rings_it_covers() {
+        let now = Instant::now();
+        let mut app = system_app(now);
+        app.tile = Some(0);
+        app.overlay = true;
+        let (_, scene) = render(&app, 358, 85, now + Duration::from_secs(60));
+        let window = scene.overlay.expect("a detail window");
+        let around = ratatui::layout::Rect::new(window.x.saturating_sub(1), window.y.saturating_sub(1), window.width + 2, window.height + 2);
+        assert!(scene.placements.iter().any(|placement| matches!(placement.picture, page::Picture::Ring(_))));
+        assert!(scene.placements.iter().all(|placement| placement.rect.intersection(around).is_empty() || !matches!(placement.picture, page::Picture::Ring(_) | page::Picture::Marks(_))));
+    }
+
+    #[test]
     fn the_band_never_drops_a_red_or_yellow_fact() {
         let now = Instant::now();
         let pal = palette::Palette::paper();
@@ -1170,8 +1205,8 @@ mod tests {
         }
         app.overlay = false;
         let value = |rows: &[String], name: &str| {
-            let row = rows.iter().find(|row| row.contains(&format!("● {name}"))).unwrap_or_else(|| panic!("no {name} row"));
-            row.split(&format!("● {name}")).nth(1).and_then(|tail| tail.split('│').next()).unwrap_or_default().trim().to_string()
+            let row = rows.iter().take(16).find(|row| row.contains(&format!(" {name} "))).unwrap_or_else(|| panic!("no {name} row"));
+            row.split(&format!(" {name} ")).nth(1).and_then(|tail| tail.split('│').next()).unwrap_or_default().trim().to_string()
         };
         let wide = screen(&app, 358, 85);
         assert_eq!([value(&wide, "risk"), value(&wide, "reboot"), value(&wide, "snapshot"), value(&wide, "space")], ["high", "after update", "omarchy-update", "ok"]);

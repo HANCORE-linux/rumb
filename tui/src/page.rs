@@ -21,6 +21,8 @@ pub enum Picture {
     Eye(Box<crate::ink::EyeSpec>),
     Fan(Box<crate::ink::FanSpec>),
     Orbit(Box<crate::ink::OrbitSpec>),
+    Ring(Box<crate::ink::RingSpec>),
+    Marks(Box<crate::ink::MarksSpec>),
 }
 
 pub struct Placement {
@@ -36,6 +38,7 @@ pub struct Scene {
     pub lists: Vec<(Pane, Rect)>,
     pub chosen: [Option<Rect>; 3],
     pub band: Option<Rect>,
+    pub overlay: Option<Rect>,
 }
 
 pub fn paint(picture: &Picture, pal: &Palette, width: u32, height: u32, cell_height: f32) -> Option<Pixmap> {
@@ -43,6 +46,8 @@ pub fn paint(picture: &Picture, pal: &Palette, width: u32, height: u32, cell_hei
         Picture::Eye(spec) => return crate::ink::eye(spec, pal, width, height, cell_height),
         Picture::Fan(spec) => return crate::ink::fan(spec, pal, width, height, cell_height),
         Picture::Orbit(spec) => return crate::ink::orbit(spec, pal, width, height, cell_height),
+        Picture::Ring(spec) => return crate::ink::ring(spec, pal, width, height, cell_height),
+        Picture::Marks(spec) => return crate::ink::marks(spec, pal, width, height, cell_height),
         Picture::Specimen { subsystem, signal, glow, aim } => (subsystem, signal, glow, aim),
     };
     let mut tone = *pal;
@@ -83,8 +88,12 @@ pub fn draw(frame: &mut Frame, app: &App, motion: &Motion, pal: &Palette, now: I
     }
     draw_nerve(buf, area, app, motion, pal, now, cell, &mut scene);
     if app.overlay {
-        scene.placements.clear();
+        let kept: Vec<Placement> = scene.placements.drain(..).filter(|placement| matches!(placement.picture, Picture::Ring(_) | Picture::Marks(_))).collect();
         draw_overlay(buf, area, app, pal, &mut scene);
+        if let Some(rect) = scene.overlay {
+            let ring = Rect::new(rect.x.saturating_sub(1), rect.y.saturating_sub(1), rect.width + 2, rect.height + 2);
+            scene.placements.extend(kept.into_iter().filter(|placement| placement.rect.intersection(ring).is_empty()));
+        }
     }
     scene
 }
@@ -133,7 +142,454 @@ fn draw_header(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Inst
     put_right(buf, area.right() - 1, area.y, status);
 }
 
-fn draw_tiles(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant) {
+fn draw_tiles(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant, cell: (u16, u16), rings: &mut Vec<Placement>) {
+    let count = 6u16;
+    let width = area.width.saturating_sub(2) / count;
+    let ring = (9.0 * f32::from(cell.1) / f32::from(cell.0.max(1))).round() as u16;
+    if !app.pictures || width.saturating_sub(4) < ring + 18 {
+        draw_text_tiles(buf, area, app, pal, now);
+        return;
+    }
+    for index in 0..count {
+        let x = area.x + 1 + index * width;
+        let w = if index + 1 == count { area.right() - 1 - x } else { width };
+        let rect = Rect::new(x, area.y, w, area.height);
+        match index {
+            0 => ring_pending(buf, rect, app, pal, now, cell, rings),
+            1 => ring_days(buf, rect, app, pal, now, cell, rings),
+            2 => ring_since(buf, rect, app, pal, now, cell, rings),
+            3 if app.omarchy => ring_omarchy(buf, rect, app, pal, now, cell, rings),
+            3 => ring_fixes(buf, rect, app, pal, now, cell, rings),
+            4 => ring_disk(buf, rect, app, pal, now, cell, rings),
+            _ => ring_checks(buf, rect, app, pal, cell, rings),
+        }
+    }
+}
+
+fn panel_frame(buf: &mut Buffer, area: Rect, title: &str, focused: bool, pal: &Palette) -> Rect {
+    if area.width < 4 || area.height < 3 {
+        return Rect::new(area.x, area.y, 0, 0);
+    }
+    outline(buf, area, Style::new().fg(pal.rule));
+    if focused {
+        corners(buf, area, Style::new().fg(pal.ink));
+    }
+    let inner = Rect::new(area.x + 2, area.y + 1, area.width.saturating_sub(4), area.height.saturating_sub(2));
+    let title_style = if focused { Style::new().fg(pal.ink).add_modifier(Modifier::BOLD) } else { Style::new().fg(pal.label) };
+    text(buf, inner.x, inner.y, &format!(":: {title}"), title_style, inner.width);
+    Rect::new(inner.x, inner.y + 1, inner.width, inner.height.saturating_sub(1))
+}
+
+fn tile_legend(buf: &mut Buffer, area: Rect, spans: Vec<Span<'static>>) {
+    if area.height < 4 || area.width < 6 {
+        return;
+    }
+    let mut line = vec![Span::raw(" ")];
+    line.extend(spans);
+    line.push(Span::raw(" "));
+    put(buf, area.x + 1, area.bottom() - 2, line, area.width.saturating_sub(4));
+}
+
+fn faint(value: &str, pal: &Palette) -> Span<'static> {
+    Span::styled(value.to_string(), Style::new().fg(pal.faint))
+}
+
+fn label(value: &str, pal: &Palette) -> Span<'static> {
+    Span::styled(value.to_string(), Style::new().fg(pal.label))
+}
+
+fn place_ring(rings: &mut Vec<Placement>, inner: Rect, cell: (u16, u16), spec: crate::ink::RingSpec) -> Rect {
+    let rows = inner.height.saturating_sub(2).min(9);
+    let cols = ((f32::from(rows) * f32::from(cell.1.max(1)) / f32::from(cell.0.max(1))).round() as u16).min(inner.width / 2);
+    rings.push(Placement { rect: Rect::new(inner.x, inner.y, cols, rows), picture: Picture::Ring(Box::new(spec)) });
+    let x = inner.x + cols + 1;
+    Rect::new(x, inner.y, inner.right().saturating_sub(x), rows)
+}
+
+fn column(buf: &mut Buffer, col: Rect, lines: Vec<Vec<Span<'static>>>) {
+    let top = col.y + col.height.saturating_sub(lines.len() as u16) / 2;
+    for (k, line) in lines.into_iter().enumerate() {
+        put(buf, col.x, top + k as u16, line, col.width);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn keyed(buf: &mut Buffer, col: Rect, y: u16, dot: Color, name: &str, value: &str, color: Color, pal: &Palette) {
+    text(buf, col.x, y, "●", Style::new().fg(dot), 1);
+    text(buf, col.x + 2, y, name, Style::new().fg(pal.label), col.width.saturating_sub(2));
+    right(buf, col.right(), y, value, Style::new().fg(color).add_modifier(Modifier::BOLD));
+}
+
+type Dots = Vec<(u16, u8, u8, Color, u8)>;
+
+fn stack(dots: &mut Dots, slot: u16, width: u16, start: usize, count: usize, color: Color, alpha: u8) {
+    let width = usize::from(width.max(1));
+    let mut order: Vec<usize> = (0..width).collect();
+    order.sort_by_key(|col| (2 * col).abs_diff(width - 1));
+    for i in start..start + count {
+        let row = i / width;
+        if row >= usize::from(crate::ink::RING_ROWS) {
+            break;
+        }
+        dots.push((slot + order[i % width] as u16, row as u8, row as u8 + 1, color, alpha));
+    }
+}
+
+fn ring_pending(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant, cell: (u16, u16), rings: &mut Vec<Placement>) {
+    let inner = panel_frame(buf, area, "¹PENDING", app.tile == Some(0), pal);
+    let Some(done) = app.stage_done_at[0] else {
+        text(buf, inner.x, inner.y + 2, "checking…", Style::new().fg(pal.faint), inner.width);
+        return;
+    };
+    let total = app.updates.len();
+    let (high, medium) = (app.high(), app.medium());
+    let low = total - high - medium;
+    let spokes = |unit: usize| high.div_ceil(unit) + medium.div_ceil(unit) + low.div_ceil(unit);
+    let unit = UNITS.into_iter().find(|unit| spokes(*unit) <= 48).unwrap_or(10000);
+    let kinds: Vec<(Color, u8)> = std::iter::repeat_n((pal.alert, 12), high.div_ceil(unit))
+        .chain(std::iter::repeat_n((pal.warn, 8), medium.div_ceil(unit)))
+        .chain(std::iter::repeat_n((pal.ink2, 4), low.div_ceil(unit)))
+        .collect();
+    let shown = (reveal(app, now, Some(done), 0.0, 900.0) * kinds.len() as f64).ceil() as usize;
+    let slots = 96u16;
+    let step = slots / kinds.len().max(1) as u16;
+    let width = step.saturating_sub(1).max(1);
+    let mut dots = Vec::new();
+    let mut glow = Vec::new();
+    for (k, (color, rows)) in kinds.iter().take(shown).enumerate() {
+        let slot = k as u16 * step;
+        stack(&mut dots, slot, width, 0, usize::from(width) * usize::from(*rows), *color, 95);
+        if *color == pal.alert {
+            glow.push((slot + width / 2, 6, pal.alert));
+        }
+    }
+    let mut center = vec![(thousands(total as u64), pal.ink, 16)];
+    if total > 0 {
+        center.push((if total == 1 { "update" } else { "updates" }.to_string(), pal.label, 10));
+    }
+    let col = place_ring(rings, inner, cell, crate::ink::RingSpec { slots, dots, ticks: 4, glow, center, ..Default::default() });
+    if total == 0 {
+        column(buf, col, vec![vec![label("up to date", pal)]]);
+        tile_legend(buf, area, vec![faint("nothing to install", pal)]);
+        return;
+    }
+    let top = col.y + col.height.saturating_sub(3) / 2;
+    keyed(buf, col, top, pal.alert, "high", &high.to_string(), pal.alert, pal);
+    keyed(buf, col, top + 1, pal.warn, "medium", &medium.to_string(), pal.warn, pal);
+    keyed(buf, col, top + 2, pal.ink2, "low", &low.to_string(), pal.ink, pal);
+    tile_legend(buf, area, vec![faint(&if unit == 1 { "1 wedge = 1 update".to_string() } else { format!("1 wedge ≤ {unit} updates") }, pal)]);
+}
+
+fn ring_days(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant, cell: (u16, u16), rings: &mut Vec<Placement>) {
+    let inner = panel_frame(buf, area, "PROBLEMS / DAY", app.tile == Some(1), pal);
+    let Some(done) = app.stage_done_at[1] else {
+        text(buf, inner.x, inner.y + 2, "reading the journal…", Style::new().fg(pal.faint), inner.width);
+        return;
+    };
+    let start = app.activity.len().saturating_sub(30);
+    let mut days: Vec<(&str, u64, u64)> = app.activity[start..].iter().map(|day| (day.date.as_str(), day.crashes, day.errors)).collect();
+    if let Some(last) = days.last_mut() {
+        last.2 += app.journal_live as u64;
+    }
+    let Some(&(latest, latest_crashes, latest_errors)) = days.last() else {
+        text(buf, inner.x, inner.y + 3, "no days to show", Style::new().fg(pal.faint), inner.width);
+        return;
+    };
+    let per = (96 / days.len() as u16).max(1);
+    let bar = (per - per / 3).max(1);
+    let fits = |unit: usize| days.iter().all(|(_, crashes, errors)| ((crashes + errors) as usize).div_ceil(unit).div_ceil(usize::from(bar)) <= usize::from(crate::ink::RING_ROWS));
+    let unit = UNITS.into_iter().find(|unit| fits(*unit)).unwrap_or(10000);
+    let worst = days.iter().enumerate().filter(|(_, (_, crashes, _))| *crashes > 0).max_by_key(|(k, (_, crashes, _))| (*crashes, *k)).map(|(k, _)| k);
+    let mut dots = Vec::new();
+    let mut glow = Vec::new();
+    let mut tag = None;
+    for (k, (date, crashes, errors)) in days.iter().enumerate() {
+        let grow = reveal(app, now, Some(done), k as f64 * 35.0, 450.0);
+        let slot = k as u16 * per;
+        let all = (((crashes + errors) as usize).div_ceil(unit) as f64 * grow).round() as usize;
+        let red = (((*crashes as usize).div_ceil(unit) as f64 * grow).round() as usize).min(all);
+        let today = k + 1 == days.len();
+        stack(&mut dots, slot, bar, 0, red, pal.teal, 95);
+        stack(&mut dots, slot, bar, red, all - red, if today { pal.ink } else { pal.ink2 }, if today { 95 } else { 90 });
+        if Some(k) == worst && red > 0 {
+            glow.push((slot + bar / 2, (red.div_ceil(usize::from(bar)) / 2) as u8, pal.teal));
+            tag = Some((slot + bar / 2, all.div_ceil(usize::from(bar)) as u8, date.get(5..).unwrap_or(date).to_string(), pal.teal));
+        }
+    }
+    let when = if app.scan_time.as_deref().and_then(|time| time.get(..10)) == Some(latest) { "today".to_string() } else { format!("on {}", latest.get(5..).unwrap_or(latest)) };
+    let spec = crate::ink::RingSpec {
+        slots: days.len() as u16 * per,
+        dots,
+        track: Some(days.len() as u16 * per),
+        ticks: days.len() as u16,
+        glow,
+        tag,
+        center: vec![(compact(latest_crashes + latest_errors), pal.ink, 16), (when, pal.label, 10)],
+        ..Default::default()
+    };
+    let col = place_ring(rings, inner, cell, spec);
+    let crashes: u64 = days.iter().map(|(_, crashes, _)| crashes).sum();
+    let errors: u64 = days.iter().map(|(_, _, errors)| errors).sum();
+    let top = col.y + col.height.saturating_sub(2) / 2;
+    keyed(buf, col, top, pal.teal, "crashes", &thousands(crashes), pal.ink, pal);
+    keyed(buf, col, top + 1, pal.ink2, "errors", &thousands(errors), pal.ink, pal);
+    let scale = if unit == 1 { "1 dot = 1 problem".to_string() } else { format!("1 dot ≤ {unit} problems") };
+    tile_legend(buf, area, vec![faint(&format!("{scale} · 1 bar = 1 day"), pal)]);
+}
+
+fn ring_since(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant, cell: (u16, u16), rings: &mut Vec<Placement>) {
+    let inner = panel_frame(buf, area, "SINCE UPGRADE", app.tile == Some(2), pal);
+    let (Some(last), Some(scan)) = (app.last_upgrade.as_deref(), app.scan_time.as_deref()) else {
+        let message = if app.start_at.is_some() { "no full upgrade logged" } else { "reading pacman.log…" };
+        text(buf, inner.x, inner.y + 2, message, Style::new().fg(pal.faint), inner.width);
+        return;
+    };
+    let (Some(last_epoch), Some(scan_epoch)) = (epoch(last), epoch(scan)) else { return };
+    let live = app.start_at.map_or(0, |at| now.saturating_duration_since(at).as_secs() as i64);
+    let elapsed = (scan_epoch - last_epoch + live).max(0);
+    let (days, hours, minutes) = (elapsed / 86400, (elapsed % 86400) / 3600, (elapsed % 3600) / 60);
+    let (number, rest) = if days > 0 {
+        (days, format!("{} {hours} h", if days == 1 { "day" } else { "days" }))
+    } else if hours > 0 {
+        (hours, format!("h {minutes:02} min"))
+    } else {
+        (minutes, "min".to_string())
+    };
+    let per = 3u16;
+    let midnight = last.get(..10).zip(last.get(19..)).and_then(|(date, zone)| epoch(&format!("{date}T00:00:00{zone}")));
+    let (slots, turn, ticks, full) = if days > 0 {
+        (30 * per, (scan_epoch + live - midnight.unwrap_or(last_epoch)) as f64 / (30.0 * 86400.0), 30, "30 days")
+    } else if hours > 0 {
+        (96, elapsed as f64 / 86400.0, 24, "24 hours")
+    } else {
+        (60, elapsed as f64 / 3600.0, 12, "60 minutes")
+    };
+    let turn = turn.clamp(0.0, 1.0) * reveal(app, now, app.start_at, 0.0, 700.0);
+    let lit = (turn * f64::from(slots)).floor() as u16;
+    let dots = (0..lit).map(|k| (k, 0, crate::ink::RING_ROWS, pal.ink2, 85)).collect();
+    let spec = crate::ink::RingSpec {
+        slots,
+        dots,
+        track: Some(lit),
+        ticks,
+        hand: Some((turn * 1000.0).round() as u16),
+        center: vec![(number.to_string(), pal.ink, 16), (rest, pal.label, 10)],
+        ..Default::default()
+    };
+    let col = place_ring(rings, inner, cell, spec);
+    let mut lines = Vec::new();
+    if let Some(when) = last.get(5..16) {
+        lines.push(vec![label(&format!("on {}", when.replace('T', " ")), pal)]);
+    }
+    if let Some(count) = upgraded_that_day(app, last, scan) {
+        lines.push(vec![faint(&format!("{count} upgraded"), pal)]);
+        lines.push(vec![faint("that day", pal)]);
+    }
+    column(buf, col, lines);
+    tile_legend(buf, area, vec![faint(&format!("circle = {full}"), pal)]);
+}
+
+fn upgraded_that_day(app: &App, last: &str, scan: &str) -> Option<u64> {
+    let anatomy = app.anatomy.as_ref()?;
+    let day = |iso: &str| iso.get(..10).and_then(|date| epoch(&format!("{date}T00:00:00"))).map(|secs| secs.div_euclid(86400));
+    let back = usize::try_from(day(scan)? - day(last)?).ok()?;
+    let index = anatomy.upgrades_per_day.len().checked_sub(1 + back)?;
+    anatomy.upgrades_per_day.get(index).copied()
+}
+
+fn ring_fixes(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant, cell: (u16, u16), rings: &mut Vec<Placement>) {
+    let inner = panel_frame(buf, area, "OWNER HAS UPDATE", app.tile == Some(3), pal);
+    let (Some(updates), Some(problems)) = (app.stage_done_at[0], app.stage_done_at[1]) else {
+        text(buf, inner.x, inner.y + 2, "linking…", Style::new().fg(pal.faint), inner.width);
+        return;
+    };
+    let done = updates.max(problems);
+    let fixed = |status: &str| status == "possibly-fixed";
+    let mut all: Vec<_> = app.problems.iter().collect();
+    all.sort_by(|a, b| fixed(b.status.as_str()).cmp(&fixed(a.status.as_str())).then_with(|| b.count.cmp(&a.count)).then_with(|| a.subject.cmp(&b.subject)));
+    let fixes: Vec<_> = all.iter().filter(|problem| fixed(problem.status.as_str())).collect();
+    let counted = (fixes.len() as f64 * reveal(app, now, Some(done), 0.0, 600.0)).round() as usize;
+    let most = all.iter().map(|problem| problem.count).max().unwrap_or(1).max(2);
+    let slots = 96u16;
+    let spokes = all.len().min(48);
+    let step = slots / spokes.max(1) as u16;
+    let width = step.saturating_sub(1).max(1);
+    let mut dots = Vec::new();
+    for (k, problem) in all.iter().take(spokes).enumerate() {
+        let lit = fixed(problem.status.as_str()) && k < counted;
+        let rows = (1.0 + 11.0 * (problem.count.max(1) as f64).ln() / (most as f64).ln()).round().clamp(1.0, 12.0) as usize;
+        stack(&mut dots, k as u16 * step, width, 0, usize::from(width) * rows, if lit { pal.teal } else { pal.ink2 }, if lit { 95 } else { 40 });
+    }
+    let tone = if fixes.is_empty() { pal.ink2 } else { pal.teal };
+    let center = vec![(counted.to_string(), tone, 16), (format!("of {}", app.problems.len()), pal.label, 10)];
+    let col = place_ring(rings, inner, cell, crate::ink::RingSpec { slots, dots, ticks: 4, center, ..Default::default() });
+    let shown = fixes.len().min(5) as u16;
+    let top = col.y + col.height.saturating_sub(shown.max(1)) / 2;
+    for (k, problem) in fixes.iter().take(5).enumerate() {
+        keyed(buf, col, top + k as u16, pal.teal, &fit(problem.name(), col.width.saturating_sub(8) as usize), &compact(problem.count), pal.ink, pal);
+    }
+    if fixes.is_empty() {
+        text(buf, col.x, top, "no owner has one", Style::new().fg(pal.faint), col.width);
+    }
+    tile_legend(buf, area, vec![faint("1 wedge = 1 problem · length = records", pal)]);
+}
+
+fn ring_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant, cell: (u16, u16), rings: &mut Vec<Placement>) {
+    let inner = panel_frame(buf, area, "OMARCHY", app.tile == Some(3), pal);
+    let Some(done) = app.stage_done_at[2] else {
+        text(buf, inner.x, inner.y + 2, "checking…", Style::new().fg(pal.faint), inner.width);
+        return;
+    };
+    let Some(notes) = app.omarchy_notes.as_ref() else {
+        if app.updates.iter().any(|update| update.name == "omarchy" || update.name == "omarchy-dev") {
+            text(buf, inner.x, inner.y + 2, "release notes unavailable", Style::new().fg(pal.faint), inner.width);
+        } else {
+            let col = place_ring(rings, inner, cell, crate::ink::RingSpec { slots: 96, ticks: 4, center: vec![("0".to_string(), pal.ink2, 16)], ..Default::default() });
+            column(buf, col, vec![vec![label("up to date", pal)]]);
+        }
+        return;
+    };
+    let counted = (notes.fixes as f64 * reveal(app, now, Some(done), 0.0, 600.0)).round() as u64;
+    let kinds: Vec<(Color, u8)> = std::iter::repeat_n((pal.ink, 9), counted as usize)
+        .chain(std::iter::repeat_n((pal.ink2, 6), notes.improvements as usize))
+        .chain(std::iter::repeat_n((pal.warn, 12), notes.security as usize))
+        .take(48)
+        .collect();
+    let slots = 96u16;
+    let step = slots / kinds.len().max(1) as u16;
+    let width = step.saturating_sub(1).max(1);
+    let mut dots = Vec::new();
+    for (k, (color, rows)) in kinds.iter().enumerate() {
+        stack(&mut dots, k as u16 * step, width, 0, usize::from(width) * usize::from(*rows), *color, 90);
+    }
+    let center = vec![(counted.to_string(), pal.ink, 16), (if notes.fixes == 1 { "fix" } else { "fixes" }.to_string(), pal.label, 10)];
+    let col = place_ring(rings, inner, cell, crate::ink::RingSpec { slots, dots, ticks: 4, center, ..Default::default() });
+    let top = col.y + col.height.saturating_sub(4) / 2;
+    text(buf, col.x, top, &format!("in {} {}", notes.releases, if notes.releases == 1 { "release" } else { "releases" }), Style::new().fg(pal.label), col.width);
+    keyed(buf, col, top + 2, pal.ink2, "improvements", &notes.improvements.to_string(), pal.ink, pal);
+    keyed(buf, col, top + 3, pal.warn, "security", &notes.security.to_string(), if notes.security > 0 { pal.warn } else { pal.ink }, pal);
+    tile_legend(buf, area, vec![faint("1 wedge = 1 note · from the release notes", pal)]);
+}
+
+fn ring_disk(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant, cell: (u16, u16), rings: &mut Vec<Placement>) {
+    let inner = panel_frame(buf, area, "DISK AND PACKAGES", app.tile == Some(4), pal);
+    if app.preflight.is_none() && app.anatomy.is_none() {
+        text(buf, inner.x, inner.y + 1, "measuring…", Style::new().fg(pal.faint), inner.width);
+        return;
+    }
+    let slots = 100u16;
+    let mut dots = Vec::new();
+    let mut center = Vec::new();
+    if let Some(preflight) = &app.preflight {
+        let share = if preflight.disk_total_bytes > 0 { preflight.disk_used_bytes as f64 / preflight.disk_total_bytes as f64 } else { 0.0 };
+        let shown = share * reveal(app, now, app.stage_done_at[3], 0.0, 700.0);
+        let color = if preflight.free_ok { pal.ink2 } else { pal.alert };
+        for k in 0..slots {
+            if f64::from(k) + 0.5 < shown * f64::from(slots) {
+                dots.push((k, 4, crate::ink::RING_ROWS, color, 90));
+            }
+        }
+        center = vec![(format!("{:.0}%", share * 100.0), if preflight.free_ok { pal.ink } else { pal.alert }, 16), ("used".to_string(), pal.label, 10)];
+    }
+    let freeable = app.anatomy.as_ref().and_then(|anatomy| anatomy.cache_freeable_bytes.filter(|_| anatomy.cache_bytes > 0).map(|freeable| (freeable as f64 / anatomy.cache_bytes as f64).clamp(0.0, 1.0)));
+    if let Some(share) = freeable {
+        for k in 0..slots {
+            let free = f64::from(k) + 0.5 >= (1.0 - share) * f64::from(slots);
+            dots.push((k, 0, 3, if free { pal.warn } else { pal.ink2 }, if free { 95 } else { 45 }));
+        }
+    }
+    let col = place_ring(rings, inner, cell, crate::ink::RingSpec { slots, dots, ticks: 10, center, ..Default::default() });
+    let top = col.y + col.height.saturating_sub(7) / 2;
+    match &app.preflight {
+        Some(preflight) => row(buf, col, top, "available", &bytes(preflight.free_bytes), if preflight.free_ok { pal.ink } else { pal.alert }, pal),
+        None => text(buf, col.x, top, "measuring…", Style::new().fg(pal.faint), col.width),
+    }
+    let Some(anatomy) = &app.anatomy else {
+        text(buf, col.x, top + 1, "counting packages…", Style::new().fg(pal.faint), col.width);
+        return;
+    };
+    row(buf, col, top + 1, "installed", &thousands(anatomy.packages), pal.ink, pal);
+    row(buf, col, top + 2, "explicit", &thousands(anatomy.explicit), pal.ink, pal);
+    row(buf, col, top + 3, "foreign", &thousands(anatomy.repos.get("aur").copied().unwrap_or(0)), pal.ink, pal);
+    row(buf, col, top + 4, "orphans", &thousands(anatomy.orphans), if anatomy.orphans > 0 { pal.warn } else { pal.ink }, pal);
+    let cache = bytes(anatomy.cache_bytes);
+    let cache_label = if 13 + cache.len() > col.width as usize { "cache" } else { "pacman cache" };
+    row(buf, col, top + 5, cache_label, &cache, pal.ink, pal);
+    match anatomy.cache_freeable_bytes {
+        Some(freeable) if freeable > 0 => text(buf, col.x, top + 6, &format!("{} freeable", bytes(freeable)), Style::new().fg(pal.warn), col.width),
+        Some(_) => text(buf, col.x, top + 6, "nothing to free", Style::new().fg(pal.faint), col.width),
+        None => text(buf, col.x, top + 6, "freeable: unknown", Style::new().fg(pal.faint), col.width),
+    }
+    tile_legend(buf, area, vec![faint("outer disk / · inner cache ", pal), Span::styled("●", Style::new().fg(pal.warn)), faint(" freeable", pal)]);
+}
+
+fn ring_checks(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, cell: (u16, u16), rings: &mut Vec<Placement>) {
+    let inner = panel_frame(buf, area, "BEFORE YOU UPDATE", app.tile == Some(5), pal);
+    tile_legend(
+        buf,
+        area,
+        vec![
+            Span::styled("●", Style::new().fg(pal.alert)),
+            faint(" act  ", pal),
+            Span::styled("●", Style::new().fg(pal.warn)),
+            faint(" look  ", pal),
+            Span::styled("●", Style::new().fg(pal.ok)),
+            faint(" ok", pal),
+        ],
+    );
+    let checks = checks(app);
+    if checks.is_empty() {
+        return;
+    }
+    let tone = |severity: Severity| match severity {
+        Severity::Bad => pal.alert,
+        Severity::Warn => pal.warn,
+        Severity::Ok => pal.ok,
+        Severity::Neutral => pal.ink,
+    };
+    let slots = 96u16;
+    let step = slots / checks.len().max(1) as u16;
+    let width = step.saturating_sub(2).max(1);
+    let mut dots = Vec::new();
+    let mut glow = Vec::new();
+    for (k, (_, _, severity)) in checks.iter().enumerate() {
+        let rows: u8 = match severity {
+            Severity::Bad => 12,
+            Severity::Warn => 8,
+            _ => 4,
+        };
+        let slot = k as u16 * step + 1;
+        stack(&mut dots, slot, width, 0, usize::from(width) * usize::from(rows), tone(*severity), 95);
+        if *severity == Severity::Bad {
+            glow.push((slot + width / 2, 6, pal.alert));
+        }
+    }
+    let center = match app.finished_at.map(|_| app.verdict()) {
+        Some((verdict, severity)) => {
+            let color = if severity == Severity::Neutral { pal.ink2 } else { tone(severity) };
+            match verdict.match_indices(' ').map(|(at, _)| at).min_by_key(|at| (*at).max(verdict.len() - at - 1)) {
+                Some(at) => vec![(verdict[..at].to_string(), color, 10), (verdict[at + 1..].to_string(), color, 10)],
+                None => vec![(verdict, color, 10)],
+            }
+        }
+        None => Vec::new(),
+    };
+    let col = place_ring(rings, inner, cell, crate::ink::RingSpec { slots, dots, ticks: checks.len() as u16, glow, center, ..Default::default() });
+    let top = col.y + col.height.saturating_sub(checks.len() as u16) / 2;
+    for (k, (name, value, severity)) in checks.iter().enumerate() {
+        let y = top + k as u16;
+        let room = col.width.saturating_sub(9) as usize;
+        let value = match value.as_str() {
+            "omarchy-update" if value.chars().count() > room => "omarchy",
+            "after update" if value.chars().count() > room => "after",
+            other => other,
+        };
+        text(buf, col.x, y, name, Style::new().fg(pal.label), 8);
+        right(buf, col.right(), y, &fit(value, room), Style::new().fg(tone(*severity)));
+    }
+}
+
+fn draw_text_tiles(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant) {
     let count = 6u16;
     let width = area.width.saturating_sub(2) / count;
     for index in 0..count {
@@ -153,7 +609,7 @@ fn draw_tiles(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Insta
 }
 
 fn tile_pending(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant) {
-    let inner = frame(buf, area, "¹PENDING", app.tile == Some(0), pal);
+    let inner = panel_frame(buf, area, "¹PENDING", app.tile == Some(0), pal);
     let Some(done) = app.stage_done_at[0] else {
         text(buf, inner.x, inner.y + 2, "checking…", Style::new().fg(pal.faint), inner.width);
         return;
@@ -191,7 +647,7 @@ fn tile_pending(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
 }
 
 fn tile_days(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant) {
-    let inner = frame(buf, area, "PROBLEMS / DAY", app.tile == Some(1), pal);
+    let inner = panel_frame(buf, area, "PROBLEMS / DAY", app.tile == Some(1), pal);
     let Some(done) = app.stage_done_at[1] else {
         text(buf, inner.x, inner.y + 2, "reading the journal…", Style::new().fg(pal.faint), inner.width);
         return;
@@ -247,7 +703,7 @@ fn tile_days(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
 }
 
 fn tile_since(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant) {
-    let inner = frame(buf, area, "SINCE UPGRADE", app.tile == Some(2), pal);
+    let inner = panel_frame(buf, area, "SINCE UPGRADE", app.tile == Some(2), pal);
     let (Some(last), Some(scan)) = (app.last_upgrade.as_deref(), app.scan_time.as_deref()) else {
         let message = if app.start_at.is_some() { "no full upgrade logged" } else { "reading pacman.log…" };
         text(buf, inner.x, inner.y + 2, message, Style::new().fg(pal.faint), inner.width);
@@ -283,16 +739,8 @@ fn tile_since(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Insta
     legend(buf, area, "1 ■ = 1 day", pal);
 }
 
-fn upgraded_that_day(app: &App, last: &str, scan: &str) -> Option<u64> {
-    let anatomy = app.anatomy.as_ref()?;
-    let day = |iso: &str| iso.get(..10).and_then(|date| epoch(&format!("{date}T00:00:00"))).map(|secs| secs.div_euclid(86400));
-    let back = usize::try_from(day(scan)? - day(last)?).ok()?;
-    let index = anatomy.upgrades_per_day.len().checked_sub(1 + back)?;
-    anatomy.upgrades_per_day.get(index).copied()
-}
-
 fn tile_fixes(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant) {
-    let inner = frame(buf, area, "OWNER HAS UPDATE", app.tile == Some(3), pal);
+    let inner = panel_frame(buf, area, "OWNER HAS UPDATE", app.tile == Some(3), pal);
     let (Some(updates), Some(problems)) = (app.stage_done_at[0], app.stage_done_at[1]) else {
         text(buf, inner.x, inner.y + 2, "linking…", Style::new().fg(pal.faint), inner.width);
         return;
@@ -323,7 +771,7 @@ fn tile_fixes(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Insta
 }
 
 fn tile_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant) {
-    let inner = frame(buf, area, "OMARCHY", app.tile == Some(3), pal);
+    let inner = panel_frame(buf, area, "OMARCHY", app.tile == Some(3), pal);
     let Some(done) = app.stage_done_at[2] else {
         text(buf, inner.x, inner.y + 2, "checking…", Style::new().fg(pal.faint), inner.width);
         return;
@@ -348,7 +796,7 @@ fn tile_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
 }
 
 fn tile_disk(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant) {
-    let inner = frame(buf, area, "DISK AND PACKAGES", app.tile == Some(4), pal);
+    let inner = panel_frame(buf, area, "DISK AND PACKAGES", app.tile == Some(4), pal);
     if let Some(preflight) = &app.preflight {
         let share = if preflight.disk_total_bytes > 0 { preflight.disk_used_bytes as f64 / preflight.disk_total_bytes as f64 } else { 0.0 };
         text(buf, inner.x, inner.y + 1, "disk /", Style::new().fg(pal.label), 6);
@@ -393,9 +841,55 @@ fn tile_disk(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
 }
 
 fn tile_checks(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette) {
-    let inner = frame(buf, area, "BEFORE YOU UPDATE", app.tile == Some(5), pal);
+    let inner = panel_frame(buf, area, "BEFORE YOU UPDATE", app.tile == Some(5), pal);
+    let checks = checks(app);
+    let tone = |severity: Severity| match severity {
+        Severity::Bad => pal.alert,
+        Severity::Warn => pal.warn,
+        Severity::Ok => pal.ok,
+        Severity::Neutral => pal.ink,
+    };
+    for (k, (name, value, severity)) in checks.iter().enumerate() {
+        let y = inner.y + 1 + k as u16;
+        let room = inner.width.saturating_sub(11) as usize;
+        let value = match value.as_str() {
+            "omarchy-update" if value.chars().count() > room => "omarchy",
+            "after update" if value.chars().count() > room => "after",
+            other => other,
+        };
+        text(buf, inner.x, y, "●", Style::new().fg(tone(*severity)), 1);
+        text(buf, inner.x + 2, y, name, Style::new().fg(pal.label), 8);
+        right(buf, inner.right(), y, &fit(value, room), Style::new().fg(tone(*severity)));
+    }
+    if app.finished_at.is_some() {
+        let (verdict, severity) = app.verdict();
+        let bg = match severity {
+            Severity::Bad => pal.alert,
+            Severity::Warn => pal.warn,
+            Severity::Ok => pal.ok,
+            Severity::Neutral => pal.ink2,
+        };
+        text(buf, inner.x, inner.y + 9, &format!(" {verdict} "), Style::new().fg(pal.page).bg(bg).add_modifier(Modifier::BOLD), inner.width);
+    }
+    let legend_style = Style::new().fg(pal.faint);
+    legend_spans(
+        buf,
+        area,
+        vec![
+            Span::styled("●", Style::new().fg(pal.alert)),
+            Span::styled(" act ", legend_style),
+            Span::styled("●", Style::new().fg(pal.warn)),
+            Span::styled(" look ", legend_style),
+            Span::styled("●", Style::new().fg(pal.ok)),
+            Span::styled(" ok", legend_style),
+        ],
+        pal,
+    );
+}
+
+fn checks(app: &App) -> Vec<(&'static str, String, Severity)> {
     let level = |ok: bool, bad: Severity| if ok { Severity::Ok } else { bad };
-    let mut checks: Vec<(&str, String, Severity)> = Vec::new();
+    let mut checks: Vec<(&'static str, String, Severity)> = Vec::new();
     if app.stage_done_at[0].is_some() {
         let high = app.high();
         checks.push(("risk", if high > 0 { "high" } else { "no high" }.into(), level(high == 0, Severity::Bad)));
@@ -442,53 +936,12 @@ fn tile_checks(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette) {
         let failed = app.update_errors.len() + app.problem_errors.len() + usize::from(app.news_failed);
         checks.push(("checks", if failed > 0 { format!("{failed} failed") } else { "all ran".into() }, level(failed == 0, Severity::Warn)));
     }
-    let tone = |severity: Severity| match severity {
-        Severity::Bad => pal.alert,
-        Severity::Warn => pal.warn,
-        Severity::Ok => pal.ok,
-        Severity::Neutral => pal.ink,
-    };
-    for (k, (name, value, severity)) in checks.iter().enumerate() {
-        let y = inner.y + 1 + k as u16;
-        let room = inner.width.saturating_sub(11) as usize;
-        let value = match value.as_str() {
-            "omarchy-update" if value.chars().count() > room => "omarchy",
-            "after update" if value.chars().count() > room => "after",
-            other => other,
-        };
-        text(buf, inner.x, y, "●", Style::new().fg(tone(*severity)), 1);
-        text(buf, inner.x + 2, y, name, Style::new().fg(pal.label), 8);
-        right(buf, inner.right(), y, &fit(value, room), Style::new().fg(tone(*severity)));
-    }
-    if app.finished_at.is_some() {
-        let (verdict, severity) = app.verdict();
-        let bg = match severity {
-            Severity::Bad => pal.alert,
-            Severity::Warn => pal.warn,
-            Severity::Ok => pal.ok,
-            Severity::Neutral => pal.ink2,
-        };
-        text(buf, inner.x, inner.y + 9, &format!(" {verdict} "), Style::new().fg(pal.page).bg(bg).add_modifier(Modifier::BOLD), inner.width);
-    }
-    let legend_style = Style::new().fg(pal.faint);
-    legend_spans(
-        buf,
-        area,
-        vec![
-            Span::styled("●", Style::new().fg(pal.alert)),
-            Span::styled(" act ", legend_style),
-            Span::styled("●", Style::new().fg(pal.warn)),
-            Span::styled(" look ", legend_style),
-            Span::styled("●", Style::new().fg(pal.ok)),
-            Span::styled(" ok", legend_style),
-        ],
-        pal,
-    );
+    checks
 }
 
 fn list_frame(buf: &mut Buffer, area: Rect, app: &App, pane: Pane, title: &str, legend_text: &str, pal: &Palette) -> Rect {
     let focused = app.list_focused(pane);
-    let inner = frame(buf, area, title, focused, pal);
+    let inner = panel_frame(buf, area, title, focused, pal);
     let list = &app.lists[pane.index()];
     let editing = focused && app.editing;
     if editing || !list.filter.is_empty() {
@@ -498,8 +951,41 @@ fn list_frame(buf: &mut Buffer, area: Rect, app: &App, pane: Pane, title: &str, 
         }
         put_right(buf, inner.right(), area.y + 1, spans);
     }
-    legend(buf, area, legend_text, pal);
+    text(buf, inner.x, area.bottom() - 2, legend_text, Style::new().fg(pal.faint), inner.width);
     Rect::new(inner.x, inner.y + 1, inner.width, inner.height.saturating_sub(3))
+}
+
+fn outline(buf: &mut Buffer, area: Rect, style: Style) {
+    if area.width < 4 || area.height < 3 {
+        return;
+    }
+    let (right, bottom) = (area.right() - 1, area.bottom() - 1);
+    for x in area.x + 1..right {
+        buf[(x, area.y)].set_symbol("─").set_style(style);
+        buf[(x, bottom)].set_symbol("─").set_style(style);
+    }
+    for y in area.y + 1..bottom {
+        buf[(area.x, y)].set_symbol("│").set_style(style);
+        buf[(right, y)].set_symbol("│").set_style(style);
+    }
+    buf[(area.x, area.y)].set_symbol("┌").set_style(style);
+    buf[(right, area.y)].set_symbol("┐").set_style(style);
+    buf[(area.x, bottom)].set_symbol("└").set_style(style);
+    buf[(right, bottom)].set_symbol("┘").set_style(style);
+}
+
+fn corners(buf: &mut Buffer, area: Rect, style: Style) {
+    if area.width < 8 || area.height < 4 {
+        return;
+    }
+    let (left, right, top, bottom) = (area.x, area.right() - 1, area.y, area.bottom() - 1);
+    for (x, y, corner, inward, down) in [(left, top, "┌", true, true), (right, top, "┐", false, true), (left, bottom, "└", true, false), (right, bottom, "┘", false, false)] {
+        buf[(x, y)].set_symbol(corner).set_style(style);
+        for step in 1..=2u16 {
+            buf[(if inward { x + step } else { x - step }, y)].set_symbol("─").set_style(style);
+        }
+        buf[(x, if down { y + 1 } else { y - 1 })].set_symbol("│").set_style(style);
+    }
 }
 
 fn window(selected: usize, total: usize, rows: usize) -> (usize, usize) {
@@ -694,6 +1180,8 @@ fn draw_updates(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
     let rows = body.height.saturating_sub(1) as usize;
     let selected = app.lists[0].selected.min(updates.len().saturating_sub(1));
     let (start, end) = window(selected, updates.len(), rows);
+    let focused = app.list_focused(Pane::Updates);
+    let mut marks = Vec::new();
     for (row, index) in (start..end).enumerate() {
         let update = updates[index];
         let y = body.y + 1 + row as u16;
@@ -702,9 +1190,13 @@ fn draw_updates(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
             "medium" => (2, pal.warn),
             _ => (1, pal.ink2),
         };
-        text(buf, body.x, y, &"■".repeat(level), Style::new().fg(color), 3);
-        text(buf, body.x + level as u16, y, &"■".repeat(3 - level), Style::new().fg(pal.grid), 3);
         let chosen = index == selected;
+        if app.pictures {
+            marks.push((level as u8 * 2, color, chosen.then_some(if focused { pal.select } else { pal.kpi })));
+        } else {
+            text(buf, body.x, y, &"■".repeat(level), Style::new().fg(color), 3);
+            text(buf, body.x + level as u16, y, &"■".repeat(3 - level), Style::new().fg(pal.grid), 3);
+        }
         text(buf, body.x + 5, y, &fit(&update.name, name_w as usize), Style::new().fg(pal.ink).add_modifier(if chosen { Modifier::BOLD } else { Modifier::empty() }), name_w);
         let size = update.download_bytes.map(short_bytes).unwrap_or_default();
         let room = body.right().saturating_sub(version_x + 8);
@@ -718,6 +1210,10 @@ fn draw_updates(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
             select_row(buf, line, app.list_focused(Pane::Updates), pal);
             scene.chosen[0] = Some(line);
         }
+    }
+    if !marks.is_empty() {
+        let rect = Rect::new(body.x, body.y + 1, 3, marks.len() as u16);
+        scene.placements.push(Placement { rect, picture: Picture::Marks(Box::new(crate::ink::MarksSpec { columns: 6, rows: marks })) });
     }
     if updates.is_empty() {
         let message = if app.stage_done_at[0].is_none() {
@@ -737,7 +1233,7 @@ fn draw_problems(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: 
     let problems = app.visible_problems();
     let since = app.since.as_deref().and_then(|since| since.get(5..10)).map(|date| format!(" since {date}")).unwrap_or_default();
     let title = format!("⁴PROBLEMS · {} {}{since}", problems.len(), if problems.len() == 1 { "source" } else { "sources" });
-    let body = list_frame(buf, area, app, Pane::Problems, &title, "→ = the owner has an update · bars on a log scale", pal);
+    let body = list_frame(buf, area, app, Pane::Problems, &title, if app.pictures { "→ = the owner has an update · dots on a log scale" } else { "→ = the owner has an update · bars on a log scale" }, pal);
     let header = Style::new().fg(pal.faint);
     text(buf, body.x, body.y, "count", header, 6);
     text(buf, body.x + 16, body.y, "subject · owner", header, 30);
@@ -745,18 +1241,27 @@ fn draw_problems(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: 
     let selected = app.lists[1].selected.min(problems.len().saturating_sub(1));
     let (start, end) = window(selected, problems.len(), rows);
     let max = problems.iter().map(|problem| problem.count).max().unwrap_or(1).max(1) as f64;
+    let focused = app.list_focused(Pane::Problems);
+    let mut marks = Vec::new();
     for (row, index) in (start..end).enumerate() {
         let problem = problems[index];
         let y = body.y + 1 + row as u16 * 2;
         right(buf, body.x + 5, y, &compact(problem.count), Style::new().fg(pal.ink).add_modifier(Modifier::BOLD));
-        let bar = ((problem.count as f64).ln_1p() / max.ln_1p() * 8.0).round().clamp(1.0, 8.0) as usize;
         let bar_color = match problem.kind.as_str() {
             "crash" => pal.teal,
             "failed-unit" => pal.alert,
             _ => pal.ink2,
         };
-        text(buf, body.x + 6, y, &"■".repeat(bar), Style::new().fg(bar_color), 8);
-        text(buf, body.x + 6 + bar as u16, y, &"■".repeat(8 - bar), Style::new().fg(pal.grid), 8);
+        if app.pictures {
+            let dots = ((problem.count as f64).ln_1p() / max.ln_1p() * 16.0).round().clamp(1.0, 16.0) as u8;
+            let shade = (index == selected).then_some(if focused { pal.select } else { pal.kpi });
+            marks.push((dots, bar_color, shade));
+            marks.push((0, bar_color, shade));
+        } else {
+            let bar = ((problem.count as f64).ln_1p() / max.ln_1p() * 8.0).round().clamp(1.0, 8.0) as usize;
+            text(buf, body.x + 6, y, &"■".repeat(bar), Style::new().fg(bar_color), 8);
+            text(buf, body.x + 6 + bar as u16, y, &"■".repeat(8 - bar), Style::new().fg(pal.grid), 8);
+        }
         let kind = kind_label(&problem.kind);
         let kind_color = match problem.kind.as_str() {
             "crash" => pal.teal,
@@ -781,6 +1286,10 @@ fn draw_problems(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: 
             select_row(buf, lines, app.list_focused(Pane::Problems), pal);
             scene.chosen[1] = Some(lines);
         }
+    }
+    if !marks.is_empty() {
+        let rect = Rect::new(body.x + 6, body.y + 1, 8, marks.len() as u16);
+        scene.placements.push(Placement { rect, picture: Picture::Marks(Box::new(crate::ink::MarksSpec { columns: 16, rows: marks })) });
     }
     if problems.is_empty() {
         let message = if app.stage_done_at[1].is_none() {
@@ -1552,6 +2061,7 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
     let Some(block) = block else {
         let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(6));
         let rect = place(area, app, scene, width, height);
+        scene.overlay = Some(rect);
         clear_around(buf, area, rect, pal);
         clear(buf, rect, pal);
         let inner = frame(buf, rect, &title, true, pal);
@@ -1563,6 +2073,7 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
     let facts_w = 46u16;
     let height = ((lines.len() as u16).max(block_rows) + 4).min(area.height.saturating_sub(6));
     let rect = place(area, app, scene, width, height);
+    scene.overlay = Some(rect);
     clear_around(buf, area, rect, pal);
     clear(buf, rect, pal);
     let inner = frame(buf, rect, &title, true, pal);
@@ -2210,10 +2721,11 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
     let held = |target: Target| motion.held(target, now) || (waiting && !delivered(target));
     let mut y = area.y + 1;
     if let Some(tiles) = tiles {
-        draw_tiles(buf, tiles, app, pal, now);
+        draw_tiles(buf, tiles, app, pal, now, cell, &mut scene.placements);
         for index in 0..6u16 {
             if held(Target::Tile(index as u8)) {
                 let rect = tile_rect(index);
+                scene.placements.retain(|placement| placement.rect.intersection(rect).is_empty());
                 for row in rect.y + 2..rect.bottom() - 1 {
                     for x in rect.x + 1..rect.right() - 1 {
                         buf[(x, row)].set_symbol(" ");
@@ -2531,26 +3043,20 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
             buf[cell].set_symbol(symbol).set_fg(color);
         }
     }
-    let sight_color = pal.ink2;
+    let sight_color = pal.eye;
     for (cell, bits) in &sight_bits {
         if cell.0 >= buf.area.right() || cell.1 >= buf.area.bottom() {
             continue;
         }
         let mask = masks.get(cell).copied().unwrap_or(0) | bits;
-        let weight = |bit: u8| if bits & bit != 0 { 2 } else { u8::from(mask & bit != 0) };
+        let weight = |bit: u8| u8::from(mask & bit != 0);
         buf[*cell].set_symbol(weighted(weight(UP), weight(DOWN), weight(LEFT), weight(RIGHT))).set_fg(sight_color);
     }
     for index in &sight_done {
-        if let Some((cell, symbol)) = wires[*index].1.connector {
-            let heavy_symbol = match symbol {
-                "┬" => weighted(0, 2, 1, 1),
-                "┴" => weighted(2, 0, 1, 1),
-                other => other,
-            };
-            buf[cell].set_symbol(heavy_symbol);
-            if lit_by(*index).is_none() {
-                buf[cell].set_fg(sight_color);
-            }
+        if let Some((cell, _)) = wires[*index].1.connector
+            && lit_by(*index).is_none()
+        {
+            buf[cell].set_fg(sight_color);
         }
     }
     let target_rect = match current.filter(|_| lock > 0.0) {
@@ -2562,16 +3068,16 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
         let mut mark = |x: u16, y: u16, symbol: &str| {
             if x < buf.area.right() && y < buf.area.bottom() {
                 let base = buf[(x, y)].fg;
-                buf[(x, y)].set_symbol(symbol).set_fg(mix(base, pal.ink, f64::from(lock)));
+                buf[(x, y)].set_symbol(symbol).set_fg(mix(base, pal.eye, f64::from(lock)));
             }
         };
         let (left, right, top, bottom) = (rect.x, rect.right() - 1, rect.y, rect.bottom() - 1);
-        for (x, y, corner, inward, down) in [(left, top, "┏", true, true), (right, top, "┓", false, true), (left, bottom, "┗", true, false), (right, bottom, "┛", false, false)] {
+        for (x, y, corner, inward, down) in [(left, top, "┌", true, true), (right, top, "┐", false, true), (left, bottom, "└", true, false), (right, bottom, "┘", false, false)] {
             mark(x, y, corner);
             for step in 1..=2u16 {
-                mark(if inward { x + step } else { x - step }, y, "━");
+                mark(if inward { x + step } else { x - step }, y, "─");
             }
-            mark(x, if down { y + 1 } else { y - 1 }, "┃");
+            mark(x, if down { y + 1 } else { y - 1 }, "│");
         }
     }
     for (index, signal) in &signals {

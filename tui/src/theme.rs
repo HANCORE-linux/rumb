@@ -233,6 +233,8 @@ fn derive(c: &HashMap<String, String>) -> Option<Palette> {
         .unwrap_or(theme_accent);
     let accent = legible(signal, panel, ink);
     let relation = legible(color("green").unwrap_or(ink), panel, ink);
+    let taken = [red, yellow, color("green").unwrap_or(ink), signal];
+    let eye = ["cyan", "blue", "magenta"].into_iter().filter_map(color).find(|candidate| taken.iter().all(|other| apart(*candidate, *other) && candidate != other)).map_or(ramp(0.7), |candidate| legible(candidate, panel, ink));
     Some(Palette {
         page,
         panel,
@@ -252,6 +254,7 @@ fn derive(c: &HashMap<String, String>) -> Option<Palette> {
         relation,
         ok: relation,
         options: color("bright_red").unwrap_or_else(|| mix(red, Color::Rgb(255, 255, 255), 0.2)),
+        eye,
     })
 }
 
@@ -407,6 +410,28 @@ mod tests {
             let theme = &bundled()[name];
             assert_eq!(derive(theme).unwrap().teal, legible(hex(&theme["accent"]).unwrap(), derive(theme).unwrap().panel, derive(theme).unwrap().ink), "{name}");
         }
+    }
+
+    #[test]
+    fn the_eye_takes_a_free_color_of_the_theme() {
+        let mut own = 0;
+        for (name, theme) in bundled() {
+            let pal = derive(&theme).unwrap();
+            assert!(contrast(pal.eye, pal.panel) >= 3.0, "{name}");
+            if pal.eye == mix(pal.panel, pal.ink, 0.7) {
+                continue;
+            }
+            own += 1;
+            let source = ["cyan", "blue", "magenta"].iter().filter_map(|key| theme.get(*key).and_then(|value| hex(value))).find(|color| legible(*color, pal.panel, pal.ink) == pal.eye);
+            let source = source.unwrap_or_else(|| panic!("{name} takes no color of its own"));
+            for key in ["red", "yellow", "green"] {
+                if let Some(color) = theme.get(key).and_then(|value| hex(value)) {
+                    assert!(apart(source, color) && source != color, "{name} {key}");
+                }
+            }
+        }
+        assert_eq!(own, 37);
+        assert_eq!(derive(&bundled()["labra"]).unwrap().eye, Color::Rgb(0x7d, 0x7a, 0x56));
     }
 
     #[test]

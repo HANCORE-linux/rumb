@@ -7,7 +7,7 @@ use std::f32::consts::TAU;
 use std::sync::Arc;
 
 use ratatui::style::Color;
-use tiny_skia::{Color as SkColor, FillRule, LineCap, Mask, Paint, PathBuilder, Pixmap, Stroke, StrokeDash, Transform};
+use tiny_skia::{Color as SkColor, FillRule, GradientStop, LineCap, Mask, Paint, PathBuilder, Pixmap, Point, RadialGradient, SpreadMode, Stroke, StrokeDash, Transform};
 
 use crate::app::Subsystem;
 use crate::palette::{Palette, mix};
@@ -127,6 +127,206 @@ pub struct FanSpec {
 }
 
 pub const DIAL: f32 = 0.84;
+
+/// A ring of dots for a tile, after a radial dot chart: `slots` columns run
+/// clockwise from the top, and `dots` are runs of dots outward (slot, from row,
+/// to row, color, alpha in percent). The track inside them is lit up to `track`.
+#[derive(Debug, Default, Hash)]
+pub struct RingSpec {
+    pub slots: u16,
+    pub dots: Vec<(u16, u8, u8, Color, u8)>,
+    pub track: Option<u16>,
+    pub ticks: u16,
+    pub glow: Vec<(u16, u8, Color)>,
+    pub tag: Option<(u16, u8, String, Color)>,
+    pub hand: Option<u16>,
+    pub center: Vec<(String, Color, u8)>,
+}
+
+pub const RING_ROWS: u8 = 12;
+
+fn fill_all(pixmap: &mut Pixmap, builder: PathBuilder, color: SkColor) {
+    let Some(path) = builder.finish() else { return };
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = true;
+    pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+}
+
+pub fn ring(spec: &RingSpec, pal: &Palette, width: u32, height: u32, cell_height: f32) -> Option<Pixmap> {
+    let (mut pixmap, unit) = canvas(width, height, pal.page, cell_height)?;
+    let (w, h) = (width as f32, height as f32);
+    let c = (w / 2.0, h / 2.0);
+    let r = (w.min(h) / 2.0 - 1.5 * unit).max(8.0);
+    let hub = r * 0.4;
+    let (first, last) = (r * 0.53, r * 0.985);
+    let pitch = (last - first) / f32::from(RING_ROWS - 1);
+    let dot = (pitch * 0.31).max(0.5);
+    let slots = f32::from(spec.slots.max(1));
+    let at = |slot: f32, radius: f32| {
+        let (sin, cos) = (-TAU / 4.0 + slot / slots * TAU).sin_cos();
+        (c.0 + cos * radius, c.1 + sin * radius)
+    };
+    let radius = |row: u8| first + f32::from(row) * pitch;
+    for (slot, row, color) in &spec.glow {
+        let (x, y) = at(f32::from(*slot) + 0.5, radius(*row));
+        let reach = r * 0.34;
+        let stops = vec![GradientStop::new(0.0, sk(*color, 0.38)), GradientStop::new(1.0, sk(*color, 0.0))];
+        if let (Some(shader), Some(path)) = (RadialGradient::new(Point::from_xy(x, y), 0.0, Point::from_xy(x, y), reach, stops, SpreadMode::Pad, Transform::identity()), PathBuilder::from_circle(x, y, reach)) {
+            let paint = Paint { shader, anti_alias: true, ..Paint::default() };
+            pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        }
+    }
+    let mut pen = Pen { pixmap: &mut pixmap, unit, mask: None };
+    pen.disc(c.0, c.1, hub, sk(mix(pal.page, pal.ink, 0.05), 1.0));
+    pen.circle(c.0, c.1, hub, sk(pal.rule, 1.0), 0.8, None);
+    let mut ticks = PathBuilder::new();
+    for k in 0..spec.ticks {
+        let slot = f32::from(k) / f32::from(spec.ticks) * slots;
+        let (a, b) = (at(slot, r * 0.415), at(slot, r * if k == 0 { 0.47 } else { 0.445 }));
+        ticks.move_to(a.0, a.1);
+        ticks.line_to(b.0, b.1);
+    }
+    stroke_all(pen.pixmap, ticks, sk(pal.faint, 1.0), 0.8 * unit, None);
+    let (mut lit, mut ghost) = (PathBuilder::new(), PathBuilder::new());
+    for slot in 0..spec.slots {
+        let (x, y) = at(f32::from(slot) + 0.5, r * 0.48);
+        if spec.track.is_some_and(|end| slot < end) {
+            lit.push_circle(x, y, dot * 0.7);
+        } else {
+            ghost.push_circle(x, y, dot * 0.7);
+        }
+    }
+    fill_all(pen.pixmap, lit, sk(pal.ink2, 0.75));
+    fill_all(pen.pixmap, ghost, sk(pal.faint, 0.5));
+    let mut groups: Vec<(Color, u8, PathBuilder)> = Vec::new();
+    for (slot, from, to, color, alpha) in &spec.dots {
+        let index = match groups.iter().position(|(owner, shade, _)| owner == color && shade == alpha) {
+            Some(index) => index,
+            None => {
+                groups.push((*color, *alpha, PathBuilder::new()));
+                groups.len() - 1
+            }
+        };
+        for row in *from..(*to).min(RING_ROWS) {
+            let (x, y) = at(f32::from(*slot) + 0.5, radius(row));
+            groups[index].2.push_circle(x, y, dot);
+        }
+    }
+    for (color, alpha, builder) in groups {
+        fill_all(pen.pixmap, builder, sk(color, f32::from(alpha) / 100.0));
+    }
+    if let Some(turn) = spec.hand {
+        let slot = f32::from(turn.min(1000)) / 1000.0 * slots;
+        let (from, to) = (at(slot, hub), at(slot, r - unit));
+        pen.line(from, to, sk(pal.ink2, 0.9), 0.8);
+        pen.disc(to.0, to.1, 1.9 * unit, sk(pal.ink, 1.0));
+    }
+    if let Some((slot, row, label, color)) = &spec.tag
+        && let Some(atlas) = sized_atlas(9.0 * cell_height / 17.0)
+    {
+        let (x, y) = at(f32::from(*slot) + 0.5, radius(*row) + 2.5 * unit);
+        let line: Glyphs = label.chars().map(|ch| (ch, sk(*color, 1.0))).collect();
+        let span = line.len() as f32 * atlas.advance as f32;
+        let left = if x >= c.0 { x + 1.5 * unit } else { x - 1.5 * unit - span };
+        let baseline = (y + atlas.ascent as f32 * 0.45).clamp(atlas.ascent as f32, h - (atlas.height - atlas.ascent) as f32);
+        type_line(pen.pixmap, atlas, left.clamp(0.0, (w - span).max(0.0)), baseline, &line, &|_, _| 1.0);
+    }
+    let lines: Vec<(&Atlas, Glyphs)> = centre_lines(&spec.center, c, hub, cell_height)
+        .into_iter()
+        .filter_map(|(text, color, size)| Some((sized_atlas(size * cell_height / 17.0)?, text.chars().map(|ch| (ch, sk(color, 1.0))).collect())))
+        .collect();
+    let mut top = (c.1 - lines.iter().map(|(atlas, _)| atlas.height as f32).sum::<f32>() / 2.0).round();
+    for (atlas, line) in &lines {
+        let x = (c.0 - line.len() as f32 * atlas.advance as f32 / 2.0).round();
+        type_line(pen.pixmap, atlas, x, top + atlas.ascent as f32, line, &|_, _| 1.0);
+        top += atlas.height as f32;
+    }
+    Some(pixmap)
+}
+
+/// The lines in a ring's centre: a line whose letters come closer than 9 % of the
+/// disc's radius to its rim breaks at a space; only a line without one shrinks.
+fn centre_lines(center: &[(String, Color, u8)], c: (f32, f32), hub: f32, cell_height: f32) -> Vec<(String, Color, f32)> {
+    let pick = |size: f32| sized_atlas(size * cell_height / 17.0);
+    let gap = hub * 0.09;
+    let clearance = |center: &[(String, Color, f32)]| -> Option<Vec<f32>> {
+        let atlases = center.iter().map(|line| pick(line.2)).collect::<Option<Vec<&Atlas>>>()?;
+        let mut top = (c.1 - atlases.iter().map(|atlas| atlas.height as f32).sum::<f32>() / 2.0).round();
+        let mut out = Vec::new();
+        for ((text, _, _), atlas) in center.iter().zip(&atlases) {
+            let left = (c.0 - text.chars().count() as f32 * atlas.advance as f32 / 2.0).round();
+            let mut room = f32::MAX;
+            for (i, ch) in text.chars().enumerate() {
+                let Some(bitmap) = atlas.glyph(ch) else { continue };
+                for j in 0..atlas.height {
+                    for k in 0..atlas.advance {
+                        if bitmap[(j * atlas.advance + k) as usize] > 76 {
+                            let (x, y) = (left + (i as u32 * atlas.advance + k) as f32 + 0.5, top + j as f32 + 0.5);
+                            room = room.min(hub - (x - c.0).hypot(y - c.1));
+                        }
+                    }
+                }
+            }
+            out.push(room);
+            top += atlas.height as f32;
+        }
+        Some(out)
+    };
+    let mut center: Vec<(String, Color, f32)> = center.iter().map(|(text, color, size)| (text.clone(), *color, f32::from(*size))).collect();
+    for _ in 0..12 {
+        let Some(rooms) = clearance(&center) else { break };
+        let Some(k) = rooms.iter().position(|room| *room < gap) else { break };
+        let (text, color, size) = center[k].clone();
+        if let Some(at) = text.match_indices(' ').map(|(at, _)| at).min_by_key(|at| (*at).max(text.len() - at - 1)) {
+            center.splice(k..=k, [(text[..at].to_string(), color, size), (text[at + 1..].to_string(), color, size)]);
+        } else if size > if k == 0 { 12.0 } else { 8.0 } * 17.0 / cell_height {
+            center[k].2 -= 1.0;
+        } else {
+            break;
+        }
+    }
+    center
+}
+
+/// Dots for a list column, in the grain of the tile rings: one entry per text
+/// row (dot columns lit, color, the row's background when it is selected).
+#[derive(Debug, Default, Hash)]
+pub struct MarksSpec {
+    pub columns: u8,
+    pub rows: Vec<(u8, Color, Option<Color>)>,
+}
+
+pub fn marks(spec: &MarksSpec, pal: &Palette, width: u32, height: u32, cell_height: f32) -> Option<Pixmap> {
+    let (mut pixmap, _) = canvas(width, height, pal.page, cell_height)?;
+    let band = height as f32 / spec.rows.len().max(1) as f32;
+    let pitch = width as f32 / f32::from(spec.columns.max(1));
+    let dot = (cell_height * 0.058).max(0.6);
+    let mut groups: Vec<(Color, PathBuilder)> = Vec::new();
+    for (k, (lit, color, bg)) in spec.rows.iter().enumerate() {
+        let top = (k as f32 * band).round();
+        if let Some(bg) = bg {
+            fill_box(&mut pixmap, 0, top as i32, width as i32, ((k + 1) as f32 * band).round() as i32 - top as i32, sk(*bg, 1.0));
+        }
+        let index = match groups.iter().position(|(owner, _)| owner == color) {
+            Some(index) => index,
+            None => {
+                groups.push((*color, PathBuilder::new()));
+                groups.len() - 1
+            }
+        };
+        let middle = k as f32 * band + band / 2.0;
+        for i in 0..(*lit).min(spec.columns) {
+            for j in [-0.5f32, 0.5] {
+                groups[index].1.push_circle((f32::from(i) + 0.5) * pitch, middle + j * pitch, dot);
+            }
+        }
+    }
+    for (color, builder) in groups {
+        fill_all(&mut pixmap, builder, sk(color, 0.95));
+    }
+    Some(pixmap)
+}
 
 #[derive(Debug, Hash)]
 pub struct OrbitNode {
@@ -874,7 +1074,7 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
     let (w, h) = (width as f32, height as f32);
     let rows = (h / cell_height).round().max(1.0);
     let cell_width = if spec.columns > 0 { (width / u32::from(spec.columns)) as f32 } else { cell_height * 0.5 };
-    let (light, heavy) = line_widths(cell_width, cell_height);
+    let (light, _) = line_widths(cell_width, cell_height);
     let canthus_row = (rows as u32 / 2) as f32;
     let center_y = if spec.columns > 0 { canthus_row * cell_height + ((cell_height as u32 - light) / 2) as f32 + light as f32 / 2.0 } else { h / 2.0 };
     let c = (w / 2.0, center_y);
@@ -1173,7 +1373,7 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
             fill_box(pen.pixmap, 0, y, left_end, light as i32, tone(left));
             fill_box(pen.pixmap, right_start, y, width as i32 - right_start, light as i32, tone(right));
         }
-        let sight = sk(pal.ink2, 1.0);
+        let sight = sk(pal.eye, 1.0);
         for (side, column, reach) in &spec.sight {
             let reach = reach.clamp(0.0, 1.0);
             if reach <= 0.0 {
@@ -1181,24 +1381,24 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
             }
             match side {
                 0 => {
-                    let x = line_x(*column, heavy);
-                    let end = lid_y(x as f32 + heavy as f32 / 2.0, -upper_depth).round() as i32;
+                    let x = line_x(*column, light);
+                    let end = lid_y(x as f32 + light as f32 / 2.0, -upper_depth).round() as i32;
                     let top = (end as f32 * (1.0 - reach)).round() as i32;
-                    fill_box(pen.pixmap, x, top, heavy as i32, end - top, sight);
+                    fill_box(pen.pixmap, x, top, light as i32, end - top, sight);
                 }
                 1 => {
-                    let x = line_x(*column, heavy);
-                    let start = lid_y(x as f32 + heavy as f32 / 2.0, lower_depth).round() as i32;
+                    let x = line_x(*column, light);
+                    let start = lid_y(x as f32 + light as f32 / 2.0, lower_depth).round() as i32;
                     let length = ((height as i32 - start) as f32 * reach).round() as i32;
-                    fill_box(pen.pixmap, x, start, heavy as i32, length, sight);
+                    fill_box(pen.pixmap, x, start, light as i32, length, sight);
                 }
                 2 => {
                     let start = (left_end as f32 * (1.0 - reach)).round() as i32;
-                    fill_box(pen.pixmap, start, row_y(heavy), left_end - start, heavy as i32, sight);
+                    fill_box(pen.pixmap, start, row_y(light), left_end - start, light as i32, sight);
                 }
                 _ => {
                     let length = ((width as i32 - right_start) as f32 * reach).round() as i32;
-                    fill_box(pen.pixmap, right_start, row_y(heavy), length, heavy as i32, sight);
+                    fill_box(pen.pixmap, right_start, row_y(light), length, light as i32, sight);
                 }
             }
         }
@@ -1263,6 +1463,19 @@ fn option_lines(options: &Options, room_up: usize, room: usize) -> [String; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wide_word_in_a_ring_breaks_instead_of_shrinking() {
+        let (c, hub) = ((70.0, 76.5), (70.0 - 1.5 * 17.0 / 21.0) * 0.4);
+        let ink = Color::Rgb(0xd3, 0xd7, 0xb5);
+        let lines = |words: &[(&str, u8)]| -> Vec<(String, f32)> {
+            let center: Vec<(String, Color, u8)> = words.iter().map(|(text, size)| (text.to_string(), ink, *size)).collect();
+            centre_lines(&center, c, hub, 17.0).into_iter().map(|(text, _, size)| (text, size)).collect()
+        };
+        assert_eq!(lines(&[("10", 16), ("updates", 10)]), [("10".to_string(), 16.0), ("updates".to_string(), 10.0)]);
+        assert_eq!(lines(&[("14", 16), ("days 2 h", 10)]), [("14".to_string(), 16.0), ("days".to_string(), 10.0), ("2 h".to_string(), 10.0)]);
+        assert_eq!(lines(&[("14", 16), ("days 12 h", 10)]), [("14".to_string(), 16.0), ("days".to_string(), 10.0), ("12 h".to_string(), 10.0)]);
+    }
 
     #[test]
     fn the_pupil_options_show_the_filter_and_its_matches() {
