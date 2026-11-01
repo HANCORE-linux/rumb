@@ -195,8 +195,28 @@ journal_owner() {
   return 0
 }
 
-declare -A pending=()
+declare -A pending=() kept_in=()
 update_errors=()
+
+cache_index() {
+  local cache_home=${XDG_CACHE_HOME:-$HOME/.cache} dir file base
+  local -a dirs files
+  kept_in=()
+  mapfile -t dirs < <(pacman-conf CacheDir 2>/dev/null)
+  files=("$cache_home"/paru/clone/*/*.pkg.tar.* "$cache_home"/yay/*/*.pkg.tar.*)
+  for dir in "${dirs[@]}"; do
+    files+=("${dir%/}"/*.pkg.tar.*)
+  done
+  for file in "${files[@]}"; do
+    [[ -f $file && $file != *.sig ]] || continue
+    base=${file##*/}
+    case $file in
+      "$cache_home"/yay/*) kept_in[${base%-*}]=yay ;;
+      "$cache_home"/paru/*) kept_in[${base%-*}]=paru ;;
+      *) kept_in[${base%-*}]=pacman ;;
+    esac
+  done
+}
 
 add_update() {
   local name=$1 old=$2 new=$3 source=$4 kind=${5:-} risk reason=""
@@ -524,7 +544,7 @@ check_updates
 collect_problems() {
   local count exe source scope unit fragment package units config_errors day today journal_total failed_total row path
   local action name time version old kept file first
-  local -a scope_flag paths rows fragments day_paths cache_dirs
+  local -a scope_flag paths rows fragments day_paths
   local -A crash_days=() error_days=()
   problem_errors=()
   : >"$tmp/problems.tsv"
@@ -656,22 +676,12 @@ collect_problems() {
       sub(/\)$/, "", version)
       printf "%s\x1f%s\x1f%s\x1f%s\x1f%s\n", day, action, name, time, version
     }' "$pacman_log" >"$tmp/day_changes_raw.tsv" 2>/dev/null
-  mapfile -t cache_dirs < <(pacman-conf CacheDir 2>/dev/null)
+  cache_index
   while IFS=$'\x1f' read -r day action name time version; do
     kept=-
     if [[ $version == *" -> "* ]]; then
       old=${version%% -> *}
-      kept=""
-      for file in "${cache_dirs[@]/%//$name-$old-}"*.pkg.tar.* "${XDG_CACHE_HOME:-$HOME/.cache}/yay/$name/$name-$old-"*.pkg.tar.* "${XDG_CACHE_HOME:-$HOME/.cache}/paru/clone/$name/$name-$old-"*.pkg.tar.*; do
-        [[ -f $file && $file != *.sig ]] || continue
-        case $file in
-          */yay/*) kept=yay ;;
-          */paru/*) kept=paru ;;
-          *) kept=pacman ;;
-        esac
-        break
-      done
-      [[ -n $kept ]] || kept=none
+      kept=${kept_in[$name-$old]:-none}
     fi
     printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$day" "$action" "$name" "$time" "$kept" "$version"
   done <"$tmp/day_changes_raw.tsv" >"$tmp/day_changes.tsv"
@@ -753,7 +763,7 @@ collect_anatomy() {
   local os desktop omarchy="" kernel_running kernel_pkg="" kernel_installed="" reboot_pending=false cache_dir cache_bytes=0 cache_freeable paccache_out paccache_bytes foreign day today upgrades_json
   local uptime_seconds nvidia_loaded="" nvidia_installed="" hyprland_running="" hyprland_installed="" hyprland_bin packages explicit orphans
   local cache_home=${XDG_CACHE_HOME:-$HOME/.cache} name old source dir file kept pid exe base lines
-  local -a names upgrades=() cache_dirs=()
+  local -a names upgrades=()
   local -A per_day=()
 
   os=$(. /etc/os-release 2>/dev/null && printf '%s' "${NAME:-}")
@@ -833,23 +843,11 @@ collect_anatomy() {
   ((foreign > 0)) && printf 'aur\x1f%d\n' "$foreign" >>"$tmp/repos.tsv"
 
   mapfile -t names < <(awk -F'\x1f' '$4 == "repo" || $4 == "aur" { print $1 }' "$tmp/updates.tsv")
-  mapfile -t cache_dirs < <(pacman-conf CacheDir 2>/dev/null)
+  cache_index
   : >"$tmp/cached.tsv"
   while IFS=$'\x1f' read -r name old _ source _; do
     [[ $source == repo || $source == aur ]] || continue
-    kept=""
-    for dir in "${cache_dirs[@]}"; do
-      for file in "${dir%/}/$name-$old-"*.pkg.tar.*; do
-        [[ -f $file && $file != *.sig ]] && kept=pacman && break 2
-      done
-    done
-    if [[ -z $kept ]]; then
-      for file in "$cache_home/yay/$name/$name-$old-"*.pkg.tar.* "$cache_home/paru/clone/$name/$name-$old-"*.pkg.tar.*; do
-        [[ -f $file && $file != *.sig ]] || continue
-        [[ $file == "$cache_home/yay/"* ]] && kept=yay || kept=paru
-        break
-      done
-    fi
+    kept=${kept_in[$name-$old]:-}
     [[ -n $kept ]] && printf '%s\x1f%s\n' "$name" "$kept" >>"$tmp/cached.tsv"
   done <"$tmp/updates.tsv"
   : >"$tmp/deps.tsv"
