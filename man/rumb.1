@@ -23,11 +23,14 @@ rumb, rumb\-scan \- track software health and spot trouble early
 .B rumb
 is a terminal dashboard for Arch Linux and Omarchy.
 It shows what the next update brings and what is already failing:
-pending repository and AUR updates ranked by risk,
+pending repository, AUR, Flatpak and mise updates ranked by risk,
 and the crashes, failed units, journal errors and Hyprland config errors
 since the last completed full system upgrade,
 each tied to the package that owns it,
 together with the Arch news published since then.
+It also lists your programs that still run files an update replaced,
+and the .pacnew and .pacsave files waiting in
+.IR /etc .
 On Omarchy, a pending Omarchy update also shows what its release notes fix.
 .PP
 rumb only reads.
@@ -173,6 +176,9 @@ or
 .B paru
 when one of them is installed,
 and reported as not checked otherwise.
+Flatpak updates are checked when Flatpak has something installed,
+and mise updates for the tools in the global mise configuration
+when mise is installed.
 The Arch news needs
 .BR xmllint .
 The Omarchy release notes are read from the GitHub API,

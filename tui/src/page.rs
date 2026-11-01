@@ -39,6 +39,7 @@ pub struct Scene {
     pub chosen: [Option<Rect>; 3],
     pub band: Option<Rect>,
     pub overlay: Option<Rect>,
+    pub eye: Option<Rect>,
 }
 
 pub fn paint(picture: &Picture, pal: &Palette, width: u32, height: u32, cell_height: f32) -> Option<Pixmap> {
@@ -87,7 +88,7 @@ pub fn draw(frame: &mut Frame, app: &App, motion: &Motion, pal: &Palette, now: I
     }
     draw_nerve(buf, area, app, motion, pal, now, cell, &mut scene);
     if app.overlay {
-        let kept: Vec<Placement> = scene.placements.drain(..).filter(|placement| matches!(placement.picture, Picture::Ring(_) | Picture::Marks(_))).collect();
+        let kept = std::mem::take(&mut scene.placements);
         draw_overlay(buf, area, app, pal, &mut scene);
         if let Some(rect) = scene.overlay {
             let around = Rect::new(rect.x.saturating_sub(1), rect.y.saturating_sub(1), rect.width + 2, rect.height + 2);
@@ -301,7 +302,7 @@ fn ring_pending(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
     keyed(buf, col, top, pal.alert, "high", &high.to_string(), pal.alert, pal);
     keyed(buf, col, top + 1, pal.warn, "medium", &medium.to_string(), pal.warn, pal);
     keyed(buf, col, top + 2, pal.ink2, "low", &low.to_string(), pal.ink, pal);
-    tile_legend(buf, area, vec![faint(&if unit == 1 { "1 wedge = 1 update".to_string() } else { format!("1 wedge ≤ {unit} updates") }, pal)]);
+    tile_legend(buf, area, vec![faint(&if unit == 1 { "1 wedge = 1 update · length = risk".to_string() } else { format!("1 wedge ≤ {unit} updates · length = risk") }, pal)]);
 }
 
 fn ring_days(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant, cell: (u16, u16), rings: &mut Vec<Placement>) {
@@ -444,13 +445,16 @@ fn ring_fixes(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Insta
     let tone = if fixes.is_empty() { pal.ink2 } else { pal.teal };
     let center = vec![(counted.to_string(), tone, 16), (format!("of {}", app.problems.len()), pal.label, 10)];
     let col = place_ring(rings, inner, cell, crate::ink::RingSpec { slots, dots, ticks: 4, center, ..Default::default() });
-    let shown = fixes.len().min(5) as u16;
+    let others = all.len() - fixes.len();
+    let shown = fixes.len().min(5) as u16 + u16::from(others > 0 && !fixes.is_empty());
     let top = col.y + col.height.saturating_sub(shown.max(1)) / 2;
     for (k, problem) in fixes.iter().take(5).enumerate() {
         keyed(buf, col, top + k as u16, pal.teal, &fit(problem.name(), col.width.saturating_sub(8) as usize), &compact(problem.count), pal.ink, pal);
     }
     if fixes.is_empty() {
         text(buf, col.x, top, "no owner has one", Style::new().fg(pal.faint), col.width);
+    } else if others > 0 {
+        keyed(buf, col, top + fixes.len().min(5) as u16, pal.ink2, "others", "", pal.label, pal);
     }
     tile_legend(buf, area, vec![faint("1 wedge = 1 problem · length = records", pal)]);
 }
@@ -546,18 +550,21 @@ fn ring_disk(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
 
 fn ring_checks(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, cell: (u16, u16), rings: &mut Vec<Placement>) {
     let inner = panel_frame(buf, area, "BEFORE YOU UPDATE", app.tile == Some(5), pal);
-    tile_legend(
-        buf,
-        area,
-        vec![
+    let marks = |lead: &str, gap: &str| {
+        let mut spans = if lead.is_empty() { Vec::new() } else { vec![faint(lead, pal)] };
+        spans.extend([
             Span::styled("●", Style::new().fg(pal.alert)),
-            faint(" act  ", pal),
+            faint(&format!(" act{gap}"), pal),
             Span::styled("●", Style::new().fg(pal.warn)),
-            faint(" look  ", pal),
+            faint(&format!(" look{gap}"), pal),
             Span::styled("●", Style::new().fg(pal.ok)),
             faint(" ok", pal),
-        ],
-    );
+        ]);
+        spans
+    };
+    let room = area.width.saturating_sub(6);
+    let legend = [("1 wedge = 1 row · length ", " "), ("1 wedge = 1 row · ", "  ")].into_iter().map(|(lead, gap)| marks(lead, gap)).find(|spans| width(spans) <= room).unwrap_or_else(|| marks("", "  "));
+    tile_legend(buf, area, legend);
     let checks = checks(app);
     if checks.is_empty() {
         return;
@@ -924,6 +931,14 @@ fn checks(app: &App) -> Vec<(&'static str, String, Severity)> {
             ("not needed", Severity::Ok)
         };
         checks.push(("reboot", reboot.into(), severity));
+        if let Some(stale) = &anatomy.stale_programs {
+            let value = if stale.is_empty() { "none".into() } else { counted(stale.len() as u64, "program", "programs") };
+            checks.push(("restart", value, level(stale.is_empty(), Severity::Warn)));
+        }
+        if let Some(files) = &anatomy.config_files {
+            let value = if files.is_empty() { "none".into() } else { format!("{} waiting", thousands(files.len() as u64)) };
+            checks.push(("configs", value, level(files.is_empty(), Severity::Warn)));
+        }
     }
     if let Some(preflight) = &app.preflight {
         let (snapshot, severity) = match preflight.snapshot_by.as_str() {
@@ -1040,22 +1055,32 @@ fn map_fits(area: Rect) -> bool {
     area.height >= 28 && area.width >= 90
 }
 
-fn updates_title(app: &App, count: usize) -> String {
+fn updates_title(app: &App, count: usize, room: usize) -> String {
     let download = app.download_bytes();
-    let aur = app.aur_updates();
-    match (download > 0, aur > 0) {
-        (true, true) => format!("³UPDATES · {count} · {} download + {aur} AUR", bytes(download)),
-        (true, false) => format!("³UPDATES · {count} · {} download", bytes(download)),
-        _ => format!("³UPDATES · {count}"),
+    if download == 0 {
+        return format!("³UPDATES · {count}");
     }
+    let mut title = format!("³UPDATES · {count} · {} download", bytes(download));
+    for (source, name) in [("aur", "AUR"), ("flatpak", "Flatpak"), ("mise", "mise")] {
+        let part = match app.source_updates(source) {
+            0 => continue,
+            n => format!(" + {n} {name}"),
+        };
+        if title.chars().count() + part.chars().count() > room {
+            break;
+        }
+        title.push_str(&part);
+    }
+    title
 }
 
 fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Palette, now: Instant, scene: &mut Scene) -> usize {
     use crate::ink::{OrbitLink, OrbitNode, OrbitSpec};
     let updates = app.visible_updates();
-    let title = updates_title(app, updates.len());
+    let title = updates_title(app, updates.len(), area.width.saturating_sub(7) as usize);
     let body = list_frame(buf, area, app, Pane::Updates, &title, "inner ring high · middle medium · outer band low", pal);
     if updates.is_empty() {
+        text(buf, body.x, body.y + 1, updates_message(app), Style::new().fg(pal.faint), body.width);
         return 10;
     }
     let selected = app.lists[0].selected.min(updates.len() - 1);
@@ -1192,8 +1217,9 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pa
 
 fn draw_updates(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut Scene) -> usize {
     let updates = app.visible_updates();
-    let title = updates_title(app, updates.len());
-    let body = list_frame(buf, area, app, Pane::Updates, &title, "sorted by risk", pal);
+    let title = updates_title(app, updates.len(), area.width.saturating_sub(7) as usize);
+    let marked = updates.iter().any(|update| app.problems.iter().any(|problem| problem.package == update.name));
+    let body = list_frame(buf, area, app, Pane::Updates, &title, if marked { "sorted by risk · ● = the package has a problem" } else { "sorted by risk" }, pal);
     let name_w = body.width.saturating_sub(32).clamp(14, 24);
     let version_x = body.x + 5 + name_w + 1;
     let header = Style::new().fg(pal.faint);
@@ -1240,17 +1266,20 @@ fn draw_updates(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
         scene.placements.push(Placement { rect, picture: Picture::Marks(Box::new(crate::ink::MarksSpec { columns: 6, rows: marks })) });
     }
     if updates.is_empty() {
-        let message = if app.stage_done_at[0].is_none() {
-            "checking…"
-        } else if app.lists[0].filter.is_empty() {
-            "nothing pending"
-        } else {
-            "no match"
-        };
-        text(buf, body.x, body.y + 1, message, Style::new().fg(pal.faint), body.width);
+        text(buf, body.x, body.y + 1, updates_message(app), Style::new().fg(pal.faint), body.width);
     }
     position(buf, body, selected, updates.len(), pal);
     rows
+}
+
+fn updates_message(app: &App) -> &'static str {
+    if app.stage_done_at[0].is_none() {
+        "checking…"
+    } else if app.lists[0].filter.is_empty() {
+        "nothing pending"
+    } else {
+        "no match"
+    }
 }
 
 fn draw_problems(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut Scene) -> usize {
@@ -1588,6 +1617,77 @@ fn source_name(app: &App, source: &crate::app::DaySource) -> String {
     source_problem(app, source).map_or_else(|| source.subject.rsplit('/').next().unwrap_or(&source.subject).to_string(), |problem| problem.name().to_string())
 }
 
+fn way_back(change: &crate::app::DayChange, pal: &Palette) -> Option<(String, Color)> {
+    let (old, _) = change.version.split_once(" -> ")?;
+    match change.cached.as_str() {
+        "" => None,
+        "none" => Some((format!("{old} not in a package cache"), pal.warn)),
+        cache => Some((format!("{old} in the {cache} cache"), pal.ink)),
+    }
+}
+
+struct Start<'a> {
+    day: &'a str,
+    change: &'a crate::app::DayChange,
+    first: String,
+    problems: Vec<(&'static str, String)>,
+}
+
+fn starts(app: &App) -> Vec<Start<'_>> {
+    let Some(window) = app.activity.first().map(|day| day.date.as_str()) else { return Vec::new() };
+    let Some(watched) = app.activity.get(2).map(|day| day.date.as_str()) else { return Vec::new() };
+    let mut seen: Vec<(&str, &str, &str, &str, &str)> = Vec::new();
+    for day in &app.activity {
+        for source in &day.sources {
+            if !seen.iter().any(|(kind, subject, ..)| *kind == source.kind && *subject == source.subject) {
+                seen.push((source.kind.as_str(), source.subject.as_str(), source.package.as_str(), day.date.as_str(), source.first.as_str()));
+            }
+        }
+    }
+    for problem in app.problems.iter().filter(|problem| problem.kind == "failed-unit") {
+        if let (Some(day), Some(time)) = (problem.first.get(..10), problem.first.get(11..16)) {
+            seen.push(("unit", problem.subject.as_str(), problem.package.as_str(), day, time));
+        }
+    }
+    let mut groups: Vec<Start> = Vec::new();
+    for (kind, subject, package, day, time) in seen {
+        if package.is_empty() || day <= window {
+            continue;
+        }
+        let Some((changed, change)) = app
+            .activity
+            .iter()
+            .filter(|other| other.date.as_str() >= watched && other.date.as_str() <= day)
+            .flat_map(|other| other.changes.iter().map(move |change| (other.date.as_str(), change)))
+            .rfind(|(changed, change)| change.name == package && matches!(change.action.as_str(), "upgraded" | "downgraded") && (*changed < day || !change.time.is_empty() && !time.is_empty() && change.time.as_str() < time))
+        else {
+            continue;
+        };
+        let at = format!("{changed} {}", change.time);
+        if kind != "crash" && !app.boots.iter().any(|boot| boot.as_str() > window && *boot < at) {
+            continue;
+        }
+        let name = subject.rsplit('/').next().unwrap_or(subject).trim_end_matches(".service").to_string();
+        let first = format!("{} {time}", day.get(5..).unwrap_or(day)).trim_end().to_string();
+        let kind = match kind {
+            "crash" => "crashed",
+            "unit" => "failed",
+            _ => "errors",
+        };
+        match groups.iter_mut().find(|group| group.day == changed && std::ptr::eq(group.change, change)) {
+            Some(group) => {
+                if first < group.first {
+                    group.first = first;
+                }
+                group.problems.push((kind, name));
+            }
+            None => groups.push(Start { day: changed, change, first, problems: vec![(kind, name)] }),
+        }
+    }
+    groups.sort_by(|a, b| (b.day, b.change.time.as_str()).cmp(&(a.day, a.change.time.as_str())));
+    groups
+}
+
 fn change_text(change: &crate::app::DayChange) -> String {
     match change.version.split_once(" -> ") {
         Some((old, new)) => format!("{} {}  {}", change.action, change.name, versions(old, new, 60)),
@@ -1614,7 +1714,13 @@ fn draw_days(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut
     let pacman = if changes.is_empty() { 0 } else { usize::from(programs > 0) + 1 + listed + more };
     let width = area.width.saturating_sub(10).min(150);
     let height = (days.len().max(programs + pacman) as u16 + 4).min(area.height.saturating_sub(6));
-    let rect = place(area, app, scene, width, height);
+    let mut rect = place(area, app, scene, width, height);
+    if let Some(around) = scene.eye.map(|eye| Rect::new(eye.x.saturating_sub(1), eye.y.saturating_sub(1), eye.width + 2, eye.height + 2))
+        && rect.intersects(around)
+        && around.bottom() + height < area.bottom()
+    {
+        rect.y = around.bottom();
+    }
     scene.overlay = Some(rect);
     clear_around(buf, area, rect, pal);
     clear(buf, rect, pal);
@@ -1772,9 +1878,11 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
             if app.updates.iter().any(|update| update.installed_delta_bytes.is_some()) {
                 lines.push(("disk change".into(), signed_bytes(app.installed_delta()), pal.ink));
             }
-            let aur: Vec<&str> = app.updates.iter().filter(|update| update.source == "aur").map(|update| update.name.as_str()).collect();
-            if !aur.is_empty() {
-                wrapped(&mut lines, "AUR", &format!("{} · {} · built locally", aur.len(), aur.join(", ")), room, pal.ink);
+            for (source, name, note) in [("aur", "AUR", " · built locally"), ("flatpak", "Flatpak", ""), ("mise", "mise", "")] {
+                let names: Vec<&str> = app.updates.iter().filter(|update| update.source == source).map(|update| update.name.as_str()).collect();
+                if !names.is_empty() {
+                    wrapped(&mut lines, name, &format!("{} · {}{note}", names.len(), names.join(", ")), room, pal.ink);
+                }
             }
             if app.updates.is_empty() {
                 lines.push(("updates".into(), "none pending".to_string(), pal.label));
@@ -1806,6 +1914,22 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
             "PROBLEMS / DAY"
         }
         2 => {
+            for (index, start) in starts(app).iter().take(3).enumerate() {
+                let when = if start.change.time.is_empty() { start.day.get(5..).unwrap_or(start.day).to_string() } else { format!("{} {}", start.day.get(5..).unwrap_or(start.day), start.change.time) };
+                let (old, new) = start.change.version.split_once(" -> ").unwrap_or(("", start.change.version.as_str()));
+                wrapped(&mut lines, if index == 0 { "started after" } else { "" }, &format!("{when}  {}  {}", start.change.name, versions(old, new, 60)), room, pal.ink);
+                let mut kinds: Vec<String> = Vec::new();
+                for kind in ["crashed", "failed", "errors"] {
+                    let names: Vec<&str> = start.problems.iter().filter(|(other, _)| *other == kind).map(|(_, name)| name.as_str()).collect();
+                    if !names.is_empty() {
+                        kinds.push(format!("{kind}: {}", names.join(", ")));
+                    }
+                }
+                wrapped(&mut lines, "", &format!("from {} · {}", start.first, kinds.join(" · ")), room, pal.teal);
+                if let Some((back, color)) = way_back(start.change, pal) {
+                    lines.push((String::new(), format!("back to {back}"), color));
+                }
+            }
             let entries: Vec<(&str, String)> = app
                 .last_upgraded
                 .iter()
@@ -1938,6 +2062,52 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
                     (format!("not needed · {} running, {installed} installed", anatomy.kernel_running), pal.ok)
                 };
                 wrapped(&mut lines, "reboot", &state, room, color);
+            }
+            if let Some(stale) = app.anatomy.as_ref().and_then(|anatomy| anatomy.stale_programs.as_ref()) {
+                if stale.is_empty() {
+                    lines.push(("restart".into(), "no program runs replaced files".into(), pal.ok));
+                } else {
+                    let mut programs: Vec<&crate::app::StaleProgram> = stale.iter().collect();
+                    programs.sort_by(|a, b| b.files.split('|').count().cmp(&a.files.split('|').count()).then_with(|| a.program.cmp(&b.program)));
+                    let names: Vec<&str> = programs.iter().take(12).map(|program| program.program.as_str()).collect();
+                    let more = if programs.len() > 12 { format!(", + {} more", programs.len() - 12) } else { String::new() };
+                    wrapped(&mut lines, "restart", &format!("{} still run replaced files · {}{more}", counted(stale.len() as u64, "program", "programs"), names.join(", ")), room, pal.warn);
+                    let mut shared: std::collections::BTreeMap<(&str, &str), u64> = std::collections::BTreeMap::new();
+                    for program in &programs {
+                        for (file, package) in program.files.split('|').filter_map(|pair| pair.split_once(' ')) {
+                            *shared.entry((file.rsplit('/').next().unwrap_or(file), package)).or_default() += 1;
+                        }
+                    }
+                    let mut shared: Vec<((&str, &str), u64)> = shared.into_iter().collect();
+                    shared.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                    for ((file, package), count) in shared.into_iter().take(3) {
+                        let package = if package.is_empty() { String::new() } else { format!(" · {package}") };
+                        lines.push((String::new(), format!("{file}{package} · in {}", counted(count, "program", "programs")), pal.label));
+                    }
+                }
+            }
+            if let Some(files) = app.anatomy.as_ref().and_then(|anatomy| anatomy.config_files.as_ref()) {
+                if files.is_empty() {
+                    lines.push(("configs".into(), "no config file waits in /etc".into(), pal.ok));
+                } else {
+                    let kinds: Vec<&str> = [(".pacnew", "new versions (.pacnew)"), (".pacsave", "saved old ones (.pacsave)")]
+                        .into_iter()
+                        .filter(|(kind, _)| files.iter().any(|file| file.path.contains(kind)))
+                        .map(|(_, text)| text)
+                        .collect();
+                    let wait = if files.len() == 1 { "config file waits" } else { "config files wait" };
+                    wrapped(&mut lines, "configs", &format!("{} {wait}: {} · merge with pacdiff", thousands(files.len() as u64), kinds.join(" and ")), room, pal.warn);
+                    let mut files: Vec<&crate::app::ConfigFile> = files.iter().collect();
+                    files.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.path.cmp(&b.path)));
+                    for file in files.iter().take(8) {
+                        let package = if file.package.is_empty() { String::new() } else { format!(" · {}", file.package) };
+                        let changed = file.changed_lines.map(|lines| format!(" · {}", counted(lines, "changed line", "changed lines"))).unwrap_or_default();
+                        lines.push((String::new(), format!("{}  {}{package}{changed}", file.date.get(5..).unwrap_or(&file.date), file.path), pal.ink));
+                    }
+                    if files.len() > 8 {
+                        lines.push((String::new(), format!("+ {} more", files.len() - 8), pal.label));
+                    }
+                }
             }
             if let Some(preflight) = &app.preflight {
                 let (snapshot, color) = match preflight.snapshot_by.as_str() {
@@ -2165,7 +2335,8 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
             let update = updates.get(app.lists[0].selected.min(updates.len().saturating_sub(1)))?;
             title = update.name.clone();
             let deps = app.anatomy.as_ref().and_then(|anatomy| anatomy.deps.get(&update.name));
-            lines.push(("version".into(), format!("{} → {}", update.old, update.new), pal.ink));
+            let commit = update.bump == "commit";
+            lines.push((if commit { "commit" } else { "version" }.into(), format!("{} → {}", update.old, update.new), pal.ink));
             let risk_color = match update.risk.as_str() {
                 "high" => pal.alert,
                 "medium" => pal.warn,
@@ -2173,10 +2344,15 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
             };
             let risk = if update.reason.is_empty() { update.risk.clone() } else { format!("{} · {}", update.risk, update.reason) };
             wrapped(&mut lines, "risk", &risk, room, risk_color);
-            if !update.bump.is_empty() && !update.reason.contains(update.bump.as_str()) {
+            if !update.bump.is_empty() && !commit && !update.reason.contains(update.bump.as_str()) {
                 lines.push(("jump".into(), update.bump.clone(), pal.ink));
             }
             lines.push(("source".into(), update.source.clone(), pal.ink));
+            match update.source.as_str() {
+                "flatpak" => lines.push(("update with".into(), format!("flatpak update {}", update.name), pal.ink)),
+                "mise" => lines.push(("update with".into(), format!("mise upgrade {}", update.name), pal.ink)),
+                _ => {}
+            }
             lines.push(("part".into(), Subsystem::of(&update.name).label().to_string(), pal.ink));
             if let Some(download) = update.download_bytes {
                 lines.push(("download".into(), bytes(download), pal.ink));
@@ -2194,7 +2370,7 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
             if app.reboot_after().iter().any(|(_, after)| after.name == update.name) {
                 lines.push(("reboot".into(), "needed after this update".into(), pal.warn));
             }
-            if let Some(cached) = app.anatomy.as_ref().and_then(|anatomy| anatomy.cached.as_ref()) {
+            if let Some(cached) = app.anatomy.as_ref().and_then(|anatomy| anatomy.cached.as_ref()).filter(|_| matches!(update.source.as_str(), "repo" | "aur")) {
                 lines.push(match cached.get(&update.name) {
                     Some(cache) => ("rollback".into(), format!("{} in the {cache} cache", update.old), pal.ink),
                     None => ("rollback".into(), format!("{} not in a package cache", update.old), pal.warn),
@@ -2242,9 +2418,13 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
                 lines.push(("last".into(), problem.last.clone(), pal.ink));
             }
             if let Some((first, change)) = app.first_seen(problem) {
-                lines.push(("first seen".into(), first.get(5..).unwrap_or(first).to_string(), pal.ink));
+                let first = if problem.kind == "failed-unit" { problem.first.get(5..16).unwrap_or(first) } else { first.get(5..).unwrap_or(first) };
+                lines.push(("first seen".into(), first.to_string(), pal.ink));
                 if let Some((day, change)) = change {
                     lines.push(("owner changed".into(), format!("{} · {}", day.get(5..).unwrap_or(day), change_text(change)), pal.ink));
+                    if let Some(back) = way_back(change, pal) {
+                        lines.push(("go back".into(), back.0, back.1));
+                    }
                 }
             }
             if !problem.message.is_empty() {
@@ -2341,14 +2521,34 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
         draw_days(buf, area, app, pal, scene);
         return;
     }
-    let width = area.width.saturating_sub(20).min(104);
-    let room = width.saturating_sub(18) as usize;
-    let Some((title, mut lines)) = overlay_details(app, room, pal) else { return };
-    if app.tile.is_none() && app.part.is_none() && app.focus == Pane::Problems {
-        lines.push(("j".into(), format!("shows the live journal filtered to {title}"), pal.label));
+    let full = area.width.saturating_sub(20).min(104);
+    let content = |width: u16| {
+        let (title, mut lines) = overlay_details(app, width.saturating_sub(18) as usize, pal)?;
+        if app.tile.is_none() && app.part.is_none() && app.focus == Pane::Problems {
+            lines.push(("j".into(), format!("shows the live journal filtered to {title}"), pal.label));
+        }
+        let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(6));
+        Some((title, lines, height))
+    };
+    let Some((mut title, mut lines, height)) = content(full) else { return };
+    let mut rect = place(area, app, scene, full, height);
+    if let Some(eye) = scene.eye {
+        let around = Rect::new(eye.x.saturating_sub(1), eye.y.saturating_sub(1), eye.width + 2, eye.height + 2);
+        if rect.intersects(around) {
+            let leftward = rect.x + rect.width / 2 < eye.x + eye.width / 2;
+            let free = if leftward { around.x.saturating_sub(area.x + 1) } else { area.right().saturating_sub(around.right()) };
+            if free >= 72 {
+                let width = free.min(full);
+                if let Some((beside, rows, tall)) = content(width) {
+                    let x = if leftward { around.x - width - 1 } else { around.right() };
+                    rect = Rect::new(x, place(area, app, scene, width, tall).y, width, tall);
+                    (title, lines) = (beside, rows);
+                }
+            } else if around.bottom() + height < area.bottom() {
+                rect.y = around.bottom();
+            }
+        }
     }
-    let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(6));
-    let rect = place(area, app, scene, width, height);
     scene.overlay = Some(rect);
     clear_around(buf, area, rect, pal);
     clear(buf, rect, pal);
@@ -2795,16 +2995,20 @@ fn counted(value: u64, one: &str, many: &str) -> String {
     format!("{} {}", thousands(value), if value == 1 { one } else { many })
 }
 
-fn eye_log(app: &App) -> (Vec<(String, String, usize)>, bool) {
+pub fn eye_log(app: &App) -> (Vec<(String, String, usize)>, bool) {
     let mut lines: Vec<(String, String)> = Vec::new();
     let kind = |name: &str| app.problems.iter().filter(|problem| problem.kind == name).map(|problem| problem.count).sum::<u64>();
     if let Some(last) = &app.last_upgrade {
         lines.push(("› pacman.log".into(), crate::motion::upgrade_tail(Some(last))));
     }
     if app.stage_done_at[0].is_some() {
-        let aur = app.updates.iter().filter(|update| update.source == "aur").count();
-        lines.push(("› checkupdates".into(), counted((app.updates.len() - aur) as u64, "update", "updates")));
-        lines.push(("› yay -Qua".into(), format!("{aur} aur")));
+        lines.push(("› checkupdates".into(), counted(app.source_updates("repo") as u64, "update", "updates")));
+        lines.push(("› yay -Qua".into(), format!("{} aur", app.source_updates("aur"))));
+        for (source, command) in [("flatpak", "› flatpak remote-ls --updates"), ("mise", "› mise outdated")] {
+            if app.checked_sources.iter().any(|checked| checked == source) {
+                lines.push((command.into(), counted(app.source_updates(source) as u64, "update", "updates")));
+            }
+        }
     }
     if app.stage_done_at[1].is_some() {
         lines.push(("› coredumpctl list".into(), counted(kind("crash"), "crash", "crashes")));
@@ -3254,6 +3458,9 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
         pupil: rain.pupil,
     });
     scene.placements.push(Placement { rect: eye, picture: Picture::Eye(Box::new(spec)) });
+    if app.pictures {
+        scene.eye = Some(eye);
+    }
     if !app.pictures {
         for (k, (line, color)) in [("this terminal shows no pictures", pal.label), ("foot, kitty and Ghostty show the eye", pal.faint)].into_iter().enumerate() {
             let x = eye.x + eye.width.saturating_sub(line.chars().count() as u16) / 2;

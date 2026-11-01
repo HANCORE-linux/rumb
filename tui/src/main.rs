@@ -1279,6 +1279,26 @@ mod tests {
     }
 
     #[test]
+    fn the_eye_keeps_going_beside_an_open_window() {
+        let mut app = demo_at(30_000);
+        app.pictures = true;
+        let mut opened = |tile: Option<usize>, part: Option<usize>| {
+            (app.tile, app.part, app.overlay) = (tile, part, true);
+            let (_, scene) = render(&app, 271, 60, app.started + Duration::from_secs(60));
+            let window = scene.overlay.expect("a detail window");
+            let around = ratatui::layout::Rect::new(window.x.saturating_sub(1), window.y.saturating_sub(1), window.width + 2, window.height + 2);
+            assert!(scene.placements.iter().any(|placement| matches!(placement.picture, page::Picture::Eye(_))), "the eye stays with {tile:?} {part:?} open at {window:?}");
+            assert!(scene.placements.iter().all(|placement| placement.rect.intersection(around).is_empty()), "no picture under the window {window:?}");
+        };
+        for tile in 0..6 {
+            opened(Some(tile), None);
+        }
+        for part in 0..7 {
+            opened(None, Some(part));
+        }
+    }
+
+    #[test]
     fn the_band_never_drops_a_red_or_yellow_fact() {
         let now = Instant::now();
         let pal = palette::Palette::paper();
@@ -1800,6 +1820,50 @@ mod tests {
     }
 
     #[test]
+    fn lists_are_held_only_while_their_data_flies() {
+        let start = Instant::now();
+        let mut app = App::new(false, true, start);
+        let mut motion = Motion::new(true, start);
+        let mut at = 0;
+        let mut last_updates = 0;
+        for line in include_str!("../demo.ndjson").lines().filter(|line| !line.trim().is_empty()) {
+            let value: Value = serde_json::from_str(line).unwrap();
+            at += value["_delay"].as_u64().unwrap_or(0);
+            let now = start + Duration::from_millis(at);
+            motion.push(serde_json::from_str(line).unwrap(), line, &mut app, now);
+            motion.step(&mut app, now, 0.0);
+            if value["event"] == "stage" && value["stage"] == "updates" {
+                last_updates = at;
+            }
+        }
+        let later = start + Duration::from_millis(last_updates + 1000);
+        motion.step(&mut app, later, 1.0);
+        assert!(!motion.held(motion::Target::List(Pane::Updates.index() as u8), later), "the updates list still waits a second after the recheck after the demo's pacman transaction");
+
+        let mut app = App::new(false, true, start);
+        let mut motion = Motion::new(true, start);
+        let mut at = 0;
+        let mut first = None;
+        for line in include_str!("../demo.ndjson").lines().filter(|line| !line.trim().is_empty()) {
+            let value: Value = serde_json::from_str(line).unwrap();
+            at += value["_delay"].as_u64().unwrap_or(0);
+            let now = start + Duration::from_millis(at);
+            first.get_or_insert_with(|| line.to_string());
+            motion.push(serde_json::from_str(line).unwrap(), line, &mut app, now);
+            motion.step(&mut app, now, 0.0);
+            if value["line"] == "transaction completed" {
+                let recheck = first.clone().unwrap();
+                motion.push(serde_json::from_str(&recheck).unwrap(), &recheck, &mut app, now);
+                let later = now + Duration::from_millis(1000);
+                motion.step(&mut app, later, 1.0);
+                assert!(!motion.held(motion::Target::Tile(2), later), "SINCE UPGRADE still waits a second after a recheck starts behind the transaction's lines");
+                return;
+            }
+        }
+        panic!("the demo has no pacman transaction");
+    }
+
+    #[test]
     fn each_scan_result_is_revealed_once() {
         let start = Instant::now();
         let mut app = App::new(false, true, start);
@@ -2190,7 +2254,7 @@ mod tests {
         app.tile = Some(0);
         app.overlay = true;
         let lines = window(&app);
-        for line in ["high          hyprland  0.55.2 → 0.56.0 · critical package, minor version jump · may fix 42 × crash", "low           mesa  1:25.2.4 rebuild · critical package, rebuild · may fix 7 × crash", "              4 · ffmpeg, firefox, spotify, yay", "AUR           2 · yay, spotify · built locally"] {
+        for line in ["high          hyprland  0.55.2 → 0.56.0 · critical package, minor version jump · may fix 42 × crash", "low           mesa  1:25.2.4 rebuild · critical package, rebuild · may fix 7 × crash", "              8 · ffmpeg, firefox, node, org.gimp.GIMP, org.gtk.Gtk3theme.adw-gtk3, python, spotify, yay", "AUR           2 · yay, spotify · built locally", "Flatpak       2 · org.gimp.GIMP, org.gtk.Gtk3theme.adw-gtk3", "mise          2 · node, python"] {
             assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
         }
         assert!(!lines.iter().any(|line| line.starts_with("largest")));
@@ -2265,7 +2329,7 @@ mod tests {
         let day = app.shown_days()[app.chosen_day()].date.clone();
         let activity = app.activity.iter_mut().find(|activity| activity.date == day).unwrap();
         for (subject, package) in [("/usr/bin/gone", "gone"), ("/usr/lib/libva-helper", "mesa"), ("/opt/tool/bin/tool", "")] {
-            activity.sources.push(crate::app::DaySource { kind: "error".into(), subject: subject.into(), count: 1, package: package.into() });
+            activity.sources.push(crate::app::DaySource { kind: "error".into(), subject: subject.into(), count: 1, package: package.into(), first: String::new() });
         }
         let lines = window(&app);
         for line in ["1 × error · gone · gone · no update pending", "1 × error · libva-helper · mesa → 1:25.2.4", "1 × error · tool"] {
@@ -2380,6 +2444,156 @@ mod tests {
         let mut unchecked = demo_detail("hyprland");
         unchecked.anatomy.as_mut().unwrap().cached = None;
         assert!(!window(&unchecked).iter().any(|line| line.starts_with("rollback")), "an older scanner did not look, so the row stays empty");
+    }
+
+    #[test]
+    fn flatpak_and_mise_updates_name_the_command_that_installs_them() {
+        let node = window(&demo_detail("node"));
+        for line in ["version       24.10.0 → 24.11.1", "jump          minor", "source        mise", "update with   mise upgrade node"] {
+            assert!(node.iter().any(|shown| shown == line), "{line:?} missing in {node:?}");
+        }
+        let theme = window(&demo_detail("org.gtk.Gtk3theme.adw-gtk3"));
+        for line in ["commit        72df3f2c3bbb → 8c2aa97f8aa5", "source        flatpak", "update with   flatpak update org.gtk.Gtk3theme.adw-gtk3"] {
+            assert!(theme.iter().any(|shown| shown == line), "{line:?} missing in {theme:?}");
+        }
+        for lines in [&node, &theme] {
+            assert!(!lines.iter().any(|line| line.starts_with("rollback")), "{lines:?}");
+        }
+        assert!(!theme.iter().any(|line| line.starts_with("jump") || line.starts_with("version")), "{theme:?}");
+        assert!(!window(&demo_detail("hyprland")).iter().any(|line| line.starts_with("update with")));
+    }
+
+    #[test]
+    fn the_updates_title_counts_the_updates_without_a_download_size() {
+        let app = demo_at(30_000);
+        assert_eq!(app.checked_sources, ["repo", "aur", "flatpak", "mise"]);
+        assert!(screen(&app, 271, 60).iter().any(|row| row.contains("³UPDATES · 14 · 390 MiB download + 2 AUR + 2 Flatpak + 2 mise")));
+        let mut older = App::new(true, false, Instant::now());
+        older.apply(stage("updates", json!({"updates": [{"name": "yay", "old": "12.5.2-1", "new": "12.5.3-1", "source": "aur", "bump": "patch", "risk": "low"}]})), Instant::now());
+        assert!(older.checked_sources.is_empty(), "an older scanner sends no checked sources");
+        let narrow = screen(&app, 150, 44);
+        let title = narrow.iter().find(|row| row.contains("³UPDATES")).unwrap();
+        assert!(title.contains("³UPDATES · 14 · 390 MiB download + 2 AUR ") && !title.contains("AUR +"), "{title:?}");
+    }
+
+    #[test]
+    fn the_update_map_says_why_it_is_empty() {
+        let mut app = App::new(true, false, Instant::now());
+        app.visible = [false, false, true, false, false];
+        app.apply(stage("updates", json!({"updates": []})), Instant::now());
+        assert!(screen(&app, 99, 35).iter().any(|row| row.contains("│ nothing pending ")));
+        let mut filtered = demo_at(30_000);
+        filtered.visible = [false, false, true, false, false];
+        filtered.lists[0].filter = "zzz".into();
+        assert!(screen(&filtered, 99, 35).iter().any(|row| row.contains("│ no match ")));
+    }
+
+    #[test]
+    fn the_eye_lists_the_flatpak_and_mise_checks_it_ran() {
+        let lines = |app: &App| page::eye_log(app).0.into_iter().map(|(head, tail, _)| format!("{head}  {tail}")).collect::<Vec<_>>();
+        let demo = lines(&demo_at(30_000));
+        for line in ["› checkupdates  8 updates", "› yay -Qua  2 aur", "› flatpak remote-ls --updates  2 updates", "› mise outdated  2 updates"] {
+            assert!(demo.iter().any(|shown| shown == line), "{line:?} missing in {demo:?}");
+        }
+        let mut older = App::new(true, false, Instant::now());
+        older.apply(stage("updates", json!({"updates": []})), Instant::now());
+        assert!(!lines(&older).iter().any(|line| line.contains("flatpak") || line.contains("mise")), "an older scanner did not check them");
+    }
+
+    #[test]
+    fn the_checks_name_programs_to_restart_and_config_files_that_wait() {
+        let mut app = demo_at(30_000);
+        let row = |app: &App, name: &str| screen(app, 271, 60).into_iter().find(|row| row.contains(name)).unwrap_or_default();
+        assert!(row(&app, " restart ").contains("3 programs") && row(&app, " configs ").contains("5 waiting"));
+        app.tile = Some(5);
+        app.overlay = true;
+        let lines = window(&app);
+        for line in [
+            "restart       3 programs still run replaced files · nautilus, pipewire, wireplumber",
+            "              libsystemd.so.0.41.0 · systemd-libs · in 3 programs",
+            "              10-15  /etc/pacman.conf.pacnew · pacman · 91 changed lines",
+            "              05-09  /etc/sddm.conf.d/10-wayland.conf.pacsave",
+        ] {
+            assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
+        }
+        assert!(lines.iter().any(|line| line.starts_with("configs       5 config files wait: new versions (.pacnew) and saved old ones (.pacsave)")), "{lines:?}");
+        let anatomy = app.anatomy.as_mut().unwrap();
+        anatomy.stale_programs = Some(Vec::new());
+        anatomy.config_files.as_mut().unwrap().retain(|file| file.path.ends_with(".pacnew"));
+        anatomy.config_files.as_mut().unwrap().truncate(1);
+        let lines = window(&app);
+        assert!(lines.iter().any(|line| line == "restart       no program runs replaced files"), "{lines:?}");
+        assert!(lines.iter().any(|line| line == "configs       1 config file waits: new versions (.pacnew) · merge with pacdiff"), "{lines:?}");
+        let anatomy = app.anatomy.as_mut().unwrap();
+        anatomy.stale_programs = None;
+        anatomy.config_files = None;
+        app.overlay = false;
+        assert!(row(&app, " restart ").is_empty() && row(&app, " configs ").is_empty(), "an older scanner sends neither, so the rows stay away");
+    }
+
+    #[test]
+    fn the_checks_legend_says_what_a_wedge_and_its_length_mean() {
+        let app = demo_at(30_000);
+        assert!(screen(&app, 271, 60).iter().any(|row| row.contains("│ 1 wedge = 1 row · length ● act ● look ● ok    │")));
+        assert!(screen(&app, 358, 85).iter().any(|row| row.contains(" 1 wedge = 1 row · length ● act ● look ● ok ")));
+    }
+
+    #[test]
+    fn the_since_window_names_what_started_after_an_upgrade_and_the_way_back() {
+        let mut app = demo_at(30_000);
+        app.tile = Some(2);
+        app.overlay = true;
+        let lines = window(&app);
+        for line in ["started after 10-08 13:12 nautilus 49.0 → 49.1", "              from 10-09 09:41 · crashed: nautilus", "              back to 49.0-1 in the pacman cache"] {
+            assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
+        }
+        let day = |date: &str, sources: Value, changes: Value| json!({"date": date, "crashes": 0, "errors": 0, "sources": sources, "changes": changes});
+        let history = |boots: Value| {
+            let mut app = App::new(true, false, Instant::now());
+            app.apply(stage("problems", json!({
+                "problems": [{"kind": "failed-unit", "subject": "tpm2-setup.service", "count": 1, "package": "systemd", "status": "no-update", "first": "2026-10-21 14:38"}],
+                "activity": [
+                    day("2026-10-18", json!([]), json!([])),
+                    day("2026-10-19", json!([]), json!([])),
+                    day("2026-10-21", json!([{"kind": "error", "subject": "/usr/lib/systemd/tpm2-setup", "count": 4, "package": "systemd", "first": "14:38"}]),
+                        json!([{"action": "upgraded", "name": "systemd", "version": "261.2-1 -> 262-1", "time": "14:21", "cached": "none"}])),
+                ],
+                "boots": boots,
+            })), Instant::now());
+            app.tile = Some(2);
+            app.overlay = true;
+            app
+        };
+        assert!(!window(&history(json!(["2026-10-21 14:38"]))).iter().any(|line| line.starts_with("started after")), "without a boot before the upgrade every boot error would look new");
+        let lines = window(&history(json!(["2026-10-19 08:00", "2026-10-21 14:38"])));
+        for line in ["started after 10-21 14:21 systemd 261.2 → 262", "              from 10-21 14:38 · failed: tpm2-setup · errors: tpm2-setup", "              back to 261.2-1 not in a package cache"] {
+            assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
+        }
+        let mut unit = history(json!([]));
+        unit.tile = None;
+        unit.focus = Pane::Problems;
+        let lines = window(&unit);
+        for line in ["first seen    10-21 14:38", "owner changed 10-21 · upgraded systemd  261.2 → 262", "go back       261.2-1 not in a package cache"] {
+            assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
+        }
+    }
+
+    #[test]
+    fn every_mark_in_the_tiles_and_the_update_list_has_a_legend() {
+        let app = demo_at(30_000);
+        let rows = screen(&app, 271, 60);
+        for text in ["│ 1 wedge = 1 update · length = risk ", "│ sorted by risk · ● = the package has a problem "] {
+            assert!(rows.iter().any(|row| row.contains(text)), "{text:?} missing");
+        }
+        let value = |key: &str| rows.iter().find_map(|row| row.split_once(key).map(|(_, rest)| rest.split('│').next().unwrap_or_default().trim().to_string()));
+        assert_eq!(value("● chromium").as_deref(), Some("7"));
+        assert_eq!(value("● others").as_deref(), Some(""), "the grey key has no number: the numbers above are records");
+        let mut calm = demo_at(30_000);
+        calm.problems.retain(|problem| problem.status != "possibly-fixed");
+        calm.problems.iter_mut().for_each(|problem| problem.package.clear());
+        let rows = screen(&calm, 271, 60);
+        assert!(rows.iter().any(|row| row.contains("no owner has one")) && !rows.iter().any(|row| row.contains("● others")), "no grey key without a teal one to set it apart");
+        assert!(rows.iter().any(|row| row.contains("│ sorted by risk ")) && !rows.iter().any(|row| row.contains("package has a problem")), "no marker, no legend for it");
     }
 
     #[test]

@@ -167,6 +167,8 @@ pub fn command_of(label: &str) -> &str {
     match label {
         "checking repository updates" => "checkupdates",
         "checking AUR updates" => "yay -Qua",
+        "checking Flatpak updates" => "flatpak remote-ls --updates",
+        "checking mise updates" => "mise outdated",
         "reading crash reports" => "coredumpctl list",
         "reading journal errors" => "journalctl -p err",
         "checking failed units" => "systemctl --failed",
@@ -189,6 +191,7 @@ pub fn result_of(label: &str, value: &Value) -> String {
     match label {
         "checking repository updates" => count("update", "updates"),
         "checking AUR updates" => count("aur", "aur"),
+        "checking Flatpak updates" | "checking mise updates" => count("update", "updates"),
         "reading crash reports" => number.map_or_else(|| "failed".to_string(), |n| format!("{} {}", crate::page::thousands(n), if n == 1 { "crash" } else { "crashes" })),
         "reading journal errors" => count("error", "errors"),
         "checking failed units" => count("unit", "units"),
@@ -343,7 +346,7 @@ impl Motion {
                 let result = start + TYPE * head.chars().count() as u32 + ms(280);
                 self.line(start, head, tail, Some(result), TYPE);
                 self.cursor = result + GAP;
-                self.send(result, Target::Tile(2), 0, 700, true);
+                self.send(now, Target::Tile(2), 0, 700, true);
                 self.feed_from(start, raw);
                 self.act(now, Act::Apply(Box::new(event), now));
             }
@@ -395,7 +398,7 @@ impl Motion {
                 self.close_open(now);
                 let at = self.lines.last().and_then(|line| line.result).unwrap_or(now).max(now);
                 let stage = stage.clone();
-                let effects = self.stage_effects(&stage, data, at);
+                let effects = self.stage_effects(&stage, data, now);
                 self.feed_from(at, raw);
                 self.act(now, Act::Apply(Box::new(event), now));
                 if let Some((index, arrival)) = effects {

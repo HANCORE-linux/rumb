@@ -140,6 +140,16 @@ owner_of() {
   REPLY=${owner_cache[$1]}
 }
 
+library_owner() {
+  local path=$1
+  while [[ ! -e $path && $path =~ ^(.+\.so(\.[0-9]+)*)\.[0-9]+$ ]]; do
+    path=${BASH_REMATCH[1]}
+  done
+  REPLY=""
+  [[ -e $path ]] && owner_of "$path"
+  return 0
+}
+
 # Fills owner_cache for many paths with one pacman call. pacman prints a path
 # with its directory resolved, so paths it would print differently are left to owner_of.
 owners_of() {
@@ -185,13 +195,33 @@ journal_owner() {
   return 0
 }
 
-declare -A pending=()
+declare -A pending=() kept_in=()
 update_errors=()
 
-add_update() {
-  local name=$1 old=$2 new=$3 source=$4 kind risk reason=""
+cache_index() {
+  local cache_home=${XDG_CACHE_HOME:-$HOME/.cache} dir file base
+  local -a dirs files
+  kept_in=()
+  mapfile -t dirs < <(pacman-conf CacheDir 2>/dev/null)
+  files=("$cache_home"/paru/clone/*/*.pkg.tar.* "$cache_home"/yay/*/*.pkg.tar.*)
+  for dir in "${dirs[@]}"; do
+    files+=("${dir%/}"/*.pkg.tar.*)
+  done
+  for file in "${files[@]}"; do
+    [[ -f $file && $file != *.sig ]] || continue
+    base=${file##*/}
+    case $file in
+      "$cache_home"/yay/*) kept_in[${base%-*}]=yay ;;
+      "$cache_home"/paru/*) kept_in[${base%-*}]=paru ;;
+      *) kept_in[${base%-*}]=pacman ;;
+    esac
+  done
+}
 
-  kind=$(bump_kind "$old" "$new")
+add_update() {
+  local name=$1 old=$2 new=$3 source=$4 kind=${5:-} risk reason=""
+
+  [[ -n $kind ]] || kind=$(bump_kind "$old" "$new")
   if is_core "$name"; then
     case $kind in
       epoch|major|minor) risk=high; reason="critical package, $kind version jump" ;;
@@ -208,7 +238,7 @@ add_update() {
     reason+="${reason:+, }ships Omarchy migrations"
   fi
 
-  pending[$name]="$old -> $new"
+  [[ $source == repo || $source == aur ]] && pending[$name]="$old -> $new"
   printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$name" "$old" "$new" "$source" "$kind" "$risk" "$reason" >>"$tmp/updates.tsv"
 }
 
@@ -272,7 +302,7 @@ crash_details() {
 }
 
 add_problem() {
-  local kind=$1 subject=$2 count=$3 package=$4 path=${5:-} signal=${6:-} frames=${7:-} last=${8:-} message=${9:-} libraries=${10:-} status update=""
+  local kind=$1 subject=$2 count=$3 package=$4 path=${5:-} signal=${6:-} frames=${7:-} last=${8:-} message=${9:-} libraries=${10:-} first=${11:-} status update=""
 
   if [[ $kind == config ]]; then
     status=config
@@ -287,7 +317,7 @@ add_problem() {
     status=no-update
   fi
 
-  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$kind" "${subject//[[:cntrl:]]/ }" "$count" "$package" "$status" "$update" "$signal" "${frames//[[:cntrl:]]/ }" "$last" "${message//[[:cntrl:]]/ }" "${libraries//[[:cntrl:]]/ }" >>"$tmp/problems.tsv"
+  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$kind" "${subject//[[:cntrl:]]/ }" "$count" "$package" "$status" "$update" "$signal" "${frames//[[:cntrl:]]/ }" "$last" "${message//[[:cntrl:]]/ }" "${libraries//[[:cntrl:]]/ }" "$first" >>"$tmp/problems.tsv"
 }
 
 tsv_json() {
@@ -390,10 +420,11 @@ check_updates() {
   pending=()
   update_errors=()
   aur_unavailable=false
+  checked=(repo)
   : >"$tmp/updates.tsv"
-  rm -f "$tmp/sizes.tsv"
+  rm -f "$tmp/sizes.tsv" "$tmp/flatpak_installed.tsv"
   step updates "checking repository updates"
-  local repo_out aur_helper aur_out checkup_db size_fields
+  local repo_out aur_helper aur_out mise_out mise_status checkup_db size_fields name old new
   local -a repo_names
   checkup_db=${TMPDIR:-/tmp}/checkup-db-${UID}/
   repo_out=$(CHECKUPDATES_DB=$checkup_db checkupdates --nocolor 2>/dev/null)
@@ -415,6 +446,7 @@ check_updates() {
     aur_helper=$(command -v yay || command -v paru || true)
     if [[ -n $aur_helper ]]; then
       step updates "checking AUR updates"
+      checked+=(aur)
       if aur_out=$("$aur_helper" -Qua 2>"$tmp/aur.err"); then
         parse_updates aur <<<"$aur_out"
         mapfile -t aur_names < <(awk -F'\x1f' '$4 == "aur" { print $1 }' "$tmp/updates.tsv")
@@ -430,6 +462,46 @@ check_updates() {
       fi
     else
       aur_unavailable=true
+    fi
+  fi
+
+  if command -v flatpak >/dev/null; then
+    flatpak list --columns=application,branch,active 2>/dev/null >"$tmp/flatpak_installed.tsv"
+  fi
+  if [[ -s $tmp/flatpak_installed.tsv ]]; then
+    step updates "checking Flatpak updates"
+    checked+=(flatpak)
+    if flatpak remote-ls --updates --columns=application,branch,commit >"$tmp/flatpak_updates.tsv" 2>"$tmp/flatpak.err"; then
+      while IFS=$'\t' read -r name old new; do
+        add_update "$name" "$old" "$new" flatpak commit
+      done < <(awk -F'\t' '
+        NR == FNR { commit[$1 FS $2] = substr($3, 1, 12); next }
+        ($1 FS $2) in commit && !(($1 FS $2) in listed) { listed[$1 FS $2] = 1; n++; id[n] = $1; branch[n] = $2; to[n] = substr($3, 1, 12); count[$1]++ }
+        END {
+          for (i = 1; i <= n; i++) {
+            printf "%s%s\t%s\t%s\n", id[i], (count[id[i]] > 1 ? "//" branch[i] : ""), commit[id[i] FS branch[i]], to[i]
+          }
+        }' "$tmp/flatpak_installed.tsv" "$tmp/flatpak_updates.tsv")
+      done_step updates "checking Flatpak updates" "$(count_source flatpak)"
+    else
+      update_errors+=(flatpak)
+      done_step updates "checking Flatpak updates" null
+    fi
+  fi
+
+  if command -v mise >/dev/null; then
+    step updates "checking mise updates"
+    checked+=(mise)
+    mise_out=$(cd / && timeout 20 mise outdated --global --json 2>"$tmp/mise.err")
+    mise_status=$?
+    while IFS=$'\t' read -r name old new; do
+      add_update "$name" "$old" "$new" mise
+    done < <(jq -r 'to_entries[] | select((.value.current | type) == "string" and (.value.latest | type) == "string") | [.key, .value.current, .value.latest] | @tsv' <<<"$mise_out" 2>/dev/null)
+    if ((mise_status == 0)) && ! grep -q '^mise WARN  Could not check' "$tmp/mise.err"; then
+      done_step updates "checking mise updates" "$(count_source mise)"
+    else
+      update_errors+=(mise)
+      done_step updates "checking mise updates" null
     fi
   fi
 
@@ -461,8 +533,8 @@ check_updates() {
     jq 'map({key: .name, value: {download_bytes: (.download_bytes | tonumber), installed_delta_bytes: (.installed_delta_bytes | tonumber)}}) | from_entries' >"$tmp/sizes.json"
   tsv_json "$tmp/updates.tsv" name old new source bump risk reason |
     jq --slurpfile sizes "$tmp/sizes.json" 'map(. + ($sizes[0][.name] // {}))' >"$tmp/updates.json"
-  emit --slurpfile updates "$tmp/updates.json" --argjson aur_unavailable "$aur_unavailable" --args \
-    '{event: "stage", stage: "updates", data: {updates: $updates[0], update_check_errors: $ARGS.positional, aur_unavailable: $aur_unavailable}}' \
+  emit --slurpfile updates "$tmp/updates.json" --argjson aur_unavailable "$aur_unavailable" --arg checked "${checked[*]}" --args \
+    '{event: "stage", stage: "updates", data: {updates: $updates[0], update_check_errors: $ARGS.positional, aur_unavailable: $aur_unavailable, checked: ($checked | split(" "))}}' \
     "${update_errors[@]}"
 }
 check_updates
@@ -471,6 +543,7 @@ check_updates
 
 collect_problems() {
   local count exe source scope unit fragment package units config_errors day today journal_total failed_total row path
+  local action name time version old kept file first
   local -a scope_flag paths rows fragments day_paths
   local -A crash_days=() error_days=()
   problem_errors=()
@@ -503,7 +576,7 @@ collect_problems() {
 
   step problems "reading journal errors"
   journalctl -p err --since "@$query_start" -o json \
-    --output-fields=_EXE,SYSLOG_IDENTIFIER,_TRANSPORT,_COMM,MESSAGE -q --no-pager >"$tmp/journal.json" 2>/dev/null || problem_errors+=(journal)
+    --output-fields=_EXE,SYSLOG_IDENTIFIER,_TRANSPORT,_COMM,MESSAGE,_SYSTEMD_UNIT -q --no-pager >"$tmp/journal.json" 2>/dev/null || problem_errors+=(journal)
 
   journal_source='def s: if type == "string" then . else null end;
     def recent: select((.SYSLOG_IDENTIFIER | s) != "systemd-coredump" and (.__REALTIME_TIMESTAMP | tonumber / 1000000) >= $since);
@@ -565,13 +638,13 @@ collect_problems() {
   done
 
   # The programs behind each day's crashes and errors, and what pacman changed that day
-  jq -c '[.[]? | select(.exe) | {day: (.time / 1000000 | floor | strflocaltime("%F")), subject: (.exe | gsub("[[:cntrl:]]"; " "))}]
-      | group_by(.day, .subject) | map({day: .[0].day, kind: "crash", subject: .[0].subject, count: length})' \
+  jq -c '[.[]? | select(.exe) | (.time / 1000000 | floor) as $at | {day: ($at | strflocaltime("%F")), at: $at, subject: (.exe | gsub("[[:cntrl:]]"; " "))}]
+      | group_by(.day, .subject) | map({day: .[0].day, kind: "crash", subject: .[0].subject, count: length, first: (map(.at) | min | strflocaltime("%H:%M"))})' \
     "$tmp/cores.json" >"$tmp/day_crashes.json" 2>/dev/null || echo '[]' >"$tmp/day_crashes.json"
   jq -nc --argjson since "$since_epoch" "$journal_source"'
       [inputs | select((.SYSLOG_IDENTIFIER | s) != "systemd-coredump")
-        | {day: (.__REALTIME_TIMESTAMP | tonumber / 1000000 | floor | strflocaltime("%F")), subject: (source | sub("^ident:"; ""))}]
-      | group_by(.day, .subject) | map({day: .[0].day, kind: "error", subject: .[0].subject, count: length})' \
+        | (.__REALTIME_TIMESTAMP | tonumber / 1000000 | floor) as $at | {day: ($at | strflocaltime("%F")), at: $at, subject: (source | sub("^ident:"; ""))}]
+      | group_by(.day, .subject) | map({day: .[0].day, kind: "error", subject: .[0].subject, count: length, first: (map(.at) | min | strflocaltime("%H:%M"))})' \
     "$tmp/journal.json" >"$tmp/day_errors.json" 2>/dev/null || echo '[]' >"$tmp/day_errors.json"
   mapfile -t day_paths < <(jq -r '.[]?.subject | select(startswith("/"))' "$tmp/day_crashes.json" "$tmp/day_errors.json" 2>/dev/null | sort -u)
   owners_of "${day_paths[@]}"
@@ -590,6 +663,7 @@ collect_problems() {
     / \[ALPM\] (upgraded|downgraded|installed|reinstalled|removed) / {
       day = substr($1, 2, 10)
       if (day < start) next
+      time = substr($1, 13, 5)
       line = $0
       sub(/^.*\[ALPM\] /, "", line)
       action = line
@@ -600,8 +674,20 @@ collect_problems() {
       version = rest
       sub(/^[^ ]* \(/, "", version)
       sub(/\)$/, "", version)
-      printf "%s\x1f%s\x1f%s\x1f%s\n", day, action, name, version
-    }' "$pacman_log" >"$tmp/day_changes.tsv" 2>/dev/null
+      printf "%s\x1f%s\x1f%s\x1f%s\x1f%s\n", day, action, name, time, version
+    }' "$pacman_log" >"$tmp/day_changes_raw.tsv" 2>/dev/null
+  cache_index
+  while IFS=$'\x1f' read -r day action name time version; do
+    kept=-
+    if [[ $version == *" -> "* ]]; then
+      old=${version%% -> *}
+      kept=${kept_in[$name-$old]:-none}
+    fi
+    printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$day" "$action" "$name" "$time" "$kept" "$version"
+  done <"$tmp/day_changes_raw.tsv" >"$tmp/day_changes.tsv"
+  jq -n '[inputs | select(._SYSTEMD_UNIT | type == "string") | {unit: ._SYSTEMD_UNIT, at: (.__REALTIME_TIMESTAMP | tonumber / 1000000 | floor)}]
+      | group_by(.unit) | map({key: .[0].unit, value: (map(.at) | min | strflocaltime("%F %H:%M"))}) | from_entries' \
+    "$tmp/journal.json" >"$tmp/unit_first.json" 2>/dev/null || echo '{}' >"$tmp/unit_first.json"
 
   step problems "checking failed units"
   failed_total=0
@@ -615,20 +701,26 @@ collect_problems() {
     while read -r unit _; do
       [[ -n $unit ]] || continue
       fragment=$(systemctl "${scope_flag[@]}" show -P FragmentPath -- "$unit" 2>/dev/null)
-      rows+=("$unit"$'\x1f'"$fragment")
+      rows+=("$unit"$'\x1f'"$fragment"$'\x1f'"$scope")
       fragments+=("$fragment")
     done <<<"$units"
   done
   owners_of "${fragments[@]}"
   for row in "${rows[@]}"; do
-    unit=${row%%$'\x1f'*}
-    fragment=${row#*$'\x1f'}
+    IFS=$'\x1f' read -r unit fragment scope <<<"$row"
+    scope_flag=()
+    [[ $scope == user ]] && scope_flag=(--user)
     package=""
     if [[ -n $fragment ]]; then
       owner_of "$fragment"
       package=$REPLY
     fi
-    add_problem failed-unit "$unit" 1 "$package" "$fragment"
+    first=$(jq -r --arg unit "$unit" '.[$unit] // empty' "$tmp/unit_first.json" 2>/dev/null)
+    if [[ -z $first ]]; then
+      first=$(systemctl "${scope_flag[@]}" show -P InactiveEnterTimestamp -- "$unit" 2>/dev/null)
+      [[ -n $first ]] && first=$(date -d "$first" '+%F %H:%M' 2>/dev/null)
+    fi
+    add_problem failed-unit "$unit" 1 "$package" "$fragment" "" "" "" "" "" "$first"
     failed_total=$((failed_total + 1))
   done
   if [[ " ${problem_errors[*]} " == *" units "* ]]; then
@@ -650,16 +742,19 @@ collect_problems() {
     done_step problems "checking Hyprland config" "$config_errors"
   fi
 
-  tsv_json "$tmp/problems.tsv" kind subject count package status update signal frames last message libraries |
+  tsv_json "$tmp/problems.tsv" kind subject count package status update signal frames last message libraries first |
     jq 'map(.count |= tonumber)' >"$tmp/problems.json"
   tsv_json "$tmp/activity.tsv" date crashes errors |
     jq --slurpfile crashes "$tmp/day_crashes.json" --slurpfile errors "$tmp/day_errors.json" --slurpfile owners "$tmp/day_owners.json" --rawfile changes "$tmp/day_changes.tsv" '
       def by_day: group_by(.day) | map({key: .[0].day, value: map(del(.day))}) | from_entries;
       (($crashes[0] // []) + ($errors[0] // []) | map(. + (($owners[0] // {})[.subject] // empty | {package: .}) // .) | by_day) as $sources
-      | ($changes | split("\n") | map(select(length > 0) | gsub("[[:cntrl:]]"; " ") | split(" ") | {day: .[0], action: .[1], name: .[2], version: (.[3:] | join(" "))}) | by_day) as $pacman
+      | ($changes | split("\n") | map(select(length > 0) | gsub("[[:cntrl:]]"; " ") | split(" ") | {day: .[0], action: .[1], name: .[2], time: .[3], cached: (.[4] | if . == "-" then "" else . end), version: (.[5:] | join(" "))}) | by_day) as $pacman
       | map(.crashes |= tonumber | .errors |= tonumber | .sources = ($sources[.date] // []) | .changes = ($pacman[.date] // []))' >"$tmp/activity.json"
-  emit --slurpfile problems "$tmp/problems.json" --slurpfile activity "$tmp/activity.json" --argjson config_errors "$config_errors" --args \
-    '{event: "stage", stage: "problems", data: {problems: $problems[0], activity: $activity[0], problem_check_errors: $ARGS.positional, config_errors: $config_errors}}' \
+  journalctl --list-boots -o json --no-pager 2>/dev/null |
+    jq -c --argjson start "$window_start" '[.[]? | .first_entry / 1000000 | floor | select(. >= $start) | strflocaltime("%F %H:%M")]' >"$tmp/boots.json" 2>/dev/null
+  [[ -s $tmp/boots.json ]] || echo '[]' >"$tmp/boots.json"
+  emit --slurpfile problems "$tmp/problems.json" --slurpfile activity "$tmp/activity.json" --slurpfile boots "$tmp/boots.json" --argjson config_errors "$config_errors" --args \
+    '{event: "stage", stage: "problems", data: {problems: $problems[0], activity: $activity[0], boots: $boots[0], problem_check_errors: $ARGS.positional, config_errors: $config_errors}}' \
     "${problem_errors[@]}"
 }
 collect_problems
@@ -667,8 +762,8 @@ collect_problems
 collect_anatomy() {
   local os desktop omarchy="" kernel_running kernel_pkg="" kernel_installed="" reboot_pending=false cache_dir cache_bytes=0 cache_freeable paccache_out paccache_bytes foreign day today upgrades_json
   local uptime_seconds nvidia_loaded="" nvidia_installed="" hyprland_running="" hyprland_installed="" hyprland_bin packages explicit orphans
-  local cache_home=${XDG_CACHE_HOME:-$HOME/.cache} name old dir file kept
-  local -a names upgrades=() cache_dirs=()
+  local cache_home=${XDG_CACHE_HOME:-$HOME/.cache} name old source dir file kept pid exe base lines
+  local -a names upgrades=()
   local -A per_day=()
 
   os=$(. /etc/os-release 2>/dev/null && printf '%s' "${NAME:-}")
@@ -747,23 +842,12 @@ collect_anatomy() {
   foreign=$(grep -c . <<<"$foreign_names")
   ((foreign > 0)) && printf 'aur\x1f%d\n' "$foreign" >>"$tmp/repos.tsv"
 
-  mapfile -t names < <(cut -d$'\x1f' -f1 "$tmp/updates.tsv")
-  mapfile -t cache_dirs < <(pacman-conf CacheDir 2>/dev/null)
+  mapfile -t names < <(awk -F'\x1f' '$4 == "repo" || $4 == "aur" { print $1 }' "$tmp/updates.tsv")
+  cache_index
   : >"$tmp/cached.tsv"
-  while IFS=$'\x1f' read -r name old _; do
-    kept=""
-    for dir in "${cache_dirs[@]}"; do
-      for file in "${dir%/}/$name-$old-"*.pkg.tar.*; do
-        [[ -f $file && $file != *.sig ]] && kept=pacman && break 2
-      done
-    done
-    if [[ -z $kept ]]; then
-      for file in "$cache_home/yay/$name/$name-$old-"*.pkg.tar.* "$cache_home/paru/clone/$name/$name-$old-"*.pkg.tar.*; do
-        [[ -f $file && $file != *.sig ]] || continue
-        [[ $file == "$cache_home/yay/"* ]] && kept=yay || kept=paru
-        break
-      done
-    fi
+  while IFS=$'\x1f' read -r name old _ source _; do
+    [[ $source == repo || $source == aur ]] || continue
+    kept=${kept_in[$name-$old]:-}
     [[ -n $kept ]] && printf '%s\x1f%s\n' "$name" "$kept" >>"$tmp/cached.tsv"
   done <"$tmp/updates.tsv"
   : >"$tmp/deps.tsv"
@@ -851,6 +935,32 @@ collect_anatomy() {
     "$tmp/journal_lines.ndjson" >"$tmp/journal_lines.json" 2>/dev/null
   [[ -s $tmp/journal_lines.json ]] || echo '[]' >"$tmp/journal_lines.json"
 
+  grep -sH ' (deleted)$' /proc/[0-9]*/maps | awk '$(NF - 1) ~ /^\/(usr|opt)\// {
+      pid = $1; sub(/^\/proc\//, "", pid); sub(/\/maps:.*/, "", pid); print pid "\x1f" $(NF - 1)
+    }' | sort -u >"$tmp/stale_maps.tsv"
+  for pid in $(cut -d$'\x1f' -f1 "$tmp/stale_maps.tsv" | sort -u); do
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null) && printf '%s\x1f%s\n' "$pid" "${exe% (deleted)}"
+  done >"$tmp/stale_exes.tsv"
+  awk -F'\x1f' 'NR == FNR { exe[$1] = $2; next } $1 in exe { print exe[$1] "\x1f" $2 }' "$tmp/stale_exes.tsv" "$tmp/stale_maps.tsv" | sort -u |
+    while IFS=$'\x1f' read -r exe file; do
+      library_owner "$file"
+      printf '%s\x1f%s\x1f%s\n' "$exe" "$file" "$REPLY"
+    done >"$tmp/stale.tsv"
+  jq -Rn '[inputs | split("\u001f")] | group_by(.[0]) | map({program: (.[0][0] | split("/") | last), files: (map(.[1] + " " + .[2]) | join("|"))})' \
+    <"$tmp/stale.tsv" >"$tmp/stale.json"
+
+  while IFS= read -r -d '' file; do
+    base=${file%.pac*}
+    REPLY=""
+    [[ -e $base ]] && owner_of "$base"
+    lines=null
+    if [[ -r $file && -r $base ]] && command -v diff >/dev/null; then
+      lines=$(diff -- "$base" "$file" 2>/dev/null | grep -c '^[<>]')
+    fi
+    printf '%s\x1f%s\x1f%s\x1f%s\n' "$file" "$REPLY" "$(date -r "$file" +%F)" "$lines"
+  done < <(find /etc \( -name '*.pacnew' -o -name '*.pacsave' -o -name '*.pacsave.[0-9]*' \) -type f -print0 2>/dev/null) >"$tmp/config_files.tsv"
+  tsv_json "$tmp/config_files.tsv" path package date changed_lines | jq 'map(.changed_lines |= fromjson)' >"$tmp/config_files.json"
+
   jq -Rn '[inputs | split("\u001f") | {(.[0]): (.[1] | tonumber)}] | add // {}' <"$tmp/repos.tsv" >"$tmp/repos.json"
   jq -Rn '[inputs | split("\u001f") | {(.[0]): .[1]}] | add // {}' <"$tmp/cached.tsv" >"$tmp/cached.json"
   jq -Rn 'def list: . // "" | split(",") | map(select(. != ""));
@@ -865,12 +975,14 @@ collect_anatomy() {
     --argjson uptime_seconds "$uptime_seconds" --arg nvidia_loaded "$nvidia_loaded" --arg nvidia_installed "$nvidia_installed" \
     --arg hyprland_running "$hyprland_running" --arg hyprland_installed "$hyprland_installed" \
     --slurpfile repos "$tmp/repos.json" --slurpfile deps "$tmp/deps.json" --slurpfile journal "$tmp/journal_lines.json" --slurpfile cached "$tmp/cached.json" \
+    --slurpfile stale "$tmp/stale.json" --slurpfile config_files "$tmp/config_files.json" \
     '{event: "stage", stage: "anatomy", data: {hostname: $hostname, os: $os, desktop: $desktop, omarchy: $omarchy,
       packages: $packages, explicit: $explicit, orphans: $orphans, orphan_names: ($orphan_names | split("\n") | map(select(length > 0)) | .[:40]), cache_bytes: $cache_bytes, cache_freeable_bytes: $cache_freeable,
       kernel_running: $kernel_running, kernel_installed: $kernel_installed, kernel_package: $kernel_package, reboot_pending: $reboot_pending,
       uptime_seconds: $uptime_seconds, nvidia_loaded: $nvidia_loaded, nvidia_installed: $nvidia_installed,
       hyprland_running: $hyprland_running, hyprland_installed: $hyprland_installed,
-      upgrades_per_day: $upgrades_per_day, repos: $repos[0], deps: $deps[0], cached: $cached[0], journal: $journal[0]}}'
+      upgrades_per_day: $upgrades_per_day, repos: $repos[0], deps: $deps[0], cached: $cached[0], journal: $journal[0],
+      stale_programs: $stale[0], config_files: $config_files[0]}}'
 }
 
 journal_line='def s: if type == "string" then . else null end;
@@ -1031,20 +1143,35 @@ follow_sources() {
   wait
 }
 
+installs_stamp() {
+  local data=${XDG_DATA_HOME:-$HOME/.local/share}
+  stat -c '%n %Y' -- /var/lib/flatpak/.changed "${FLATPAK_USER_DIR:-$data/flatpak}/.changed" "${MISE_DATA_DIR:-$data/mise}"/installs/* 2>/dev/null
+}
+
 follow_events() {
-  local line status message due=0 timeout file name
+  local line status message due=0 timeout file name stamp current next=$((SECONDS + 60))
+  stamp=$(installs_stamp)
   trap 'rm -rf "$tmp"' EXIT
   trap 'exit 143' TERM
   while true; do
-    timeout=3600
+    if ((SECONDS >= next)); then
+      next=$((SECONDS + 60))
+      current=$(installs_stamp)
+      if [[ $current != "$stamp" ]]; then
+        stamp=$current
+        ((due)) || due=$((SECONDS + 3))
+      fi
+    fi
+    timeout=$((next - SECONDS))
     if ((due)); then
       if ((SECONDS >= due)); then
         due=0
         recheck
         continue
       fi
-      timeout=$((due - SECONDS))
+      ((due - SECONDS < timeout)) && timeout=$((due - SECONDS))
     fi
+    ((timeout > 0)) || timeout=1
     IFS= read -r -t "$timeout" line
     status=$?
     ((status > 128)) && continue
@@ -1162,7 +1289,7 @@ echo "${bold}Pending updates${reset} ${dim}($total: $high high, $medium medium r
 if ((total == 0 && ${#update_errors[@]} == 0)); then
   echo "  none"
 fi
-name_width=$(awk -F'\x1f' '{ n = length($1) + ($4 == "aur" ? 6 : 0); if (n > max) max = n } END { print max + 0 }' "$tmp/updates.tsv")
+name_width=$(awk -F'\x1f' '{ n = length($1) + ($4 == "aur" || $4 == "mise" ? 6 : $4 == "flatpak" ? 10 : 0); if (n > max) max = n } END { print max + 0 }' "$tmp/updates.tsv")
 for risk in high medium low; do
   case $risk in
     high) color=$red label="HIGH  " ;;
@@ -1172,7 +1299,11 @@ for risk in high medium low; do
   while IFS=$'\x1f' read -r name old new source _ row_risk reason; do
     [[ $row_risk == "$risk" ]] || continue
     suffix=""
-    [[ $source == aur ]] && suffix=" (AUR)"
+    case $source in
+      aur) suffix=" (AUR)" ;;
+      flatpak) suffix=" (Flatpak)" ;;
+      mise) suffix=" (mise)" ;;
+    esac
     printf '  %s%s%s  %-*s  %s -> %s%s%s\n' "$color" "$label" "$reset" "$name_width" "$name$suffix" "$old" "$new" \
       "${reason:+  $dim}" "${reason:+$reason$reset}"
   done <"$tmp/updates.tsv"
@@ -1181,6 +1312,8 @@ for source in "${update_errors[@]}"; do
   case $source in
     repo) source_label="repository" ;;
     aur) source_label="AUR" ;;
+    flatpak) source_label="Flatpak" ;;
+    mise) source_label="mise" ;;
   esac
   echo "  ${red}Could not check $source_label updates${reset}"
 done
