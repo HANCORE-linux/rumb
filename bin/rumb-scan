@@ -394,7 +394,7 @@ check_updates() {
   : >"$tmp/updates.tsv"
   rm -f "$tmp/sizes.tsv" "$tmp/flatpak_installed.tsv"
   step updates "checking repository updates"
-  local repo_out aur_helper aur_out mise_out checkup_db size_fields name old new
+  local repo_out aur_helper aur_out mise_out mise_status checkup_db size_fields name old new
   local -a repo_names
   checkup_db=${TMPDIR:-/tmp}/checkup-db-${UID}/
   repo_out=$(CHECKUPDATES_DB=$checkup_db checkupdates --nocolor 2>/dev/null)
@@ -462,10 +462,12 @@ check_updates() {
   if command -v mise >/dev/null; then
     step updates "checking mise updates"
     checked+=(mise)
-    if mise_out=$(cd / && mise outdated --global --json 2>"$tmp/mise.err"); then
-      while IFS=$'\t' read -r name old new; do
-        add_update "$name" "$old" "$new" mise
-      done < <(jq -r 'to_entries[] | select((.value.current | type) == "string" and (.value.latest | type) == "string") | [.key, .value.current, .value.latest] | @tsv' <<<"$mise_out" 2>/dev/null)
+    mise_out=$(cd / && timeout 20 mise outdated --global --json 2>"$tmp/mise.err")
+    mise_status=$?
+    while IFS=$'\t' read -r name old new; do
+      add_update "$name" "$old" "$new" mise
+    done < <(jq -r 'to_entries[] | select((.value.current | type) == "string" and (.value.latest | type) == "string") | [.key, .value.current, .value.latest] | @tsv' <<<"$mise_out" 2>/dev/null)
+    if ((mise_status == 0)) && ! grep -q '^mise WARN  Could not check' "$tmp/mise.err"; then
       done_step updates "checking mise updates" "$(count_source mise)"
     else
       update_errors+=(mise)

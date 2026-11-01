@@ -2816,7 +2816,7 @@ fn counted(value: u64, one: &str, many: &str) -> String {
     format!("{} {}", thousands(value), if value == 1 { one } else { many })
 }
 
-fn eye_log(app: &App) -> (Vec<(String, String, usize)>, bool) {
+pub fn eye_log(app: &App) -> (Vec<(String, String, usize)>, bool) {
     let mut lines: Vec<(String, String)> = Vec::new();
     let kind = |name: &str| app.problems.iter().filter(|problem| problem.kind == name).map(|problem| problem.count).sum::<u64>();
     if let Some(last) = &app.last_upgrade {

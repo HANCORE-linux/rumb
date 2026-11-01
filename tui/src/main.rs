@@ -2425,6 +2425,18 @@ mod tests {
     }
 
     #[test]
+    fn the_eye_lists_the_flatpak_and_mise_checks_it_ran() {
+        let lines = |app: &App| page::eye_log(app).0.into_iter().map(|(head, tail, _)| format!("{head}  {tail}")).collect::<Vec<_>>();
+        let demo = lines(&demo_at(30_000));
+        for line in ["› checkupdates  8 updates", "› yay -Qua  2 aur", "› flatpak remote-ls --updates  2 updates", "› mise outdated  2 updates"] {
+            assert!(demo.iter().any(|shown| shown == line), "{line:?} missing in {demo:?}");
+        }
+        let mut older = App::new(true, false, Instant::now());
+        older.apply(stage("updates", json!({"updates": []})), Instant::now());
+        assert!(!lines(&older).iter().any(|line| line.contains("flatpak") || line.contains("mise")), "an older scanner did not check them");
+    }
+
+    #[test]
     fn the_kernel_update_says_a_reboot_follows() {
         let lines = window(&demo_detail("linux"));
         assert!(lines.iter().any(|line| line == "reboot        needed after this update"), "{lines:?}");
