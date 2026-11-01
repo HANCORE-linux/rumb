@@ -223,10 +223,10 @@ fn label(value: &str, pal: &Palette) -> Span<'static> {
 }
 
 fn place_ring(rings: &mut Vec<Placement>, inner: Rect, cell: (u16, u16), spec: crate::ink::RingSpec) -> Rect {
-    let rows = inner.height.saturating_sub(2).min(9);
-    let cols = ((f32::from(rows) * f32::from(cell.1.max(1)) / f32::from(cell.0.max(1))).round() as u16).min(inner.width / 2);
+    let rows = inner.height.saturating_sub(2);
+    let cols = ((f32::from(rows) * f32::from(cell.1.max(1)) / f32::from(cell.0.max(1))).round() as u16).min((inner.width / 2).max(inner.width.saturating_sub(25)));
     rings.push(Placement { rect: Rect::new(inner.x, inner.y, cols, rows), picture: Picture::Ring(Box::new(spec)) });
-    let x = inner.x + cols + 1;
+    let x = inner.x + cols + 2;
     Rect::new(x, inner.y, inner.right().saturating_sub(x), rows)
 }
 
@@ -386,7 +386,8 @@ fn ring_since(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Insta
     };
     let turn = turn.clamp(0.0, 1.0) * reveal(app, now, app.start_at, 0.0, 700.0);
     let lit = (turn * f64::from(slots)).floor() as u16;
-    let dots = (0..lit).map(|k| (k, 0, crate::ink::RING_ROWS, pal.ink2, 85)).collect();
+    let unit = slots / ticks;
+    let dots = (0..lit).filter(|k| k % unit != unit - 1).map(|k| (k, 0, crate::ink::RING_ROWS, pal.ink2, 85)).collect();
     let spec = crate::ink::RingSpec {
         slots,
         dots,
@@ -505,7 +506,7 @@ fn ring_disk(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
         let shown = share * reveal(app, now, app.stage_done_at[3], 0.0, 700.0);
         let color = if preflight.free_ok { pal.ink2 } else { pal.alert };
         for k in 0..slots {
-            if f64::from(k) + 0.5 < shown * f64::from(slots) {
+            if f64::from(k) + 0.5 < shown * f64::from(slots) && k % 10 != 9 {
                 dots.push((k, 4, crate::ink::RING_ROWS, color, 90));
             }
         }
@@ -513,7 +514,7 @@ fn ring_disk(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
     }
     let freeable = app.anatomy.as_ref().and_then(|anatomy| anatomy.cache_freeable_bytes.filter(|_| anatomy.cache_bytes > 0).map(|freeable| (freeable as f64 / anatomy.cache_bytes as f64).clamp(0.0, 1.0)));
     if let Some(share) = freeable {
-        for k in 0..slots {
+        for k in (0..slots).filter(|k| k % 10 != 9) {
             let free = f64::from(k) + 0.5 >= (1.0 - share) * f64::from(slots);
             dots.push((k, 0, 3, if free { pal.warn } else { pal.ink2 }, if free { 95 } else { 45 }));
         }
@@ -1125,12 +1126,13 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pa
         for (left, names, total) in [(true, &deps.depends_on, deps.depends), (false, &deps.required_names, deps.required_by)] {
             let side = dep_side(names, if left { deps.added.as_slice() } else { &[] }, &pending, &troubled, cap);
             let heading = match (left, total) {
-                (true, 0) => format!("{} nothing", if deps.version.is_empty() { "it depends on" } else { "it will depend on" }),
+                (true, 0) => "depends on nothing".to_string(),
                 (true, _) => format!("{} {total}", if deps.version.is_empty() { "it depends on" } else { "it will depend on" }),
                 (false, 0) => "nothing requires it".to_string(),
                 (false, 1) => "1 requires it".to_string(),
                 (false, _) => format!("{total} require it"),
             };
+            let heading = fit(&heading, column as usize - 1);
             let offset = rows.saturating_sub(side.len() as u16) / 2;
             let heading_y = top + offset.saturating_sub(1);
             if left {
@@ -2837,8 +2839,15 @@ fn band_rows(area: Rect) -> u16 {
     by_height.min(by_width.max(15))
 }
 
-fn grown_rows(area: Rect, tiles: bool) -> u16 {
-    let used = 2 + if tiles { TILES_HEIGHT + 3 } else { 0 };
+fn tiles_height(area: Rect, cell: (u16, u16)) -> u16 {
+    let inner = (area.width.saturating_sub(2) / 6).saturating_sub(4);
+    let cols = (inner / 2).max(inner.saturating_sub(25));
+    let rows = (f32::from(cols) * f32::from(cell.0.max(1)) / f32::from(cell.1.max(1))) as u16;
+    (rows + 5).clamp(TILES_HEIGHT, (area.height / 4).max(TILES_HEIGHT))
+}
+
+fn grown_rows(area: Rect, tiles: Option<u16>) -> u16 {
+    let used = 2 + tiles.map_or(0, |height| height + 3);
     let by_height = area.height.saturating_sub(used + 1).clamp(15, 40);
     let by_width = (f32::from(area.width.saturating_sub(116)) / 3.6) as u16;
     by_height.min(by_width.max(15))
@@ -2872,7 +2881,9 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
     let keys = Rect::new(area.x, area.bottom() - 1, area.width, 1);
     let band_visible = app.visible[1];
     let alone = band_visible && !app.lists_shown();
-    let rows = if alone { grown_rows(area, app.visible[0]) } else { band_rows(area) };
+    let ring = (9.0 * f32::from(cell.1) / f32::from(cell.0.max(1))).round() as u16;
+    let tile_h = if app.pictures && (area.width.saturating_sub(2) / 6).saturating_sub(4) >= ring + 18 { tiles_height(area, cell) } else { TILES_HEIGHT };
+    let rows = if alone { grown_rows(area, app.visible[0].then_some(tile_h)) } else { band_rows(area) };
     let eye_w = ((f32::from(rows) * 3.6).round() as u16).min(area.width.saturating_sub(4));
     let eye_x = area.x + (area.width - eye_w) / 2;
     let (cw, ch) = (f32::from(cell.0.max(1)), f32::from(cell.1.max(1)));
@@ -2883,12 +2894,12 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
     let eye_mid = eye_x + eye_w / 2;
     let inner = |x: u16| x >= span_left + 6 && x + 6 <= span_right;
 
-    let tiles = app.visible[0].then(|| Rect::new(area.x, area.y + 1, area.width, TILES_HEIGHT));
+    let tiles = app.visible[0].then(|| Rect::new(area.x, area.y + 1, area.width, tile_h));
     let tile_w = area.width.saturating_sub(2) / 6;
     let tile_rect = |index: u16| {
         let x = area.x + 1 + index * tile_w;
         let w = if index == 5 { area.right() - 1 - x } else { tile_w };
-        Rect::new(x, area.y + 1, w, TILES_HEIGHT)
+        Rect::new(x, area.y + 1, w, tile_h)
     };
     let centres: Vec<u16> = (0..6u16).map(|index| tile_rect(index).x + tile_rect(index).width / 2).collect();
     let straight: Vec<usize> = (0..6).filter(|index| inner(centres[*index])).collect();

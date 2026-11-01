@@ -948,6 +948,64 @@ mod tests {
         assert_eq!(still.dilation(now), 1.0);
     }
 
+    fn rings(app: &App, width: u16, height: u16) -> Vec<(ratatui::layout::Rect, ink::RingSpec)> {
+        let (_, scene) = render(app, width, height, app.started + Duration::from_secs(60));
+        scene.placements.into_iter().filter_map(|placement| match placement.picture {
+            page::Picture::Ring(spec) => Some((placement.rect, *spec)),
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn the_rings_grow_with_a_big_window_and_keep_room_for_their_words() {
+        let app = demo_at(30_000);
+        let small = rings(&app, 271, 60);
+        let big = rings(&app, 400, 100);
+        assert_eq!((small.len(), big.len()), (6, 6));
+        assert!(big.iter().all(|(rect, _)| rect.height > small[0].0.height && rect.width == big[0].0.width), "{big:?}");
+        let tile_w = (400 - 2) / 6;
+        for (index, (rect, _)) in rings(&app, 400, 200).iter().enumerate().take(5) {
+            let inner_right = 1 + (index as u16 + 1) * tile_w - 2;
+            assert!(inner_right - (rect.right() + 2) >= 23, "tile {index}: text column of {}", inner_right - (rect.right() + 2));
+        }
+        assert!(small.iter().all(|(rect, _)| rect.height == small[0].0.height), "small windows keep one ring height");
+    }
+
+    #[test]
+    fn the_fill_rings_leave_a_gap_after_every_unit() {
+        let found = rings(&demo_at(30_000), 271, 60);
+        let since = &found[2].1;
+        assert_eq!((since.slots, since.ticks), (90, 30), "the since ring counts days");
+        assert!(!since.dots.is_empty() && since.dots.iter().all(|dot| dot.0 % 3 != 2), "one wedge per day: {:?}", since.dots.iter().map(|dot| dot.0).collect::<Vec<_>>());
+        let disk = &found[4].1;
+        assert_eq!(disk.slots, 100);
+        assert!(!disk.dots.is_empty() && disk.dots.iter().all(|dot| dot.0 % 10 != 9), "one wedge per 10 %");
+        let (rect, _) = found[2];
+        let rows = screen(&demo_at(30_000), 271, 60);
+        let (x, _) = find(&rows, "on 10-03 21:10").unwrap();
+        assert_eq!(x, rect.right() + 2, "the text starts two cells after the ring");
+    }
+
+    #[test]
+    fn the_map_headings_stay_inside_the_frame_in_a_narrow_window() {
+        let mut app = demo_at(26_000);
+        app.visible = [false, false, true, false, false];
+        app.focus = Pane::Updates;
+        for (width, height) in [(92u16, 32u16), (100, 34), (271, 60)] {
+            let rows = screen(&app, width, height);
+            assert!(find(&rows, "outer band low").is_some(), "{width}×{height} shows the map");
+            let (x, y) = find(&rows, "it will depend on 24").unwrap_or_else(|| panic!("{width}: heading cut: {rows:#?}"));
+            assert!(x >= 2 && rows[usize::from(y)].starts_with('│'), "{width}: heading starts at column {x}");
+        }
+        let deps = app.anatomy.as_mut().unwrap().deps.get_mut("hyprland").unwrap();
+        (deps.depends, deps.depends_on, deps.added) = (0, Vec::new(), Vec::new());
+        for (width, height) in [(92u16, 32u16), (100, 34)] {
+            let rows = screen(&app, width, height);
+            let (x, y) = find(&rows, "depends on nothing").unwrap_or_else(|| panic!("{width}: {rows:#?}"));
+            assert!(x >= 2 && rows[usize::from(y)].starts_with('│'), "{width}: heading starts at column {x}: {}", rows[usize::from(y)]);
+        }
+    }
+
     #[test]
     fn update_details_use_the_rows_of_every_window() {
         let app = demo_detail("hyprland");

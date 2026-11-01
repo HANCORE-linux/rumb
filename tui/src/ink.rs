@@ -162,8 +162,8 @@ pub fn ring(spec: &RingSpec, pal: &Palette, width: u32, height: u32, cell_height
     let radius = |row: u8| first + f32::from(row) * pitch;
     for (slot, row, color) in &spec.glow {
         let (x, y) = at(f32::from(*slot) + 0.5, radius(*row));
-        let reach = r * 0.34;
-        let stops = vec![GradientStop::new(0.0, sk(*color, 0.38)), GradientStop::new(1.0, sk(*color, 0.0))];
+        let reach = r * 0.26;
+        let stops = vec![GradientStop::new(0.0, sk(*color, 0.16)), GradientStop::new(1.0, sk(*color, 0.0))];
         if let (Some(shader), Some(path)) = (RadialGradient::new(Point::from_xy(x, y), 0.0, Point::from_xy(x, y), reach, stops, SpreadMode::Pad, Transform::identity()), PathBuilder::from_circle(x, y, reach)) {
             let paint = Paint { shader, anti_alias: true, ..Paint::default() };
             pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
