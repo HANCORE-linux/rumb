@@ -2265,7 +2265,7 @@ mod tests {
         let day = app.shown_days()[app.chosen_day()].date.clone();
         let activity = app.activity.iter_mut().find(|activity| activity.date == day).unwrap();
         for (subject, package) in [("/usr/bin/gone", "gone"), ("/usr/lib/libva-helper", "mesa"), ("/opt/tool/bin/tool", "")] {
-            activity.sources.push(crate::app::DaySource { kind: "error".into(), subject: subject.into(), count: 1, package: package.into() });
+            activity.sources.push(crate::app::DaySource { kind: "error".into(), subject: subject.into(), count: 1, package: package.into(), first: String::new() });
         }
         let lines = window(&app);
         for line in ["1 × error · gone · gone · no update pending", "1 × error · libva-helper · mesa → 1:25.2.4", "1 × error · tool"] {
@@ -2472,6 +2472,46 @@ mod tests {
         let app = demo_at(30_000);
         assert!(screen(&app, 271, 60).iter().any(|row| row.contains("│ 1 wedge = 1 row · length ● act ● look ● ok    │")));
         assert!(screen(&app, 358, 85).iter().any(|row| row.contains(" 1 wedge = 1 row · length ● act ● look ● ok ")));
+    }
+
+    #[test]
+    fn the_since_window_names_what_started_after_an_upgrade_and_the_way_back() {
+        let mut app = demo_at(30_000);
+        app.tile = Some(2);
+        app.overlay = true;
+        let lines = window(&app);
+        for line in ["started after 10-08 13:12 nautilus 49.0 → 49.1", "              from 10-09 09:41 · crashed: nautilus", "              back to 49.0-1 in the pacman cache"] {
+            assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
+        }
+        let day = |date: &str, sources: Value, changes: Value| json!({"date": date, "crashes": 0, "errors": 0, "sources": sources, "changes": changes});
+        let history = |boots: Value| {
+            let mut app = App::new(true, false, Instant::now());
+            app.apply(stage("problems", json!({
+                "problems": [{"kind": "failed-unit", "subject": "tpm2-setup.service", "count": 1, "package": "systemd", "status": "no-update", "first": "2026-10-21 14:38"}],
+                "activity": [
+                    day("2026-10-18", json!([]), json!([])),
+                    day("2026-10-19", json!([]), json!([])),
+                    day("2026-10-21", json!([{"kind": "error", "subject": "/usr/lib/systemd/tpm2-setup", "count": 4, "package": "systemd", "first": "14:38"}]),
+                        json!([{"action": "upgraded", "name": "systemd", "version": "261.2-1 -> 262-1", "time": "14:21", "cached": "none"}])),
+                ],
+                "boots": boots,
+            })), Instant::now());
+            app.tile = Some(2);
+            app.overlay = true;
+            app
+        };
+        assert!(!window(&history(json!(["2026-10-21 14:38"]))).iter().any(|line| line.starts_with("started after")), "without a boot before the upgrade every boot error would look new");
+        let lines = window(&history(json!(["2026-10-19 08:00", "2026-10-21 14:38"])));
+        for line in ["started after 10-21 14:21 systemd 261.2 → 262", "              from 10-21 14:38 · failed: tpm2-setup · errors: tpm2-setup", "              back to 261.2-1 not in a package cache"] {
+            assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
+        }
+        let mut unit = history(json!([]));
+        unit.tile = None;
+        unit.focus = Pane::Problems;
+        let lines = window(&unit);
+        for line in ["first seen    10-21 14:38", "owner changed 10-21 · upgraded systemd  261.2 → 262", "go back       261.2-1 not in a package cache"] {
+            assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
+        }
     }
 
     #[test]

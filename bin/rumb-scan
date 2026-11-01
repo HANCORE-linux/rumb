@@ -282,7 +282,7 @@ crash_details() {
 }
 
 add_problem() {
-  local kind=$1 subject=$2 count=$3 package=$4 path=${5:-} signal=${6:-} frames=${7:-} last=${8:-} message=${9:-} libraries=${10:-} status update=""
+  local kind=$1 subject=$2 count=$3 package=$4 path=${5:-} signal=${6:-} frames=${7:-} last=${8:-} message=${9:-} libraries=${10:-} first=${11:-} status update=""
 
   if [[ $kind == config ]]; then
     status=config
@@ -297,7 +297,7 @@ add_problem() {
     status=no-update
   fi
 
-  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$kind" "${subject//[[:cntrl:]]/ }" "$count" "$package" "$status" "$update" "$signal" "${frames//[[:cntrl:]]/ }" "$last" "${message//[[:cntrl:]]/ }" "${libraries//[[:cntrl:]]/ }" >>"$tmp/problems.tsv"
+  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$kind" "${subject//[[:cntrl:]]/ }" "$count" "$package" "$status" "$update" "$signal" "${frames//[[:cntrl:]]/ }" "$last" "${message//[[:cntrl:]]/ }" "${libraries//[[:cntrl:]]/ }" "$first" >>"$tmp/problems.tsv"
 }
 
 tsv_json() {
@@ -523,7 +523,8 @@ check_updates
 
 collect_problems() {
   local count exe source scope unit fragment package units config_errors day today journal_total failed_total row path
-  local -a scope_flag paths rows fragments day_paths
+  local action name time version old kept file first
+  local -a scope_flag paths rows fragments day_paths cache_dirs
   local -A crash_days=() error_days=()
   problem_errors=()
   : >"$tmp/problems.tsv"
@@ -555,7 +556,7 @@ collect_problems() {
 
   step problems "reading journal errors"
   journalctl -p err --since "@$query_start" -o json \
-    --output-fields=_EXE,SYSLOG_IDENTIFIER,_TRANSPORT,_COMM,MESSAGE -q --no-pager >"$tmp/journal.json" 2>/dev/null || problem_errors+=(journal)
+    --output-fields=_EXE,SYSLOG_IDENTIFIER,_TRANSPORT,_COMM,MESSAGE,_SYSTEMD_UNIT -q --no-pager >"$tmp/journal.json" 2>/dev/null || problem_errors+=(journal)
 
   journal_source='def s: if type == "string" then . else null end;
     def recent: select((.SYSLOG_IDENTIFIER | s) != "systemd-coredump" and (.__REALTIME_TIMESTAMP | tonumber / 1000000) >= $since);
@@ -617,13 +618,13 @@ collect_problems() {
   done
 
   # The programs behind each day's crashes and errors, and what pacman changed that day
-  jq -c '[.[]? | select(.exe) | {day: (.time / 1000000 | floor | strflocaltime("%F")), subject: (.exe | gsub("[[:cntrl:]]"; " "))}]
-      | group_by(.day, .subject) | map({day: .[0].day, kind: "crash", subject: .[0].subject, count: length})' \
+  jq -c '[.[]? | select(.exe) | (.time / 1000000 | floor) as $at | {day: ($at | strflocaltime("%F")), at: $at, subject: (.exe | gsub("[[:cntrl:]]"; " "))}]
+      | group_by(.day, .subject) | map({day: .[0].day, kind: "crash", subject: .[0].subject, count: length, first: (map(.at) | min | strflocaltime("%H:%M"))})' \
     "$tmp/cores.json" >"$tmp/day_crashes.json" 2>/dev/null || echo '[]' >"$tmp/day_crashes.json"
   jq -nc --argjson since "$since_epoch" "$journal_source"'
       [inputs | select((.SYSLOG_IDENTIFIER | s) != "systemd-coredump")
-        | {day: (.__REALTIME_TIMESTAMP | tonumber / 1000000 | floor | strflocaltime("%F")), subject: (source | sub("^ident:"; ""))}]
-      | group_by(.day, .subject) | map({day: .[0].day, kind: "error", subject: .[0].subject, count: length})' \
+        | (.__REALTIME_TIMESTAMP | tonumber / 1000000 | floor) as $at | {day: ($at | strflocaltime("%F")), at: $at, subject: (source | sub("^ident:"; ""))}]
+      | group_by(.day, .subject) | map({day: .[0].day, kind: "error", subject: .[0].subject, count: length, first: (map(.at) | min | strflocaltime("%H:%M"))})' \
     "$tmp/journal.json" >"$tmp/day_errors.json" 2>/dev/null || echo '[]' >"$tmp/day_errors.json"
   mapfile -t day_paths < <(jq -r '.[]?.subject | select(startswith("/"))' "$tmp/day_crashes.json" "$tmp/day_errors.json" 2>/dev/null | sort -u)
   owners_of "${day_paths[@]}"
@@ -642,6 +643,7 @@ collect_problems() {
     / \[ALPM\] (upgraded|downgraded|installed|reinstalled|removed) / {
       day = substr($1, 2, 10)
       if (day < start) next
+      time = substr($1, 13, 5)
       line = $0
       sub(/^.*\[ALPM\] /, "", line)
       action = line
@@ -652,8 +654,30 @@ collect_problems() {
       version = rest
       sub(/^[^ ]* \(/, "", version)
       sub(/\)$/, "", version)
-      printf "%s\x1f%s\x1f%s\x1f%s\n", day, action, name, version
-    }' "$pacman_log" >"$tmp/day_changes.tsv" 2>/dev/null
+      printf "%s\x1f%s\x1f%s\x1f%s\x1f%s\n", day, action, name, time, version
+    }' "$pacman_log" >"$tmp/day_changes_raw.tsv" 2>/dev/null
+  mapfile -t cache_dirs < <(pacman-conf CacheDir 2>/dev/null)
+  while IFS=$'\x1f' read -r day action name time version; do
+    kept=-
+    if [[ $version == *" -> "* ]]; then
+      old=${version%% -> *}
+      kept=""
+      for file in "${cache_dirs[@]/%//$name-$old-}"*.pkg.tar.* "${XDG_CACHE_HOME:-$HOME/.cache}/yay/$name/$name-$old-"*.pkg.tar.* "${XDG_CACHE_HOME:-$HOME/.cache}/paru/clone/$name/$name-$old-"*.pkg.tar.*; do
+        [[ -f $file && $file != *.sig ]] || continue
+        case $file in
+          */yay/*) kept=yay ;;
+          */paru/*) kept=paru ;;
+          *) kept=pacman ;;
+        esac
+        break
+      done
+      [[ -n $kept ]] || kept=none
+    fi
+    printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$day" "$action" "$name" "$time" "$kept" "$version"
+  done <"$tmp/day_changes_raw.tsv" >"$tmp/day_changes.tsv"
+  jq -n '[inputs | select(._SYSTEMD_UNIT | type == "string") | {unit: ._SYSTEMD_UNIT, at: (.__REALTIME_TIMESTAMP | tonumber / 1000000 | floor)}]
+      | group_by(.unit) | map({key: .[0].unit, value: (map(.at) | min | strflocaltime("%F %H:%M"))}) | from_entries' \
+    "$tmp/journal.json" >"$tmp/unit_first.json" 2>/dev/null || echo '{}' >"$tmp/unit_first.json"
 
   step problems "checking failed units"
   failed_total=0
@@ -667,20 +691,26 @@ collect_problems() {
     while read -r unit _; do
       [[ -n $unit ]] || continue
       fragment=$(systemctl "${scope_flag[@]}" show -P FragmentPath -- "$unit" 2>/dev/null)
-      rows+=("$unit"$'\x1f'"$fragment")
+      rows+=("$unit"$'\x1f'"$fragment"$'\x1f'"$scope")
       fragments+=("$fragment")
     done <<<"$units"
   done
   owners_of "${fragments[@]}"
   for row in "${rows[@]}"; do
-    unit=${row%%$'\x1f'*}
-    fragment=${row#*$'\x1f'}
+    IFS=$'\x1f' read -r unit fragment scope <<<"$row"
+    scope_flag=()
+    [[ $scope == user ]] && scope_flag=(--user)
     package=""
     if [[ -n $fragment ]]; then
       owner_of "$fragment"
       package=$REPLY
     fi
-    add_problem failed-unit "$unit" 1 "$package" "$fragment"
+    first=$(jq -r --arg unit "$unit" '.[$unit] // empty' "$tmp/unit_first.json" 2>/dev/null)
+    if [[ -z $first ]]; then
+      first=$(systemctl "${scope_flag[@]}" show -P InactiveEnterTimestamp -- "$unit" 2>/dev/null)
+      [[ -n $first ]] && first=$(date -d "$first" '+%F %H:%M' 2>/dev/null)
+    fi
+    add_problem failed-unit "$unit" 1 "$package" "$fragment" "" "" "" "" "" "$first"
     failed_total=$((failed_total + 1))
   done
   if [[ " ${problem_errors[*]} " == *" units "* ]]; then
@@ -702,16 +732,19 @@ collect_problems() {
     done_step problems "checking Hyprland config" "$config_errors"
   fi
 
-  tsv_json "$tmp/problems.tsv" kind subject count package status update signal frames last message libraries |
+  tsv_json "$tmp/problems.tsv" kind subject count package status update signal frames last message libraries first |
     jq 'map(.count |= tonumber)' >"$tmp/problems.json"
   tsv_json "$tmp/activity.tsv" date crashes errors |
     jq --slurpfile crashes "$tmp/day_crashes.json" --slurpfile errors "$tmp/day_errors.json" --slurpfile owners "$tmp/day_owners.json" --rawfile changes "$tmp/day_changes.tsv" '
       def by_day: group_by(.day) | map({key: .[0].day, value: map(del(.day))}) | from_entries;
       (($crashes[0] // []) + ($errors[0] // []) | map(. + (($owners[0] // {})[.subject] // empty | {package: .}) // .) | by_day) as $sources
-      | ($changes | split("\n") | map(select(length > 0) | gsub("[[:cntrl:]]"; " ") | split(" ") | {day: .[0], action: .[1], name: .[2], version: (.[3:] | join(" "))}) | by_day) as $pacman
+      | ($changes | split("\n") | map(select(length > 0) | gsub("[[:cntrl:]]"; " ") | split(" ") | {day: .[0], action: .[1], name: .[2], time: .[3], cached: (.[4] | if . == "-" then "" else . end), version: (.[5:] | join(" "))}) | by_day) as $pacman
       | map(.crashes |= tonumber | .errors |= tonumber | .sources = ($sources[.date] // []) | .changes = ($pacman[.date] // []))' >"$tmp/activity.json"
-  emit --slurpfile problems "$tmp/problems.json" --slurpfile activity "$tmp/activity.json" --argjson config_errors "$config_errors" --args \
-    '{event: "stage", stage: "problems", data: {problems: $problems[0], activity: $activity[0], problem_check_errors: $ARGS.positional, config_errors: $config_errors}}' \
+  journalctl --list-boots -o json --no-pager 2>/dev/null |
+    jq -c --argjson start "$window_start" '[.[]? | .first_entry / 1000000 | floor | select(. >= $start) | strflocaltime("%F %H:%M")]' >"$tmp/boots.json" 2>/dev/null
+  [[ -s $tmp/boots.json ]] || echo '[]' >"$tmp/boots.json"
+  emit --slurpfile problems "$tmp/problems.json" --slurpfile activity "$tmp/activity.json" --slurpfile boots "$tmp/boots.json" --argjson config_errors "$config_errors" --args \
+    '{event: "stage", stage: "problems", data: {problems: $problems[0], activity: $activity[0], boots: $boots[0], problem_check_errors: $ARGS.positional, config_errors: $config_errors}}' \
     "${problem_errors[@]}"
 }
 collect_problems

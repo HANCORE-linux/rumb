@@ -243,6 +243,8 @@ pub struct Problem {
     pub message: String,
     #[serde(default)]
     pub libraries: String,
+    #[serde(default)]
+    pub first: String,
 }
 
 impl Problem {
@@ -315,6 +317,8 @@ pub struct DaySource {
     pub count: u64,
     #[serde(default)]
     pub package: String,
+    #[serde(default)]
+    pub first: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -322,6 +326,10 @@ pub struct DayChange {
     pub action: String,
     pub name: String,
     pub version: String,
+    #[serde(default)]
+    pub time: String,
+    #[serde(default)]
+    pub cached: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -434,6 +442,7 @@ pub struct App {
     pub problems: Vec<Problem>,
     pub problem_errors: Vec<String>,
     pub activity: Vec<Activity>,
+    pub boots: Vec<String>,
     pub news: Vec<News>,
     pub news_failed: bool,
     pub omarchy_notes: Option<OmarchyNotes>,
@@ -496,6 +505,7 @@ impl App {
             problem_errors: Vec::new(),
             problems: Vec::new(),
             activity: Vec::new(),
+            boots: Vec::new(),
             news: Vec::new(),
             news_failed: false,
             omarchy_notes: None,
@@ -616,6 +626,7 @@ impl App {
             1 => {
                 self.problems = field(&data, "problems")?;
                 self.activity = field(&data, "activity")?;
+                self.boots = field(&data, "boots")?;
                 self.problem_errors = field(&data, "problem_check_errors")?;
                 if let Some(errors) = data.get("config_errors").and_then(Value::as_u64) {
                     self.health.config_errors = Some(errors);
@@ -891,13 +902,16 @@ impl App {
         self.day = Some(if forward { (chosen + 1).min(last) } else { chosen.saturating_sub(1) });
     }
 
-    pub fn first_seen(&self, problem: &Problem) -> Option<(&str, Option<(&str, &DayChange)>)> {
+    pub fn first_seen<'a>(&'a self, problem: &'a Problem) -> Option<(&'a str, Option<(&'a str, &'a DayChange)>)> {
         let kind = if problem.kind == "crash" { "crash" } else { "error" };
-        let first = self.activity.iter().find(|day| day.sources.iter().any(|source| source.kind == kind && source.subject == problem.subject))?;
+        let first = match problem.first.get(..10) {
+            Some(day) if problem.kind == "failed-unit" => day,
+            _ => self.activity.iter().find(|day| day.sources.iter().any(|source| source.kind == kind && source.subject == problem.subject))?.date.as_str(),
+        };
         let change = (!problem.package.is_empty())
-            .then(|| self.activity.iter().filter(|day| day.date <= first.date).flat_map(|day| day.changes.iter().filter(|change| change.name == problem.package).map(move |change| (day.date.as_str(), change))).last())
+            .then(|| self.activity.iter().filter(|day| day.date.as_str() <= first).flat_map(|day| day.changes.iter().filter(|change| change.name == problem.package).map(move |change| (day.date.as_str(), change))).last())
             .flatten();
-        Some((first.date.as_str(), change))
+        Some((first, change))
     }
 
     pub fn cache_command(&self) -> bool {

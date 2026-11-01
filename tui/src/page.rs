@@ -1616,6 +1616,77 @@ fn source_name(app: &App, source: &crate::app::DaySource) -> String {
     source_problem(app, source).map_or_else(|| source.subject.rsplit('/').next().unwrap_or(&source.subject).to_string(), |problem| problem.name().to_string())
 }
 
+fn way_back(change: &crate::app::DayChange, pal: &Palette) -> Option<(String, Color)> {
+    let (old, _) = change.version.split_once(" -> ")?;
+    match change.cached.as_str() {
+        "" => None,
+        "none" => Some((format!("{old} not in a package cache"), pal.warn)),
+        cache => Some((format!("{old} in the {cache} cache"), pal.ink)),
+    }
+}
+
+struct Start<'a> {
+    day: &'a str,
+    change: &'a crate::app::DayChange,
+    first: String,
+    problems: Vec<(&'static str, String)>,
+}
+
+fn starts(app: &App) -> Vec<Start<'_>> {
+    let Some(window) = app.activity.first().map(|day| day.date.as_str()) else { return Vec::new() };
+    let Some(watched) = app.activity.get(2).map(|day| day.date.as_str()) else { return Vec::new() };
+    let mut seen: Vec<(&str, &str, &str, &str, &str)> = Vec::new();
+    for day in &app.activity {
+        for source in &day.sources {
+            if !seen.iter().any(|(kind, subject, ..)| *kind == source.kind && *subject == source.subject) {
+                seen.push((source.kind.as_str(), source.subject.as_str(), source.package.as_str(), day.date.as_str(), source.first.as_str()));
+            }
+        }
+    }
+    for problem in app.problems.iter().filter(|problem| problem.kind == "failed-unit") {
+        if let (Some(day), Some(time)) = (problem.first.get(..10), problem.first.get(11..16)) {
+            seen.push(("unit", problem.subject.as_str(), problem.package.as_str(), day, time));
+        }
+    }
+    let mut groups: Vec<Start> = Vec::new();
+    for (kind, subject, package, day, time) in seen {
+        if package.is_empty() || day <= window {
+            continue;
+        }
+        let Some((changed, change)) = app
+            .activity
+            .iter()
+            .filter(|other| other.date.as_str() >= watched && other.date.as_str() <= day)
+            .flat_map(|other| other.changes.iter().map(move |change| (other.date.as_str(), change)))
+            .rfind(|(changed, change)| change.name == package && matches!(change.action.as_str(), "upgraded" | "downgraded") && (*changed < day || !change.time.is_empty() && !time.is_empty() && change.time.as_str() < time))
+        else {
+            continue;
+        };
+        let at = format!("{changed} {}", change.time);
+        if kind != "crash" && !app.boots.iter().any(|boot| boot.as_str() > window && *boot < at) {
+            continue;
+        }
+        let name = subject.rsplit('/').next().unwrap_or(subject).trim_end_matches(".service").to_string();
+        let first = format!("{} {time}", day.get(5..).unwrap_or(day)).trim_end().to_string();
+        let kind = match kind {
+            "crash" => "crashed",
+            "unit" => "failed",
+            _ => "errors",
+        };
+        match groups.iter_mut().find(|group| group.day == changed && std::ptr::eq(group.change, change)) {
+            Some(group) => {
+                if first < group.first {
+                    group.first = first;
+                }
+                group.problems.push((kind, name));
+            }
+            None => groups.push(Start { day: changed, change, first, problems: vec![(kind, name)] }),
+        }
+    }
+    groups.sort_by(|a, b| (b.day, b.change.time.as_str()).cmp(&(a.day, a.change.time.as_str())));
+    groups
+}
+
 fn change_text(change: &crate::app::DayChange) -> String {
     match change.version.split_once(" -> ") {
         Some((old, new)) => format!("{} {}  {}", change.action, change.name, versions(old, new, 60)),
@@ -1836,6 +1907,22 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
             "PROBLEMS / DAY"
         }
         2 => {
+            for (index, start) in starts(app).iter().take(3).enumerate() {
+                let when = if start.change.time.is_empty() { start.day.get(5..).unwrap_or(start.day).to_string() } else { format!("{} {}", start.day.get(5..).unwrap_or(start.day), start.change.time) };
+                let (old, new) = start.change.version.split_once(" -> ").unwrap_or(("", start.change.version.as_str()));
+                wrapped(&mut lines, if index == 0 { "started after" } else { "" }, &format!("{when}  {}  {}", start.change.name, versions(old, new, 60)), room, pal.ink);
+                let mut kinds: Vec<String> = Vec::new();
+                for kind in ["crashed", "failed", "errors"] {
+                    let names: Vec<&str> = start.problems.iter().filter(|(other, _)| *other == kind).map(|(_, name)| name.as_str()).collect();
+                    if !names.is_empty() {
+                        kinds.push(format!("{kind}: {}", names.join(", ")));
+                    }
+                }
+                wrapped(&mut lines, "", &format!("from {} · {}", start.first, kinds.join(" · ")), room, pal.teal);
+                if let Some((back, color)) = way_back(start.change, pal) {
+                    lines.push((String::new(), format!("back to {back}"), color));
+                }
+            }
             let entries: Vec<(&str, String)> = app
                 .last_upgraded
                 .iter()
@@ -2324,9 +2411,13 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
                 lines.push(("last".into(), problem.last.clone(), pal.ink));
             }
             if let Some((first, change)) = app.first_seen(problem) {
-                lines.push(("first seen".into(), first.get(5..).unwrap_or(first).to_string(), pal.ink));
+                let first = if problem.kind == "failed-unit" { problem.first.get(5..16).unwrap_or(first) } else { first.get(5..).unwrap_or(first) };
+                lines.push(("first seen".into(), first.to_string(), pal.ink));
                 if let Some((day, change)) = change {
                     lines.push(("owner changed".into(), format!("{} · {}", day.get(5..).unwrap_or(day), change_text(change)), pal.ink));
+                    if let Some(back) = way_back(change, pal) {
+                        lines.push(("go back".into(), back.0, back.1));
+                    }
                 }
             }
             if !problem.message.is_empty() {
