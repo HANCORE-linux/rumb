@@ -924,6 +924,14 @@ fn checks(app: &App) -> Vec<(&'static str, String, Severity)> {
             ("not needed", Severity::Ok)
         };
         checks.push(("reboot", reboot.into(), severity));
+        if let Some(stale) = &anatomy.stale_programs {
+            let value = if stale.is_empty() { "none".into() } else { counted(stale.len() as u64, "program", "programs") };
+            checks.push(("restart", value, level(stale.is_empty(), Severity::Warn)));
+        }
+        if let Some(files) = &anatomy.config_files {
+            let value = if files.is_empty() { "none".into() } else { format!("{} waiting", thousands(files.len() as u64)) };
+            checks.push(("configs", value, level(files.is_empty(), Severity::Warn)));
+        }
     }
     if let Some(preflight) = &app.preflight {
         let (snapshot, severity) = match preflight.snapshot_by.as_str() {
@@ -1953,6 +1961,52 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
                     (format!("not needed · {} running, {installed} installed", anatomy.kernel_running), pal.ok)
                 };
                 wrapped(&mut lines, "reboot", &state, room, color);
+            }
+            if let Some(stale) = app.anatomy.as_ref().and_then(|anatomy| anatomy.stale_programs.as_ref()) {
+                if stale.is_empty() {
+                    lines.push(("restart".into(), "no program runs replaced files".into(), pal.ok));
+                } else {
+                    let mut programs: Vec<&crate::app::StaleProgram> = stale.iter().collect();
+                    programs.sort_by(|a, b| b.files.split('|').count().cmp(&a.files.split('|').count()).then_with(|| a.program.cmp(&b.program)));
+                    let names: Vec<&str> = programs.iter().take(12).map(|program| program.program.as_str()).collect();
+                    let more = if programs.len() > 12 { format!(", + {} more", programs.len() - 12) } else { String::new() };
+                    wrapped(&mut lines, "restart", &format!("{} still run replaced files · {}{more}", counted(stale.len() as u64, "program", "programs"), names.join(", ")), room, pal.warn);
+                    let mut shared: std::collections::BTreeMap<(&str, &str), u64> = std::collections::BTreeMap::new();
+                    for program in &programs {
+                        for (file, package) in program.files.split('|').filter_map(|pair| pair.split_once(' ')) {
+                            *shared.entry((file.rsplit('/').next().unwrap_or(file), package)).or_default() += 1;
+                        }
+                    }
+                    let mut shared: Vec<((&str, &str), u64)> = shared.into_iter().collect();
+                    shared.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                    for ((file, package), count) in shared.into_iter().take(3) {
+                        let package = if package.is_empty() { String::new() } else { format!(" · {package}") };
+                        lines.push((String::new(), format!("{file}{package} · in {}", counted(count, "program", "programs")), pal.label));
+                    }
+                }
+            }
+            if let Some(files) = app.anatomy.as_ref().and_then(|anatomy| anatomy.config_files.as_ref()) {
+                if files.is_empty() {
+                    lines.push(("configs".into(), "no config file waits in /etc".into(), pal.ok));
+                } else {
+                    let kinds: Vec<&str> = [(".pacnew", "new versions (.pacnew)"), (".pacsave", "saved old ones (.pacsave)")]
+                        .into_iter()
+                        .filter(|(kind, _)| files.iter().any(|file| file.path.contains(kind)))
+                        .map(|(_, text)| text)
+                        .collect();
+                    let wait = if files.len() == 1 { "config file waits" } else { "config files wait" };
+                    wrapped(&mut lines, "configs", &format!("{} {wait}: {} · merge with pacdiff", thousands(files.len() as u64), kinds.join(" and ")), room, pal.warn);
+                    let mut files: Vec<&crate::app::ConfigFile> = files.iter().collect();
+                    files.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.path.cmp(&b.path)));
+                    for file in files.iter().take(8) {
+                        let package = if file.package.is_empty() { String::new() } else { format!(" · {}", file.package) };
+                        let changed = file.changed_lines.map(|lines| format!(" · {}", counted(lines, "changed line", "changed lines"))).unwrap_or_default();
+                        lines.push((String::new(), format!("{}  {}{package}{changed}", file.date.get(5..).unwrap_or(&file.date), file.path), pal.ink));
+                    }
+                    if files.len() > 8 {
+                        lines.push((String::new(), format!("+ {} more", files.len() - 8), pal.label));
+                    }
+                }
             }
             if let Some(preflight) = &app.preflight {
                 let (snapshot, color) = match preflight.snapshot_by.as_str() {

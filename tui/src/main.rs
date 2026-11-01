@@ -2437,6 +2437,39 @@ mod tests {
     }
 
     #[test]
+    fn the_checks_name_programs_to_restart_and_config_files_that_wait() {
+        let mut app = demo_at(30_000);
+        let row = |app: &App, name: &str| screen(app, 271, 60).into_iter().find(|row| row.contains(name)).unwrap_or_default();
+        assert!(row(&app, " restart ").contains("3 programs") && row(&app, " configs ").contains("5 waiting"));
+        app.tile = Some(5);
+        app.overlay = true;
+        let lines = window(&app);
+        for line in [
+            "restart       3 programs still run replaced files · nautilus, pipewire, wireplumber",
+            "              libsystemd.so.0.41.0 · systemd-libs · in 3 programs",
+            "              10-15  /etc/pacman.conf.pacnew · pacman · 91 changed lines",
+            "              05-09  /etc/sddm.conf.d/10-wayland.conf.pacsave",
+        ] {
+            assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
+        }
+        assert!(lines.iter().any(|line| line.starts_with("configs       5 config files wait: new versions (.pacnew) and saved old ones (.pacsave)")), "{lines:?}");
+        let anatomy = app.anatomy.as_mut().unwrap();
+        anatomy.stale_programs = Some(Vec::new());
+        anatomy.config_files.as_mut().unwrap().retain(|file| file.path.ends_with(".pacnew"));
+        anatomy.config_files.as_mut().unwrap().truncate(1);
+        let lines = window(&app);
+        assert!(lines.iter().any(|line| line == "restart       no program runs replaced files"), "{lines:?}");
+        assert!(lines.iter().any(|line| line == "configs       1 config file waits: new versions (.pacnew) · merge with pacdiff"), "{lines:?}");
+        let anatomy = app.anatomy.as_mut().unwrap();
+        anatomy.stale_programs = None;
+        anatomy.config_files = None;
+        app.overlay = false;
+        assert!(row(&app, " restart ").is_empty() && row(&app, " configs ").is_empty(), "an older scanner sends neither, so the rows stay away");
+    }
+
+
+
+    #[test]
     fn the_kernel_update_says_a_reboot_follows() {
         let lines = window(&demo_detail("linux"));
         assert!(lines.iter().any(|line| line == "reboot        needed after this update"), "{lines:?}");

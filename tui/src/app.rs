@@ -104,6 +104,24 @@ pub fn problem_part(kind: &str, subject: &str, package: &str) -> Subsystem {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+pub struct StaleProgram {
+    pub program: String,
+    #[serde(default)]
+    pub files: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ConfigFile {
+    pub path: String,
+    #[serde(default)]
+    pub package: String,
+    #[serde(default)]
+    pub date: String,
+    #[serde(default)]
+    pub changed_lines: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Deps {
     pub depends: u64,
     pub required_by: u64,
@@ -182,6 +200,10 @@ pub struct Anatomy {
     pub hyprland_running: String,
     #[serde(default)]
     pub hyprland_installed: String,
+    #[serde(default)]
+    pub stale_programs: Option<Vec<StaleProgram>>,
+    #[serde(default)]
+    pub config_files: Option<Vec<ConfigFile>>,
 }
 
 #[derive(Debug, Clone, Default)]

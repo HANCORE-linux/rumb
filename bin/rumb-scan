@@ -140,6 +140,16 @@ owner_of() {
   REPLY=${owner_cache[$1]}
 }
 
+library_owner() {
+  local path=$1
+  while [[ ! -e $path && $path =~ ^(.+\.so(\.[0-9]+)*)\.[0-9]+$ ]]; do
+    path=${BASH_REMATCH[1]}
+  done
+  REPLY=""
+  [[ -e $path ]] && owner_of "$path"
+  return 0
+}
+
 # Fills owner_cache for many paths with one pacman call. pacman prints a path
 # with its directory resolved, so paths it would print differently are left to owner_of.
 owners_of() {
@@ -709,7 +719,7 @@ collect_problems
 collect_anatomy() {
   local os desktop omarchy="" kernel_running kernel_pkg="" kernel_installed="" reboot_pending=false cache_dir cache_bytes=0 cache_freeable paccache_out paccache_bytes foreign day today upgrades_json
   local uptime_seconds nvidia_loaded="" nvidia_installed="" hyprland_running="" hyprland_installed="" hyprland_bin packages explicit orphans
-  local cache_home=${XDG_CACHE_HOME:-$HOME/.cache} name old source dir file kept
+  local cache_home=${XDG_CACHE_HOME:-$HOME/.cache} name old source dir file kept pid exe base lines
   local -a names upgrades=() cache_dirs=()
   local -A per_day=()
 
@@ -894,6 +904,32 @@ collect_anatomy() {
     "$tmp/journal_lines.ndjson" >"$tmp/journal_lines.json" 2>/dev/null
   [[ -s $tmp/journal_lines.json ]] || echo '[]' >"$tmp/journal_lines.json"
 
+  grep -sH ' (deleted)$' /proc/[0-9]*/maps | awk '$(NF - 1) ~ /^\/(usr|opt)\// {
+      pid = $1; sub(/^\/proc\//, "", pid); sub(/\/maps:.*/, "", pid); print pid "\x1f" $(NF - 1)
+    }' | sort -u >"$tmp/stale_maps.tsv"
+  for pid in $(cut -d$'\x1f' -f1 "$tmp/stale_maps.tsv" | sort -u); do
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null) && printf '%s\x1f%s\n' "$pid" "${exe% (deleted)}"
+  done >"$tmp/stale_exes.tsv"
+  awk -F'\x1f' 'NR == FNR { exe[$1] = $2; next } $1 in exe { print exe[$1] "\x1f" $2 }' "$tmp/stale_exes.tsv" "$tmp/stale_maps.tsv" | sort -u |
+    while IFS=$'\x1f' read -r exe file; do
+      library_owner "$file"
+      printf '%s\x1f%s\x1f%s\n' "$exe" "$file" "$REPLY"
+    done >"$tmp/stale.tsv"
+  jq -Rn '[inputs | split("\u001f")] | group_by(.[0]) | map({program: (.[0][0] | split("/") | last), files: (map(.[1] + " " + .[2]) | join("|"))})' \
+    <"$tmp/stale.tsv" >"$tmp/stale.json"
+
+  while IFS= read -r -d '' file; do
+    base=${file%.pac*}
+    REPLY=""
+    [[ -e $base ]] && owner_of "$base"
+    lines=null
+    if [[ -r $file && -r $base ]] && command -v diff >/dev/null; then
+      lines=$(diff -- "$base" "$file" 2>/dev/null | grep -c '^[<>]')
+    fi
+    printf '%s\x1f%s\x1f%s\x1f%s\n' "$file" "$REPLY" "$(date -r "$file" +%F)" "$lines"
+  done < <(find /etc \( -name '*.pacnew' -o -name '*.pacsave' -o -name '*.pacsave.[0-9]*' \) -type f -print0 2>/dev/null) >"$tmp/config_files.tsv"
+  tsv_json "$tmp/config_files.tsv" path package date changed_lines | jq 'map(.changed_lines |= fromjson)' >"$tmp/config_files.json"
+
   jq -Rn '[inputs | split("\u001f") | {(.[0]): (.[1] | tonumber)}] | add // {}' <"$tmp/repos.tsv" >"$tmp/repos.json"
   jq -Rn '[inputs | split("\u001f") | {(.[0]): .[1]}] | add // {}' <"$tmp/cached.tsv" >"$tmp/cached.json"
   jq -Rn 'def list: . // "" | split(",") | map(select(. != ""));
@@ -908,12 +944,14 @@ collect_anatomy() {
     --argjson uptime_seconds "$uptime_seconds" --arg nvidia_loaded "$nvidia_loaded" --arg nvidia_installed "$nvidia_installed" \
     --arg hyprland_running "$hyprland_running" --arg hyprland_installed "$hyprland_installed" \
     --slurpfile repos "$tmp/repos.json" --slurpfile deps "$tmp/deps.json" --slurpfile journal "$tmp/journal_lines.json" --slurpfile cached "$tmp/cached.json" \
+    --slurpfile stale "$tmp/stale.json" --slurpfile config_files "$tmp/config_files.json" \
     '{event: "stage", stage: "anatomy", data: {hostname: $hostname, os: $os, desktop: $desktop, omarchy: $omarchy,
       packages: $packages, explicit: $explicit, orphans: $orphans, orphan_names: ($orphan_names | split("\n") | map(select(length > 0)) | .[:40]), cache_bytes: $cache_bytes, cache_freeable_bytes: $cache_freeable,
       kernel_running: $kernel_running, kernel_installed: $kernel_installed, kernel_package: $kernel_package, reboot_pending: $reboot_pending,
       uptime_seconds: $uptime_seconds, nvidia_loaded: $nvidia_loaded, nvidia_installed: $nvidia_installed,
       hyprland_running: $hyprland_running, hyprland_installed: $hyprland_installed,
-      upgrades_per_day: $upgrades_per_day, repos: $repos[0], deps: $deps[0], cached: $cached[0], journal: $journal[0]}}'
+      upgrades_per_day: $upgrades_per_day, repos: $repos[0], deps: $deps[0], cached: $cached[0], journal: $journal[0],
+      stale_programs: $stale[0], config_files: $config_files[0]}}'
 }
 
 journal_line='def s: if type == "string" then . else null end;
