@@ -2467,7 +2467,30 @@ mod tests {
         assert!(row(&app, " restart ").is_empty() && row(&app, " configs ").is_empty(), "an older scanner sends neither, so the rows stay away");
     }
 
+    #[test]
+    fn the_checks_legend_says_what_a_wedge_and_its_length_mean() {
+        let app = demo_at(30_000);
+        assert!(screen(&app, 271, 60).iter().any(|row| row.contains("│ 1 wedge = 1 row · length ● act ● look ● ok    │")));
+        assert!(screen(&app, 358, 85).iter().any(|row| row.contains(" 1 wedge = 1 row · length ● act ● look ● ok ")));
+    }
 
+    #[test]
+    fn every_mark_in_the_tiles_and_the_update_list_has_a_legend() {
+        let app = demo_at(30_000);
+        let rows = screen(&app, 271, 60);
+        for text in ["│ 1 wedge = 1 update · length = risk ", "│ sorted by risk · ● = the package has a problem "] {
+            assert!(rows.iter().any(|row| row.contains(text)), "{text:?} missing");
+        }
+        let value = |key: &str| rows.iter().find_map(|row| row.split_once(key).map(|(_, rest)| rest.split('│').next().unwrap_or_default().trim().to_string()));
+        assert_eq!(value("● chromium").as_deref(), Some("7"));
+        assert_eq!(value("● others").as_deref(), Some(""), "the grey key has no number: the numbers above are records");
+        let mut calm = demo_at(30_000);
+        calm.problems.retain(|problem| problem.status != "possibly-fixed");
+        calm.problems.iter_mut().for_each(|problem| problem.package.clear());
+        let rows = screen(&calm, 271, 60);
+        assert!(rows.iter().any(|row| row.contains("no owner has one")) && !rows.iter().any(|row| row.contains("● others")), "no grey key without a teal one to set it apart");
+        assert!(rows.iter().any(|row| row.contains("│ sorted by risk ")) && !rows.iter().any(|row| row.contains("package has a problem")), "no marker, no legend for it");
+    }
 
     #[test]
     fn the_kernel_update_says_a_reboot_follows() {

@@ -301,7 +301,7 @@ fn ring_pending(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
     keyed(buf, col, top, pal.alert, "high", &high.to_string(), pal.alert, pal);
     keyed(buf, col, top + 1, pal.warn, "medium", &medium.to_string(), pal.warn, pal);
     keyed(buf, col, top + 2, pal.ink2, "low", &low.to_string(), pal.ink, pal);
-    tile_legend(buf, area, vec![faint(&if unit == 1 { "1 wedge = 1 update".to_string() } else { format!("1 wedge ≤ {unit} updates") }, pal)]);
+    tile_legend(buf, area, vec![faint(&if unit == 1 { "1 wedge = 1 update · length = risk".to_string() } else { format!("1 wedge ≤ {unit} updates · length = risk") }, pal)]);
 }
 
 fn ring_days(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant, cell: (u16, u16), rings: &mut Vec<Placement>) {
@@ -444,13 +444,16 @@ fn ring_fixes(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Insta
     let tone = if fixes.is_empty() { pal.ink2 } else { pal.teal };
     let center = vec![(counted.to_string(), tone, 16), (format!("of {}", app.problems.len()), pal.label, 10)];
     let col = place_ring(rings, inner, cell, crate::ink::RingSpec { slots, dots, ticks: 4, center, ..Default::default() });
-    let shown = fixes.len().min(5) as u16;
+    let others = all.len() - fixes.len();
+    let shown = fixes.len().min(5) as u16 + u16::from(others > 0 && !fixes.is_empty());
     let top = col.y + col.height.saturating_sub(shown.max(1)) / 2;
     for (k, problem) in fixes.iter().take(5).enumerate() {
         keyed(buf, col, top + k as u16, pal.teal, &fit(problem.name(), col.width.saturating_sub(8) as usize), &compact(problem.count), pal.ink, pal);
     }
     if fixes.is_empty() {
         text(buf, col.x, top, "no owner has one", Style::new().fg(pal.faint), col.width);
+    } else if others > 0 {
+        keyed(buf, col, top + fixes.len().min(5) as u16, pal.ink2, "others", "", pal.label, pal);
     }
     tile_legend(buf, area, vec![faint("1 wedge = 1 problem · length = records", pal)]);
 }
@@ -546,18 +549,21 @@ fn ring_disk(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
 
 fn ring_checks(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, cell: (u16, u16), rings: &mut Vec<Placement>) {
     let inner = panel_frame(buf, area, "BEFORE YOU UPDATE", app.tile == Some(5), pal);
-    tile_legend(
-        buf,
-        area,
-        vec![
+    let marks = |lead: &str, gap: &str| {
+        let mut spans = if lead.is_empty() { Vec::new() } else { vec![faint(lead, pal)] };
+        spans.extend([
             Span::styled("●", Style::new().fg(pal.alert)),
-            faint(" act  ", pal),
+            faint(&format!(" act{gap}"), pal),
             Span::styled("●", Style::new().fg(pal.warn)),
-            faint(" look  ", pal),
+            faint(&format!(" look{gap}"), pal),
             Span::styled("●", Style::new().fg(pal.ok)),
             faint(" ok", pal),
-        ],
-    );
+        ]);
+        spans
+    };
+    let room = area.width.saturating_sub(6);
+    let legend = [("1 wedge = 1 row · length ", " "), ("1 wedge = 1 row · ", "  ")].into_iter().map(|(lead, gap)| marks(lead, gap)).find(|spans| width(spans) <= room).unwrap_or_else(|| marks("", "  "));
+    tile_legend(buf, area, legend);
     let checks = checks(app);
     if checks.is_empty() {
         return;
@@ -1211,7 +1217,8 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pa
 fn draw_updates(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut Scene) -> usize {
     let updates = app.visible_updates();
     let title = updates_title(app, updates.len(), area.width.saturating_sub(7) as usize);
-    let body = list_frame(buf, area, app, Pane::Updates, &title, "sorted by risk", pal);
+    let marked = updates.iter().any(|update| app.problems.iter().any(|problem| problem.package == update.name));
+    let body = list_frame(buf, area, app, Pane::Updates, &title, if marked { "sorted by risk · ● = the package has a problem" } else { "sorted by risk" }, pal);
     let name_w = body.width.saturating_sub(32).clamp(14, 24);
     let version_x = body.x + 5 + name_w + 1;
     let header = Style::new().fg(pal.faint);
