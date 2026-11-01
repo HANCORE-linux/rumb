@@ -39,7 +39,7 @@ The screen follows these rules:
 ## Principles
 
 - **Read-only.** rumb and `rumb-scan` never ask for root and never change the system. A test fails if the sources name sudo, pkexec, doas, su or run0, or let `checkupdates` download.
-- **Plain Arch first.** Omarchy, Hyprland, nvidia, snapper and AUR helpers are optional. Check that a tool exists before using it, and leave a value empty when it cannot be read.
+- **Plain Arch first.** Omarchy, Hyprland, nvidia, snapper, AUR helpers, Flatpak and mise are optional. Check that a tool exists before using it, and leave a value empty when it cannot be read.
 - **Facts only.** Every number on screen comes from a command that rumb ran.
 
 ## Where things are
