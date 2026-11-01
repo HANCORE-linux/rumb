@@ -1800,6 +1800,28 @@ mod tests {
     }
 
     #[test]
+    fn lists_are_held_only_while_their_data_flies() {
+        let start = Instant::now();
+        let mut app = App::new(false, true, start);
+        let mut motion = Motion::new(true, start);
+        let mut at = 0;
+        let mut last_updates = 0;
+        for line in include_str!("../demo.ndjson").lines().filter(|line| !line.trim().is_empty()) {
+            let value: Value = serde_json::from_str(line).unwrap();
+            at += value["_delay"].as_u64().unwrap_or(0);
+            let now = start + Duration::from_millis(at);
+            motion.push(serde_json::from_str(line).unwrap(), line, &mut app, now);
+            motion.step(&mut app, now, 0.0);
+            if value["event"] == "stage" && value["stage"] == "updates" {
+                last_updates = at;
+            }
+        }
+        let later = start + Duration::from_millis(last_updates + 1000);
+        motion.step(&mut app, later, 1.0);
+        assert!(!motion.held(motion::Target::List(Pane::Updates.index() as u8), later), "the updates list still waits a second after the recheck after the demo's pacman transaction");
+    }
+
+    #[test]
     fn each_scan_result_is_revealed_once() {
         let start = Instant::now();
         let mut app = App::new(false, true, start);

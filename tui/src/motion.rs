@@ -398,7 +398,7 @@ impl Motion {
                 self.close_open(now);
                 let at = self.lines.last().and_then(|line| line.result).unwrap_or(now).max(now);
                 let stage = stage.clone();
-                let effects = self.stage_effects(&stage, data, at);
+                let effects = self.stage_effects(&stage, data, now);
                 self.feed_from(at, raw);
                 self.act(now, Act::Apply(Box::new(event), now));
                 if let Some((index, arrival)) = effects {
