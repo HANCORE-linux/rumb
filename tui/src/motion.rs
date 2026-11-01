@@ -167,6 +167,8 @@ pub fn command_of(label: &str) -> &str {
     match label {
         "checking repository updates" => "checkupdates",
         "checking AUR updates" => "yay -Qua",
+        "checking Flatpak updates" => "flatpak remote-ls --updates",
+        "checking mise updates" => "mise outdated",
         "reading crash reports" => "coredumpctl list",
         "reading journal errors" => "journalctl -p err",
         "checking failed units" => "systemctl --failed",
@@ -189,6 +191,7 @@ pub fn result_of(label: &str, value: &Value) -> String {
     match label {
         "checking repository updates" => count("update", "updates"),
         "checking AUR updates" => count("aur", "aur"),
+        "checking Flatpak updates" | "checking mise updates" => count("update", "updates"),
         "reading crash reports" => number.map_or_else(|| "failed".to_string(), |n| format!("{} {}", crate::page::thousands(n), if n == 1 { "crash" } else { "crashes" })),
         "reading journal errors" => count("error", "errors"),
         "checking failed units" => count("unit", "units"),

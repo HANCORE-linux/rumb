@@ -189,9 +189,9 @@ declare -A pending=()
 update_errors=()
 
 add_update() {
-  local name=$1 old=$2 new=$3 source=$4 kind risk reason=""
+  local name=$1 old=$2 new=$3 source=$4 kind=${5:-} risk reason=""
 
-  kind=$(bump_kind "$old" "$new")
+  [[ -n $kind ]] || kind=$(bump_kind "$old" "$new")
   if is_core "$name"; then
     case $kind in
       epoch|major|minor) risk=high; reason="critical package, $kind version jump" ;;
@@ -208,7 +208,7 @@ add_update() {
     reason+="${reason:+, }ships Omarchy migrations"
   fi
 
-  pending[$name]="$old -> $new"
+  [[ $source == repo || $source == aur ]] && pending[$name]="$old -> $new"
   printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$name" "$old" "$new" "$source" "$kind" "$risk" "$reason" >>"$tmp/updates.tsv"
 }
 
@@ -390,10 +390,11 @@ check_updates() {
   pending=()
   update_errors=()
   aur_unavailable=false
+  checked=(repo)
   : >"$tmp/updates.tsv"
-  rm -f "$tmp/sizes.tsv"
+  rm -f "$tmp/sizes.tsv" "$tmp/flatpak_installed.tsv"
   step updates "checking repository updates"
-  local repo_out aur_helper aur_out checkup_db size_fields
+  local repo_out aur_helper aur_out mise_out checkup_db size_fields name old new
   local -a repo_names
   checkup_db=${TMPDIR:-/tmp}/checkup-db-${UID}/
   repo_out=$(CHECKUPDATES_DB=$checkup_db checkupdates --nocolor 2>/dev/null)
@@ -415,6 +416,7 @@ check_updates() {
     aur_helper=$(command -v yay || command -v paru || true)
     if [[ -n $aur_helper ]]; then
       step updates "checking AUR updates"
+      checked+=(aur)
       if aur_out=$("$aur_helper" -Qua 2>"$tmp/aur.err"); then
         parse_updates aur <<<"$aur_out"
         mapfile -t aur_names < <(awk -F'\x1f' '$4 == "aur" { print $1 }' "$tmp/updates.tsv")
@@ -430,6 +432,44 @@ check_updates() {
       fi
     else
       aur_unavailable=true
+    fi
+  fi
+
+  if command -v flatpak >/dev/null; then
+    flatpak list --columns=application,branch,active 2>/dev/null >"$tmp/flatpak_installed.tsv"
+  fi
+  if [[ -s $tmp/flatpak_installed.tsv ]]; then
+    step updates "checking Flatpak updates"
+    checked+=(flatpak)
+    if flatpak remote-ls --updates --columns=application,branch,commit >"$tmp/flatpak_updates.tsv" 2>"$tmp/flatpak.err"; then
+      while IFS=$'\t' read -r name old new; do
+        add_update "$name" "$old" "$new" flatpak commit
+      done < <(awk -F'\t' '
+        NR == FNR { commit[$1 FS $2] = substr($3, 1, 12); next }
+        ($1 FS $2) in commit && !(($1 FS $2) in listed) { listed[$1 FS $2] = 1; n++; id[n] = $1; branch[n] = $2; to[n] = substr($3, 1, 12); count[$1]++ }
+        END {
+          for (i = 1; i <= n; i++) {
+            printf "%s%s\t%s\t%s\n", id[i], (count[id[i]] > 1 ? "//" branch[i] : ""), commit[id[i] FS branch[i]], to[i]
+          }
+        }' "$tmp/flatpak_installed.tsv" "$tmp/flatpak_updates.tsv")
+      done_step updates "checking Flatpak updates" "$(count_source flatpak)"
+    else
+      update_errors+=(flatpak)
+      done_step updates "checking Flatpak updates" null
+    fi
+  fi
+
+  if command -v mise >/dev/null; then
+    step updates "checking mise updates"
+    checked+=(mise)
+    if mise_out=$(cd / && mise outdated --global --json 2>"$tmp/mise.err"); then
+      while IFS=$'\t' read -r name old new; do
+        add_update "$name" "$old" "$new" mise
+      done < <(jq -r 'to_entries[] | select((.value.current | type) == "string" and (.value.latest | type) == "string") | [.key, .value.current, .value.latest] | @tsv' <<<"$mise_out" 2>/dev/null)
+      done_step updates "checking mise updates" "$(count_source mise)"
+    else
+      update_errors+=(mise)
+      done_step updates "checking mise updates" null
     fi
   fi
 
@@ -461,8 +501,8 @@ check_updates() {
     jq 'map({key: .name, value: {download_bytes: (.download_bytes | tonumber), installed_delta_bytes: (.installed_delta_bytes | tonumber)}}) | from_entries' >"$tmp/sizes.json"
   tsv_json "$tmp/updates.tsv" name old new source bump risk reason |
     jq --slurpfile sizes "$tmp/sizes.json" 'map(. + ($sizes[0][.name] // {}))' >"$tmp/updates.json"
-  emit --slurpfile updates "$tmp/updates.json" --argjson aur_unavailable "$aur_unavailable" --args \
-    '{event: "stage", stage: "updates", data: {updates: $updates[0], update_check_errors: $ARGS.positional, aur_unavailable: $aur_unavailable}}' \
+  emit --slurpfile updates "$tmp/updates.json" --argjson aur_unavailable "$aur_unavailable" --arg checked "${checked[*]}" --args \
+    '{event: "stage", stage: "updates", data: {updates: $updates[0], update_check_errors: $ARGS.positional, aur_unavailable: $aur_unavailable, checked: ($checked | split(" "))}}' \
     "${update_errors[@]}"
 }
 check_updates
@@ -667,7 +707,7 @@ collect_problems
 collect_anatomy() {
   local os desktop omarchy="" kernel_running kernel_pkg="" kernel_installed="" reboot_pending=false cache_dir cache_bytes=0 cache_freeable paccache_out paccache_bytes foreign day today upgrades_json
   local uptime_seconds nvidia_loaded="" nvidia_installed="" hyprland_running="" hyprland_installed="" hyprland_bin packages explicit orphans
-  local cache_home=${XDG_CACHE_HOME:-$HOME/.cache} name old dir file kept
+  local cache_home=${XDG_CACHE_HOME:-$HOME/.cache} name old source dir file kept
   local -a names upgrades=() cache_dirs=()
   local -A per_day=()
 
@@ -747,10 +787,11 @@ collect_anatomy() {
   foreign=$(grep -c . <<<"$foreign_names")
   ((foreign > 0)) && printf 'aur\x1f%d\n' "$foreign" >>"$tmp/repos.tsv"
 
-  mapfile -t names < <(cut -d$'\x1f' -f1 "$tmp/updates.tsv")
+  mapfile -t names < <(awk -F'\x1f' '$4 == "repo" || $4 == "aur" { print $1 }' "$tmp/updates.tsv")
   mapfile -t cache_dirs < <(pacman-conf CacheDir 2>/dev/null)
   : >"$tmp/cached.tsv"
-  while IFS=$'\x1f' read -r name old _; do
+  while IFS=$'\x1f' read -r name old _ source _; do
+    [[ $source == repo || $source == aur ]] || continue
     kept=""
     for dir in "${cache_dirs[@]}"; do
       for file in "${dir%/}/$name-$old-"*.pkg.tar.*; do
@@ -1031,20 +1072,35 @@ follow_sources() {
   wait
 }
 
+installs_stamp() {
+  local data=${XDG_DATA_HOME:-$HOME/.local/share}
+  stat -c '%n %Y' -- /var/lib/flatpak/.changed "${FLATPAK_USER_DIR:-$data/flatpak}/.changed" "${MISE_DATA_DIR:-$data/mise}"/installs/* 2>/dev/null
+}
+
 follow_events() {
-  local line status message due=0 timeout file name
+  local line status message due=0 timeout file name stamp current next=$((SECONDS + 60))
+  stamp=$(installs_stamp)
   trap 'rm -rf "$tmp"' EXIT
   trap 'exit 143' TERM
   while true; do
-    timeout=3600
+    if ((SECONDS >= next)); then
+      next=$((SECONDS + 60))
+      current=$(installs_stamp)
+      if [[ $current != "$stamp" ]]; then
+        stamp=$current
+        ((due)) || due=$((SECONDS + 3))
+      fi
+    fi
+    timeout=$((next - SECONDS))
     if ((due)); then
       if ((SECONDS >= due)); then
         due=0
         recheck
         continue
       fi
-      timeout=$((due - SECONDS))
+      ((due - SECONDS < timeout)) && timeout=$((due - SECONDS))
     fi
+    ((timeout > 0)) || timeout=1
     IFS= read -r -t "$timeout" line
     status=$?
     ((status > 128)) && continue
@@ -1162,7 +1218,7 @@ echo "${bold}Pending updates${reset} ${dim}($total: $high high, $medium medium r
 if ((total == 0 && ${#update_errors[@]} == 0)); then
   echo "  none"
 fi
-name_width=$(awk -F'\x1f' '{ n = length($1) + ($4 == "aur" ? 6 : 0); if (n > max) max = n } END { print max + 0 }' "$tmp/updates.tsv")
+name_width=$(awk -F'\x1f' '{ n = length($1) + ($4 == "aur" || $4 == "mise" ? 6 : $4 == "flatpak" ? 10 : 0); if (n > max) max = n } END { print max + 0 }' "$tmp/updates.tsv")
 for risk in high medium low; do
   case $risk in
     high) color=$red label="HIGH  " ;;
@@ -1172,7 +1228,11 @@ for risk in high medium low; do
   while IFS=$'\x1f' read -r name old new source _ row_risk reason; do
     [[ $row_risk == "$risk" ]] || continue
     suffix=""
-    [[ $source == aur ]] && suffix=" (AUR)"
+    case $source in
+      aur) suffix=" (AUR)" ;;
+      flatpak) suffix=" (Flatpak)" ;;
+      mise) suffix=" (mise)" ;;
+    esac
     printf '  %s%s%s  %-*s  %s -> %s%s%s\n' "$color" "$label" "$reset" "$name_width" "$name$suffix" "$old" "$new" \
       "${reason:+  $dim}" "${reason:+$reason$reset}"
   done <"$tmp/updates.tsv"
@@ -1181,6 +1241,8 @@ for source in "${update_errors[@]}"; do
   case $source in
     repo) source_label="repository" ;;
     aur) source_label="AUR" ;;
+    flatpak) source_label="Flatpak" ;;
+    mise) source_label="mise" ;;
   esac
   echo "  ${red}Could not check $source_label updates${reset}"
 done

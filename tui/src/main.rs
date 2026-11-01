@@ -2190,7 +2190,7 @@ mod tests {
         app.tile = Some(0);
         app.overlay = true;
         let lines = window(&app);
-        for line in ["high          hyprland  0.55.2 → 0.56.0 · critical package, minor version jump · may fix 42 × crash", "low           mesa  1:25.2.4 rebuild · critical package, rebuild · may fix 7 × crash", "              4 · ffmpeg, firefox, spotify, yay", "AUR           2 · yay, spotify · built locally"] {
+        for line in ["high          hyprland  0.55.2 → 0.56.0 · critical package, minor version jump · may fix 42 × crash", "low           mesa  1:25.2.4 rebuild · critical package, rebuild · may fix 7 × crash", "              8 · ffmpeg, firefox, node, org.gimp.GIMP, org.gtk.Gtk3theme.adw-gtk3, python, spotify, yay", "AUR           2 · yay, spotify · built locally", "Flatpak       2 · org.gimp.GIMP, org.gtk.Gtk3theme.adw-gtk3", "mise          2 · node, python"] {
             assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
         }
         assert!(!lines.iter().any(|line| line.starts_with("largest")));
@@ -2380,6 +2380,48 @@ mod tests {
         let mut unchecked = demo_detail("hyprland");
         unchecked.anatomy.as_mut().unwrap().cached = None;
         assert!(!window(&unchecked).iter().any(|line| line.starts_with("rollback")), "an older scanner did not look, so the row stays empty");
+    }
+
+    #[test]
+    fn flatpak_and_mise_updates_name_the_command_that_installs_them() {
+        let node = window(&demo_detail("node"));
+        for line in ["version       24.10.0 → 24.11.1", "jump          minor", "source        mise", "update with   mise upgrade node"] {
+            assert!(node.iter().any(|shown| shown == line), "{line:?} missing in {node:?}");
+        }
+        let theme = window(&demo_detail("org.gtk.Gtk3theme.adw-gtk3"));
+        for line in ["commit        72df3f2c3bbb → 8c2aa97f8aa5", "source        flatpak", "update with   flatpak update org.gtk.Gtk3theme.adw-gtk3"] {
+            assert!(theme.iter().any(|shown| shown == line), "{line:?} missing in {theme:?}");
+        }
+        for lines in [&node, &theme] {
+            assert!(!lines.iter().any(|line| line.starts_with("rollback")), "{lines:?}");
+        }
+        assert!(!theme.iter().any(|line| line.starts_with("jump") || line.starts_with("version")), "{theme:?}");
+        assert!(!window(&demo_detail("hyprland")).iter().any(|line| line.starts_with("update with")));
+    }
+
+    #[test]
+    fn the_updates_title_counts_the_updates_without_a_download_size() {
+        let app = demo_at(30_000);
+        assert_eq!(app.checked_sources, ["repo", "aur", "flatpak", "mise"]);
+        assert!(screen(&app, 271, 60).iter().any(|row| row.contains("³UPDATES · 14 · 390 MiB download + 2 AUR + 2 Flatpak + 2 mise")));
+        let mut older = App::new(true, false, Instant::now());
+        older.apply(stage("updates", json!({"updates": [{"name": "yay", "old": "12.5.2-1", "new": "12.5.3-1", "source": "aur", "bump": "patch", "risk": "low"}]})), Instant::now());
+        assert!(older.checked_sources.is_empty(), "an older scanner sends no checked sources");
+        let narrow = screen(&app, 150, 44);
+        let title = narrow.iter().find(|row| row.contains("³UPDATES")).unwrap();
+        assert!(title.contains("³UPDATES · 14 · 390 MiB download + 2 AUR ") && !title.contains("AUR +"), "{title:?}");
+    }
+
+    #[test]
+    fn the_update_map_says_why_it_is_empty() {
+        let mut app = App::new(true, false, Instant::now());
+        app.visible = [false, false, true, false, false];
+        app.apply(stage("updates", json!({"updates": []})), Instant::now());
+        assert!(screen(&app, 99, 35).iter().any(|row| row.contains("│ nothing pending ")));
+        let mut filtered = demo_at(30_000);
+        filtered.visible = [false, false, true, false, false];
+        filtered.lists[0].filter = "zzz".into();
+        assert!(screen(&filtered, 99, 35).iter().any(|row| row.contains("│ no match ")));
     }
 
     #[test]

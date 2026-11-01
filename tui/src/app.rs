@@ -408,6 +408,7 @@ pub struct App {
     pub updates: Vec<Update>,
     pub update_errors: Vec<String>,
     pub aur_unavailable: bool,
+    pub checked_sources: Vec<String>,
     pub problems: Vec<Problem>,
     pub problem_errors: Vec<String>,
     pub activity: Vec<Activity>,
@@ -469,6 +470,7 @@ impl App {
             updates: Vec::new(),
             update_errors: Vec::new(),
             aur_unavailable: false,
+            checked_sources: Vec::new(),
             problem_errors: Vec::new(),
             problems: Vec::new(),
             activity: Vec::new(),
@@ -587,6 +589,7 @@ impl App {
                 self.updates = field(&data, "updates")?;
                 self.update_errors = field(&data, "update_check_errors")?;
                 self.aur_unavailable = field(&data, "aur_unavailable")?;
+                self.checked_sources = field(&data, "checked")?;
             }
             1 => {
                 self.problems = field(&data, "problems")?;
@@ -722,8 +725,8 @@ impl App {
         self.updates.iter().filter_map(|update| update.installed_delta_bytes).sum()
     }
 
-    pub fn aur_updates(&self) -> usize {
-        self.updates.iter().filter(|update| update.source == "aur").count()
+    pub fn source_updates(&self, source: &str) -> usize {
+        self.updates.iter().filter(|update| update.source == source).count()
     }
 
     pub fn space_needed(&self) -> u64 {

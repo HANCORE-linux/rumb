@@ -1040,22 +1040,32 @@ fn map_fits(area: Rect) -> bool {
     area.height >= 28 && area.width >= 90
 }
 
-fn updates_title(app: &App, count: usize) -> String {
+fn updates_title(app: &App, count: usize, room: usize) -> String {
     let download = app.download_bytes();
-    let aur = app.aur_updates();
-    match (download > 0, aur > 0) {
-        (true, true) => format!("³UPDATES · {count} · {} download + {aur} AUR", bytes(download)),
-        (true, false) => format!("³UPDATES · {count} · {} download", bytes(download)),
-        _ => format!("³UPDATES · {count}"),
+    if download == 0 {
+        return format!("³UPDATES · {count}");
     }
+    let mut title = format!("³UPDATES · {count} · {} download", bytes(download));
+    for (source, name) in [("aur", "AUR"), ("flatpak", "Flatpak"), ("mise", "mise")] {
+        let part = match app.source_updates(source) {
+            0 => continue,
+            n => format!(" + {n} {name}"),
+        };
+        if title.chars().count() + part.chars().count() > room {
+            break;
+        }
+        title.push_str(&part);
+    }
+    title
 }
 
 fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Palette, now: Instant, scene: &mut Scene) -> usize {
     use crate::ink::{OrbitLink, OrbitNode, OrbitSpec};
     let updates = app.visible_updates();
-    let title = updates_title(app, updates.len());
+    let title = updates_title(app, updates.len(), area.width.saturating_sub(7) as usize);
     let body = list_frame(buf, area, app, Pane::Updates, &title, "inner ring high · middle medium · outer band low", pal);
     if updates.is_empty() {
+        text(buf, body.x, body.y + 1, updates_message(app), Style::new().fg(pal.faint), body.width);
         return 10;
     }
     let selected = app.lists[0].selected.min(updates.len() - 1);
@@ -1192,7 +1202,7 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pa
 
 fn draw_updates(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut Scene) -> usize {
     let updates = app.visible_updates();
-    let title = updates_title(app, updates.len());
+    let title = updates_title(app, updates.len(), area.width.saturating_sub(7) as usize);
     let body = list_frame(buf, area, app, Pane::Updates, &title, "sorted by risk", pal);
     let name_w = body.width.saturating_sub(32).clamp(14, 24);
     let version_x = body.x + 5 + name_w + 1;
@@ -1240,17 +1250,20 @@ fn draw_updates(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
         scene.placements.push(Placement { rect, picture: Picture::Marks(Box::new(crate::ink::MarksSpec { columns: 6, rows: marks })) });
     }
     if updates.is_empty() {
-        let message = if app.stage_done_at[0].is_none() {
-            "checking…"
-        } else if app.lists[0].filter.is_empty() {
-            "nothing pending"
-        } else {
-            "no match"
-        };
-        text(buf, body.x, body.y + 1, message, Style::new().fg(pal.faint), body.width);
+        text(buf, body.x, body.y + 1, updates_message(app), Style::new().fg(pal.faint), body.width);
     }
     position(buf, body, selected, updates.len(), pal);
     rows
+}
+
+fn updates_message(app: &App) -> &'static str {
+    if app.stage_done_at[0].is_none() {
+        "checking…"
+    } else if app.lists[0].filter.is_empty() {
+        "nothing pending"
+    } else {
+        "no match"
+    }
 }
 
 fn draw_problems(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut Scene) -> usize {
@@ -1772,9 +1785,11 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
             if app.updates.iter().any(|update| update.installed_delta_bytes.is_some()) {
                 lines.push(("disk change".into(), signed_bytes(app.installed_delta()), pal.ink));
             }
-            let aur: Vec<&str> = app.updates.iter().filter(|update| update.source == "aur").map(|update| update.name.as_str()).collect();
-            if !aur.is_empty() {
-                wrapped(&mut lines, "AUR", &format!("{} · {} · built locally", aur.len(), aur.join(", ")), room, pal.ink);
+            for (source, name, note) in [("aur", "AUR", " · built locally"), ("flatpak", "Flatpak", ""), ("mise", "mise", "")] {
+                let names: Vec<&str> = app.updates.iter().filter(|update| update.source == source).map(|update| update.name.as_str()).collect();
+                if !names.is_empty() {
+                    wrapped(&mut lines, name, &format!("{} · {}{note}", names.len(), names.join(", ")), room, pal.ink);
+                }
             }
             if app.updates.is_empty() {
                 lines.push(("updates".into(), "none pending".to_string(), pal.label));
@@ -2165,7 +2180,8 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
             let update = updates.get(app.lists[0].selected.min(updates.len().saturating_sub(1)))?;
             title = update.name.clone();
             let deps = app.anatomy.as_ref().and_then(|anatomy| anatomy.deps.get(&update.name));
-            lines.push(("version".into(), format!("{} → {}", update.old, update.new), pal.ink));
+            let commit = update.bump == "commit";
+            lines.push((if commit { "commit" } else { "version" }.into(), format!("{} → {}", update.old, update.new), pal.ink));
             let risk_color = match update.risk.as_str() {
                 "high" => pal.alert,
                 "medium" => pal.warn,
@@ -2173,10 +2189,15 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
             };
             let risk = if update.reason.is_empty() { update.risk.clone() } else { format!("{} · {}", update.risk, update.reason) };
             wrapped(&mut lines, "risk", &risk, room, risk_color);
-            if !update.bump.is_empty() && !update.reason.contains(update.bump.as_str()) {
+            if !update.bump.is_empty() && !commit && !update.reason.contains(update.bump.as_str()) {
                 lines.push(("jump".into(), update.bump.clone(), pal.ink));
             }
             lines.push(("source".into(), update.source.clone(), pal.ink));
+            match update.source.as_str() {
+                "flatpak" => lines.push(("update with".into(), format!("flatpak update {}", update.name), pal.ink)),
+                "mise" => lines.push(("update with".into(), format!("mise upgrade {}", update.name), pal.ink)),
+                _ => {}
+            }
             lines.push(("part".into(), Subsystem::of(&update.name).label().to_string(), pal.ink));
             if let Some(download) = update.download_bytes {
                 lines.push(("download".into(), bytes(download), pal.ink));
@@ -2194,7 +2215,7 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
             if app.reboot_after().iter().any(|(_, after)| after.name == update.name) {
                 lines.push(("reboot".into(), "needed after this update".into(), pal.warn));
             }
-            if let Some(cached) = app.anatomy.as_ref().and_then(|anatomy| anatomy.cached.as_ref()) {
+            if let Some(cached) = app.anatomy.as_ref().and_then(|anatomy| anatomy.cached.as_ref()).filter(|_| matches!(update.source.as_str(), "repo" | "aur")) {
                 lines.push(match cached.get(&update.name) {
                     Some(cache) => ("rollback".into(), format!("{} in the {cache} cache", update.old), pal.ink),
                     None => ("rollback".into(), format!("{} not in a package cache", update.old), pal.warn),
@@ -2802,9 +2823,13 @@ fn eye_log(app: &App) -> (Vec<(String, String, usize)>, bool) {
         lines.push(("› pacman.log".into(), crate::motion::upgrade_tail(Some(last))));
     }
     if app.stage_done_at[0].is_some() {
-        let aur = app.updates.iter().filter(|update| update.source == "aur").count();
-        lines.push(("› checkupdates".into(), counted((app.updates.len() - aur) as u64, "update", "updates")));
-        lines.push(("› yay -Qua".into(), format!("{aur} aur")));
+        lines.push(("› checkupdates".into(), counted(app.source_updates("repo") as u64, "update", "updates")));
+        lines.push(("› yay -Qua".into(), format!("{} aur", app.source_updates("aur"))));
+        for (source, command) in [("flatpak", "› flatpak remote-ls --updates"), ("mise", "› mise outdated")] {
+            if app.checked_sources.iter().any(|checked| checked == source) {
+                lines.push((command.into(), counted(app.source_updates(source) as u64, "update", "updates")));
+            }
+        }
     }
     if app.stage_done_at[1].is_some() {
         lines.push(("› coredumpctl list".into(), counted(kind("crash"), "crash", "crashes")));
