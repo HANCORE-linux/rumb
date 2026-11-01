@@ -22,6 +22,7 @@ pub struct Palette {
     pub relation: Color,
     pub ok: Color,
     pub options: Color,
+    pub eye: Color,
 }
 
 const fn rgb(hex: u32) -> Color {
@@ -49,6 +50,7 @@ impl Palette {
             relation: rgb(0x5f6a12),
             ok: rgb(0x5f6a12),
             options: rgb(0xa8463c),
+            eye: rgb(0x4f6878),
         }
     }
 
@@ -74,6 +76,7 @@ impl Palette {
             relation: rgb(0x747f11),
             ok: rgb(0x747f11),
             options: rgb(0xff676a),
+            eye: rgb(0x7d7a56),
         }
     }
 }

@@ -189,12 +189,16 @@ fn fingerprint(picture: &Picture, generation: u64) -> u64 {
             1u8.hash(&mut hasher);
             spec.fingerprint(&mut hasher);
         }
-        Picture::Fan(spec) => {
-            3u8.hash(&mut hasher);
-            spec.hash(&mut hasher);
-        }
         Picture::Orbit(spec) => {
             4u8.hash(&mut hasher);
+            spec.hash(&mut hasher);
+        }
+        Picture::Ring(spec) => {
+            5u8.hash(&mut hasher);
+            spec.hash(&mut hasher);
+        }
+        Picture::Marks(spec) => {
+            6u8.hash(&mut hasher);
             spec.hash(&mut hasher);
         }
         Picture::Specimen { subsystem, signal, glow, aim } => {

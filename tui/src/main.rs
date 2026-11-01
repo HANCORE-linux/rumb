@@ -202,6 +202,7 @@ enum Action {
     Rescan,
     Export,
     Copy,
+    CopyCommand,
     Theme(bool),
     ThemeFilter,
 }
@@ -258,7 +259,13 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3], now: Instant) -> Actio
             KeyCode::Right => app.move_tile(true),
             KeyCode::Tab => app.cycle_focus(true),
             KeyCode::BackTab => app.cycle_focus(false),
-            KeyCode::Enter => app.overlay = true,
+            KeyCode::Enter if app.overlay && app.tile == Some(4) && app.cache_command() => return Action::CopyCommand,
+            KeyCode::Up if app.overlay && app.tile == Some(1) => app.move_day(false),
+            KeyCode::Down if app.overlay && app.tile == Some(1) => app.move_day(true),
+            KeyCode::Enter => {
+                app.overlay = true;
+                app.day = None;
+            }
             KeyCode::Char(digit @ '1'..='5') => {
                 app.press_panel(digit as usize - '1' as usize);
                 app.overlay = false;
@@ -310,6 +317,7 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3], now: Instant) -> Actio
         }
         KeyCode::Down => app.select(focus, selected + 1),
         KeyCode::Up => app.select(focus, selected - 1),
+        KeyCode::PageDown | KeyCode::PageUp if focus == Pane::Updates && app.updates_map && app.map_fits => {}
         KeyCode::PageDown => app.select(focus, selected + step),
         KeyCode::PageUp => app.select(focus, selected - step),
         KeyCode::Home => app.select(focus, 0),
@@ -413,10 +421,10 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
                 }
             }
         }
-        while let Ok((lines, result)) = copies.try_recv() {
+        while let Ok((copied, result)) = copies.try_recv() {
             copying -= 1;
             app.status = Some(match result {
-                Ok(()) => (format!("copied {} {}", page::thousands(lines as u64), if lines == 1 { "line" } else { "lines" }), true, Instant::now()),
+                Ok(()) => (copied, true, Instant::now()),
                 Err(error) => (format!("copy failed: {error}"), false, Instant::now()),
             });
         }
@@ -493,10 +501,16 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
                         app.status = Some((format!("theme not saved: {error}"), false, Instant::now()));
                     }
                 }
+                Action::CopyCommand => {
+                    let done = copy_done.clone();
+                    std::thread::spawn(move || done.send((format!("copied {}", page::CACHE_COMMAND), export::copy(page::CACHE_COMMAND.to_string()))));
+                    copying += 1;
+                }
                 Action::Copy => {
                     if let Some(text) = page::overlay_text(&app, &theme.palette) {
-                        let (lines, done) = (text.lines().count(), copy_done.clone());
-                        std::thread::spawn(move || done.send((lines, export::copy(text))));
+                        let lines = text.lines().count();
+                        let (copied, done) = (format!("copied {} {}", page::thousands(lines as u64), if lines == 1 { "line" } else { "lines" }), copy_done.clone());
+                        std::thread::spawn(move || done.send((copied, export::copy(text))));
                         copying += 1;
                     }
                 }
@@ -677,9 +691,11 @@ mod tests {
         assert!(!buffer.content().iter().map(|cell| cell.symbol()).collect::<String>().contains("Terminal size too small:"));
         assert_eq!(scene.placements.len(), 8);
         app.visible = [true, false, false, false, false];
-        assert_eq!(page::min_size(&app), (150, 16));
+        assert_eq!(page::min_size(&app), (150, 17));
         app.visible = [false, false, true, true, false];
         assert_eq!(page::min_size(&app), (100, 13));
+        app.visible = [true, false, true, true, false];
+        assert_eq!(page::min_size(&app), (150, 27));
     }
 
     fn crowded_app(now: Instant) -> App {
@@ -713,7 +729,7 @@ mod tests {
             app.apply(source::Event::Activity { line: format!("upgraded {} (1.0-1 -> 2.0-1)", long(i)) }, now);
         }
         for i in 0..300 {
-            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: format!("ident-{i}"), program: String::new(), message: "x".repeat(300), priority: String::new(), unit: String::new() }, now);
+            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: format!("ident-{i}"), program: String::new(), message: "x".repeat(300), priority: String::new(), unit: String::new(), package: String::new() }, now);
         }
         app
     }
@@ -934,20 +950,75 @@ mod tests {
         assert_eq!(still.dilation(now), 1.0);
     }
 
+    fn rings(app: &App, width: u16, height: u16) -> Vec<(ratatui::layout::Rect, ink::RingSpec)> {
+        let (_, scene) = render(app, width, height, app.started + Duration::from_secs(60));
+        scene.placements.into_iter().filter_map(|placement| match placement.picture {
+            page::Picture::Ring(spec) => Some((placement.rect, *spec)),
+            _ => None,
+        }).collect()
+    }
+
     #[test]
-    fn update_details_put_facts_left_and_dependencies_right() {
-        let now = Instant::now();
-        let mut app = App::new(true, false, now);
-        for (_, event) in demo_events() {
-            app.apply(event, now);
+    fn the_rings_grow_with_a_big_window_and_keep_room_for_their_words() {
+        let app = demo_at(30_000);
+        let small = rings(&app, 271, 60);
+        let big = rings(&app, 400, 100);
+        assert_eq!((small.len(), big.len()), (6, 6));
+        assert!(big.iter().all(|(rect, _)| rect.height > small[0].0.height && rect.width == big[0].0.width), "{big:?}");
+        let tile_w = (400 - 2) / 6;
+        for (index, (rect, _)) in rings(&app, 400, 200).iter().enumerate().take(5) {
+            let inner_right = 1 + (index as u16 + 1) * tile_w - 2;
+            assert!(inner_right - (rect.right() + 2) >= 23, "tile {index}: text column of {}", inner_right - (rect.right() + 2));
         }
+        assert!(small.iter().all(|(rect, _)| rect.height == small[0].0.height), "small windows keep one ring height");
+    }
+
+    #[test]
+    fn the_fill_rings_leave_a_gap_after_every_unit() {
+        let found = rings(&demo_at(30_000), 271, 60);
+        let since = &found[2].1;
+        assert_eq!((since.slots, since.ticks), (90, 30), "the since ring counts days");
+        assert!(!since.dots.is_empty() && since.dots.iter().all(|dot| dot.0 % 3 != 2), "one wedge per day: {:?}", since.dots.iter().map(|dot| dot.0).collect::<Vec<_>>());
+        let disk = &found[4].1;
+        assert_eq!(disk.slots, 100);
+        assert!(!disk.dots.is_empty() && disk.dots.iter().all(|dot| dot.0 % 10 != 9), "one wedge per 10 %");
+        let (rect, _) = found[2];
+        let rows = screen(&demo_at(30_000), 271, 60);
+        let (x, _) = find(&rows, "on 10-03 21:10").unwrap();
+        assert_eq!(x, rect.right() + 2, "the text starts two cells after the ring");
+    }
+
+    #[test]
+    fn the_map_headings_stay_inside_the_frame_in_a_narrow_window() {
+        let mut app = demo_at(26_000);
+        app.visible = [false, false, true, false, false];
         app.focus = Pane::Updates;
-        app.overlay = true;
-        let (buffer, scene) = render(&app, 170, 50, now);
-        assert!(scene.placements.iter().any(|placement| matches!(placement.picture, page::Picture::Fan(_))));
-        let rows: Vec<String> = (0..50).map(|y| (0..170).map(|x| buffer[(x, y)].symbol()).collect()).collect();
-        let x = rows.iter().find_map(|row| row.find("version ").map(|at| row[..at].chars().count() as u16)).expect("facts shown");
-        assert!((0..50).filter(|y| buffer[(x + 47, *y)].symbol() == "│").count() >= 3);
+        for (width, height) in [(92u16, 32u16), (100, 34), (271, 60)] {
+            let rows = screen(&app, width, height);
+            assert!(find(&rows, "outer band low").is_some(), "{width}×{height} shows the map");
+            let (x, y) = find(&rows, "it will depend on 24").unwrap_or_else(|| panic!("{width}: heading cut: {rows:#?}"));
+            assert!(x >= 2 && rows[usize::from(y)].starts_with('│'), "{width}: heading starts at column {x}");
+        }
+        let deps = app.anatomy.as_mut().unwrap().deps.get_mut("hyprland").unwrap();
+        (deps.depends, deps.depends_on, deps.added) = (0, Vec::new(), Vec::new());
+        for (width, height) in [(92u16, 32u16), (100, 34)] {
+            let rows = screen(&app, width, height);
+            let (x, y) = find(&rows, "depends on nothing").unwrap_or_else(|| panic!("{width}: {rows:#?}"));
+            assert!(x >= 2 && rows[usize::from(y)].starts_with('│'), "{width}: heading starts at column {x}: {}", rows[usize::from(y)]);
+        }
+    }
+
+    #[test]
+    fn update_details_use_the_rows_of_every_window() {
+        let app = demo_detail("hyprland");
+        let (buffer, scene) = render(&app, 170, 50, app.started + Duration::from_secs(60));
+        let rect = scene.overlay.expect("window shown");
+        let rows: Vec<String> = (rect.y..rect.bottom()).map(|y| (rect.x..rect.right()).map(|x| buffer[(x, y)].symbol()).collect()).collect();
+        let column = |label: &str| rows.iter().find_map(|row| row.find(&format!("{label} ")).map(|at| row[..at].chars().count())).unwrap_or_else(|| panic!("{label} missing: {rows:#?}"));
+        let labels = ["version", "may fix", "rollback", "updating too", "new deps", "depends on", "required by"];
+        assert!(labels.iter().all(|label| column(label) == column("version")), "{rows:#?}");
+        assert!(rows.iter().all(|row| !row.trim_matches('│').contains('│')), "{rows:#?}");
+        assert!(!scene.placements.iter().any(|placement| rect.intersects(placement.rect)), "no picture inside the window");
     }
 
     #[test]
@@ -1131,6 +1202,83 @@ mod tests {
     }
 
     #[test]
+    fn every_tile_and_list_has_a_thin_frame_and_the_focus_gets_corners() {
+        let now = Instant::now();
+        let pal = palette::Palette::paper();
+        let mut app = system_app(now);
+        let later = now + Duration::from_secs(60);
+        let (buffer, _) = render(&app, 358, 85, later);
+        let rows: Vec<String> = (0..85).map(|y| (0..358).map(|x| buffer[(x, y)].symbol()).collect()).collect();
+        assert_eq!(rows[1].matches('┌').count(), 6);
+        assert_eq!(rows[1].matches('┐').count(), 6);
+        let (_, title) = find(&rows, ":: ³UPDATES").unwrap();
+        assert_eq!(rows[usize::from(title) - 1].matches('┌').count(), 3);
+        app.focus = Pane::Problems;
+        app.tile = Some(2);
+        let (buffer, _) = render(&app, 358, 85, later);
+        let corners: Vec<u16> = (0..358).filter(|x| buffer[(*x, 1)].symbol() == "┌").collect();
+        for (index, x) in corners.iter().enumerate() {
+            let color = if index == 2 { pal.ink } else { pal.rule };
+            assert_eq!([buffer[(*x, 1)].fg, buffer[(*x + 2, 1)].fg, buffer[(*x, 2)].fg], [color; 3], "tile {index}");
+        }
+    }
+
+    #[test]
+    fn the_since_ring_sweeps_the_time_since_the_upgrade() {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        let upgrade = "2026-10-16T22:58:12+02:00";
+        app.apply(source::Event::Start { last_upgrade: Some(upgrade.into()), problems_since: upgrade.into(), now: Some("2026-10-17T23:58:12+02:00".into()), omarchy: false, last_upgraded: Vec::new() }, now);
+        let (_, scene) = render(&app, 358, 85, now + Duration::from_secs(60));
+        let hands: Vec<u16> = scene.placements.iter().filter_map(|placement| if let page::Picture::Ring(spec) = &placement.picture { spec.hand } else { None }).collect();
+        assert_eq!(hands, [35]);
+    }
+
+    #[test]
+    fn a_detail_window_keeps_the_dots_it_leaves_free() {
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events() {
+            app.apply(event, now + Duration::from_millis(time));
+        }
+        let pal = palette::Palette::paper();
+        let marks = |scene: &page::Scene| -> Vec<(ratatui::layout::Rect, tiny_skia::Pixmap)> {
+            scene.placements.iter().filter(|placement| matches!(placement.picture, page::Picture::Marks(_))).map(|placement| (placement.rect, page::paint(&placement.picture, &pal, u32::from(placement.rect.width) * 10, u32::from(placement.rect.height) * 21, 21.0).unwrap())).collect()
+        };
+        for (width, height, pane, beside) in [(271, 85, Pane::Problems, false), (172, 50, Pane::Events, true)] {
+            app.focus = pane;
+            app.overlay = false;
+            let closed = marks(&render(&app, width, height, now + Duration::from_secs(60)).1);
+            app.overlay = true;
+            let (_, scene) = render(&app, width, height, now + Duration::from_secs(60));
+            let window = scene.overlay.expect("a detail window");
+            let around = ratatui::layout::Rect::new(window.x.saturating_sub(1), window.y.saturating_sub(1), window.width + 2, window.height + 2);
+            let open = marks(&scene);
+            assert!(open.iter().all(|(rect, _)| rect.intersection(around).is_empty()));
+            let free: Vec<_> = closed.iter().flat_map(|(rect, full)| rect.positions().filter(|cell| !around.contains(*cell)).map(move |cell| (cell, rect, full))).collect();
+            for (cell, rect, full) in &free {
+                let (part, kept) = open.iter().find(|(part, _)| part.contains(*cell)).expect("the dots of a free cell");
+                let (fx, fy, kx, ky) = (u32::from(cell.x - rect.x) * 10, u32::from(cell.y - rect.y) * 21, u32::from(cell.x - part.x) * 10, u32::from(cell.y - part.y) * 21);
+                assert!((0..21).all(|y| (0..10).all(|x| full.pixel(fx + x, fy + y) == kept.pixel(kx + x, ky + y))), "{width}x{height} {cell:?}");
+            }
+            assert!(free.iter().any(|(cell, _, _)| if beside { (around.y..around.bottom()).contains(&cell.y) } else { cell.y >= around.bottom() }));
+        }
+    }
+
+    #[test]
+    fn a_detail_window_hides_only_the_rings_it_covers() {
+        let now = Instant::now();
+        let mut app = system_app(now);
+        app.tile = Some(0);
+        app.overlay = true;
+        let (_, scene) = render(&app, 358, 85, now + Duration::from_secs(60));
+        let window = scene.overlay.expect("a detail window");
+        let around = ratatui::layout::Rect::new(window.x.saturating_sub(1), window.y.saturating_sub(1), window.width + 2, window.height + 2);
+        assert!(scene.placements.iter().any(|placement| matches!(placement.picture, page::Picture::Ring(_))));
+        assert!(scene.placements.iter().all(|placement| placement.rect.intersection(around).is_empty() || !matches!(placement.picture, page::Picture::Ring(_) | page::Picture::Marks(_))));
+    }
+
+    #[test]
     fn the_band_never_drops_a_red_or_yellow_fact() {
         let now = Instant::now();
         let pal = palette::Palette::paper();
@@ -1170,8 +1318,8 @@ mod tests {
         }
         app.overlay = false;
         let value = |rows: &[String], name: &str| {
-            let row = rows.iter().find(|row| row.contains(&format!("● {name}"))).unwrap_or_else(|| panic!("no {name} row"));
-            row.split(&format!("● {name}")).nth(1).and_then(|tail| tail.split('│').next()).unwrap_or_default().trim().to_string()
+            let row = rows.iter().take(16).find(|row| row.contains(&format!(" {name} "))).unwrap_or_else(|| panic!("no {name} row"));
+            row.split(&format!(" {name} ")).nth(1).and_then(|tail| tail.split('│').next()).unwrap_or_default().trim().to_string()
         };
         let wide = screen(&app, 358, 85);
         assert_eq!([value(&wide, "risk"), value(&wide, "reboot"), value(&wide, "snapshot"), value(&wide, "space")], ["high", "after update", "omarchy-update", "ok"]);
@@ -1221,8 +1369,8 @@ mod tests {
     fn events_from_earlier_days_show_their_date() {
         let now = Instant::now();
         let mut app = App::new(false, false, now);
-        app.apply(source::Event::Journal { time: "13:45:10".into(), day: "2000-01-02".into(), ident: "earlier".into(), program: String::new(), message: "old".into(), priority: String::new(), unit: String::new() }, now);
-        app.apply(source::Event::Journal { time: "14:00:00".into(), day: app::today(), ident: "today".into(), program: String::new(), message: "new".into(), priority: String::new(), unit: String::new() }, now);
+        app.apply(source::Event::Journal { time: "13:45:10".into(), day: "2000-01-02".into(), ident: "earlier".into(), program: String::new(), message: "old".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
+        app.apply(source::Event::Journal { time: "14:00:00".into(), day: app::today(), ident: "today".into(), program: String::new(), message: "new".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
         let rows = screen(&app, 150, 44);
         assert!(find(&rows, "01-02 13:45").is_some());
         assert!(find(&rows, "14:00:00").is_some());
@@ -1355,6 +1503,7 @@ mod tests {
                 "kind          error",
                 "count         151 since 10-03 21:10",
                 "last          10-17 23:38",
+                "first seen    10-03",
                 "message       Activation request for 'org.freedesktop.home1' failed: The systemd unit 'dbus-org.freedesktop.home1.service' could not be found.",
                 "owner         dbus-broker",
                 "status        no update pending for the owner",
@@ -1363,10 +1512,10 @@ mod tests {
         app.focus = Pane::Updates;
         app.select(Pane::Updates, 0);
         let text = page::overlay_text(&app, &pal).unwrap();
-        for line in ["risk          high · critical package, minor version jump", "+ new dependency    ↑ updates now"] {
+        for line in ["risk          high · critical package, minor version jump", "may fix       42 × crash · /usr/bin/Hyprland", "updating too  quickshell, mesa", "new deps      hyprwire"] {
             assert!(text.lines().any(|row| row == line), "{line} missing in\n{text}");
         }
-        assert!(text.lines().any(|row| row.starts_with("it will depend on 24: hyprwire +, mesa ↑, ")), "{text}");
+        assert!(text.lines().any(|row| row.starts_with("depends on    24 · aquamarine, cairo, ") && !row.contains("more")), "{text}");
         app.overlay = false;
         app.tile = Some(5);
         assert_eq!(press(&mut app, &[KeyCode::Char('c')]), Action::Nothing);
@@ -1384,8 +1533,8 @@ mod tests {
         let now = Instant::now();
         let mut app = App::new(false, false, now);
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [{"kind": "journal", "subject": "/usr/bin/conmon", "count": 1915, "package": "conmon", "status": "no-update"}], "activity": []}) }, now);
-        app.apply(source::Event::Journal { time: "14:17:39".into(), day: String::new(), ident: "peaceful_golick".into(), program: "conmon".into(), message: "Compiling rumb".into(), priority: String::new(), unit: String::new() }, now);
-        app.apply(source::Event::Journal { time: "14:17:40".into(), day: String::new(), ident: "playerctld".into(), program: "playerctld".into(), message: "lost the bus".into(), priority: String::new(), unit: String::new() }, now);
+        app.apply(source::Event::Journal { time: "14:17:39".into(), day: String::new(), ident: "peaceful_golick".into(), program: "conmon".into(), message: "Compiling rumb".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
+        app.apply(source::Event::Journal { time: "14:17:40".into(), day: String::new(), ident: "playerctld".into(), program: "playerctld".into(), message: "lost the bus".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
         app.visible = [true; 5];
         app.focus = Pane::Problems;
         press(&mut app, &[KeyCode::Char('j')]);
@@ -1398,7 +1547,7 @@ mod tests {
     fn a_live_journal_event_shows_its_priority_and_unit() {
         let now = Instant::now();
         let mut app = App::new(false, false, now);
-        app.apply(source::Event::Journal { time: "14:20:00".into(), day: String::new(), ident: "bluetoothd".into(), program: "bluetoothd".into(), message: "Failed to set mode".into(), priority: "2".into(), unit: "bluetooth.service".into() }, now);
+        app.apply(source::Event::Journal { time: "14:20:00".into(), day: String::new(), ident: "bluetoothd".into(), program: "bluetoothd".into(), message: "Failed to set mode".into(), priority: "2".into(), unit: "bluetooth.service".into(), package: String::new() }, now);
         app.visible = [false, false, false, false, true];
         app.focus = Pane::Events;
         app.overlay = true;
@@ -1440,25 +1589,28 @@ mod tests {
 
     #[test]
     fn an_update_shows_the_dependencies_of_its_new_version() {
-        let rows = screen(&demo_detail("hyprland"), 170, 50);
-        let all = rows.join("\n");
-        assert!(all.contains("it will depend on 24"), "{all}");
-        assert!(all.contains("hyprwire +"));
-        assert!(rows.iter().any(|row| row.contains("dropped deps") && row.contains("libxcursor")));
-        assert_eq!(all.matches("libxcursor").count(), 1);
-        assert!(all.contains("+ new dependency"));
+        let lines = window(&demo_detail("hyprland"));
+        for line in ["updating too  quickshell, mesa", "new deps      hyprwire", "dropped deps  libxcursor"] {
+            assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
+        }
+        let depends = &lines[line_at(&lines, "depends on")];
+        assert!(depends.starts_with("depends on    24 · aquamarine, cairo, glslang"), "{depends}");
+        assert!(!depends.contains("hyprwire") && !depends.contains("mesa"), "a name listed above is not repeated: {depends}");
+        assert_eq!(lines.join("\n").matches("libxcursor").count(), 1);
+        let rows = screen(&demo_detail("hyprland"), 271, 60);
+        assert!(rows.iter().any(|row| row.contains("depends on    24 · aquamarine, cairo, glslang, hyprcursor, hyprgraphics, hyprlang, + 16 more")), "{rows:#?}");
+        let (x, y) = find(&rows, "required by   11 · hypridle").unwrap();
+        assert!(rows[usize::from(y) + 1][..].chars().skip(usize::from(x) + 14).collect::<String>().starts_with("hyprpolkitagent, "), "the second row of names sits under the first");
     }
 
     #[test]
     fn a_new_dependency_with_a_problem_keeps_the_problem_colour() {
         let app = demo_detail("quickshell");
+        assert!(window(&app).iter().any(|line| line == "new deps      bluez · 36 × error · /usr/lib/bluetooth/bluetoothd"));
         let (buffer, _) = render(&app, 170, 50, app.started + Duration::from_secs(60));
-        let found = (0..50u16).find_map(|y| {
-            let row: String = (0..170u16).map(|x| buffer[(x, y)].symbol()).collect();
-            row.find("bluez +").map(|at| (row[..at].chars().count() as u16, y))
-        });
-        let (x, y) = found.expect("bluez is listed as a new dependency");
-        assert_eq!(buffer[(x, y)].fg, palette::Palette::paper().teal);
+        let rows: Vec<String> = (0..50u16).map(|y| (0..170u16).map(|x| buffer[(x, y)].symbol()).collect()).collect();
+        let at = find(&rows, "bluez ·").expect("bluez is listed as a new dependency");
+        assert_eq!(buffer[at].fg, palette::Palette::paper().teal);
     }
 
     fn demo_map(columns: u16, rows: u16) -> (u32, u32, ink::OrbitSpec) {
@@ -1708,12 +1860,12 @@ mod tests {
         press(&mut app, &[KeyCode::Down, KeyCode::Down]);
         assert!(!app.follow);
         let chosen = app.visible_events()[2].ident.clone();
-        app.apply(source::Event::Journal { time: "12:00:01".into(), day: String::new(), ident: "late".into(), program: String::new(), message: "boom".into(), priority: String::new(), unit: String::new() }, now);
+        app.apply(source::Event::Journal { time: "12:00:01".into(), day: String::new(), ident: "late".into(), program: String::new(), message: "boom".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
         assert_eq!(app.visible_events()[app.lists[2].selected].ident, chosen);
         app.lists[2].filter = "ident-1".into();
         app.select(Pane::Events, 1);
         let chosen = app.visible_events()[1].ident.clone();
-        app.apply(source::Event::Journal { time: "12:00:02".into(), day: String::new(), ident: "other".into(), program: String::new(), message: "boom".into(), priority: String::new(), unit: String::new() }, now);
+        app.apply(source::Event::Journal { time: "12:00:02".into(), day: String::new(), ident: "other".into(), program: String::new(), message: "boom".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
         assert_eq!(app.visible_events()[app.lists[2].selected].ident, chosen);
         press(&mut app, &[KeyCode::Home]);
         assert!(app.follow);
@@ -1726,7 +1878,7 @@ mod tests {
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [], "activity": []}) }, now);
         app.apply(source::Event::Result {}, now);
         for _ in 0..3 {
-            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: "x".into(), program: String::new(), message: "y".into(), priority: String::new(), unit: String::new() }, now);
+            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: "x".into(), program: String::new(), message: "y".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
         }
         assert_eq!(app.journal_live, 3);
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [], "activity": []}) }, now);
@@ -1738,7 +1890,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let now = Instant::now();
         let mut app = crowded_app(now);
-        app.apply(source::Event::Journal { time: "12:00:03".into(), day: String::new(), ident: "evil|ident".into(), program: String::new(), message: "red \u{1b}[31mtext\u{7}".into(), priority: String::new(), unit: String::new() }, now);
+        app.apply(source::Event::Journal { time: "12:00:03".into(), day: String::new(), ident: "evil|ident".into(), program: String::new(), message: "red \u{1b}[31mtext\u{7}".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
         let dir = std::env::temp_dir().join(format!("rumb-export-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let first = export::write(&app, &dir, "20261019-120000").unwrap();
@@ -1909,6 +2061,8 @@ mod tests {
                             "enter" => KeyCode::Enter,
                             "tab" => KeyCode::Tab,
                             "backtab" => KeyCode::BackTab,
+                            "up" => KeyCode::Up,
+                            "down" => KeyCode::Down,
                             other => KeyCode::Char(other.chars().next()?),
                         };
                         Some((time.parse().ok()?, code))
@@ -1954,6 +2108,7 @@ mod tests {
                         filter_theme(&mut theme, &app.theme_filter);
                         app.theme.clone_from(&theme.name);
                     }
+                    Action::CopyCommand => app.status = Some((format!("copied {}", page::CACHE_COMMAND), true, now)),
                     _ if (app.focus, app.lists[app.focus.index()].selected, app.tile, app.part) != before => motion.select(&app, now),
                     _ => {}
                 }
@@ -1972,5 +2127,274 @@ mod tests {
         }
         costs.sort_by(f64::total_cmp);
         println!("frames written {} median {:.1} ms", costs.len(), costs.get(costs.len() / 2).copied().unwrap_or(0.0));
+    }
+
+    fn demo_at(millis: u64) -> App {
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events() {
+            if time <= millis {
+                app.apply(event, now + Duration::from_millis(time));
+            }
+        }
+        app
+    }
+
+    fn window(app: &App) -> Vec<String> {
+        page::overlay_text(app, &palette::Palette::paper()).unwrap().lines().map(str::to_string).collect()
+    }
+
+    fn line_at(lines: &[String], text: &str) -> usize {
+        lines.iter().position(|line| line.contains(text)).unwrap_or_else(|| panic!("{text:?} missing in {lines:?}"))
+    }
+
+    #[test]
+    fn the_owner_window_says_how_risky_the_update_is_that_may_fix_a_problem() {
+        let mut app = demo_at(30_000);
+        app.tile = Some(3);
+        app.overlay = true;
+        let lines = window(&app);
+        assert!(lines[line_at(&lines, "hyprland  0.55.2")].ends_with("hyprland  0.55.2 → 0.56.0 · high risk · critical package, minor version jump"));
+        assert!(lines[line_at(&lines, "linux  6.17.2")].ends_with("linux  6.17.2.arch1 → 6.17.4.arch1 · medium risk · critical package"));
+        assert!(!lines.iter().any(|line| line.contains("->")), "{lines:?}");
+    }
+
+    #[test]
+    fn since_upgrade_lists_the_upgraded_packages_with_problems_first() {
+        let mut app = demo_at(30_000);
+        app.tile = Some(2);
+        app.overlay = true;
+        let lines = window(&app);
+        let (hyprland, linux, chromium, mesa) = (line_at(&lines, "hyprland  0.55.1"), line_at(&lines, "linux  6.17.1"), line_at(&lines, "chromium  141.0.7390.37"), line_at(&lines, "mesa  1:25.2.3"));
+        assert!(lines[hyprland].starts_with("with problems") && lines[hyprland].ends_with("· 42 × crash"));
+        assert!(lines[linux].ends_with("· 31 × error") && lines[chromium].ends_with("· 7 × crash"));
+        assert!(hyprland < linux && linux < chromium && chromium < mesa && lines[mesa].starts_with("others"));
+    }
+
+    #[test]
+    fn the_disk_window_offers_the_cache_command_and_enter_copies_it() {
+        let mut app = demo_at(30_000);
+        app.tile = Some(4);
+        app.overlay = true;
+        assert!(window(&app).contains(&format!("free cache    {} · frees 1.8 GiB", page::CACHE_COMMAND)));
+        assert!(screen(&app, 271, 60).last().unwrap().contains("Enter copy command"));
+        assert_eq!(press(&mut app, &[KeyCode::Enter]), Action::CopyCommand);
+        assert!(app.overlay);
+        app.tile = Some(3);
+        assert_eq!(press(&mut app, &[KeyCode::Enter]), Action::Nothing);
+    }
+
+    #[test]
+    fn the_pending_window_names_the_risky_updates_and_what_they_may_fix() {
+        let mut app = demo_at(30_000);
+        app.tile = Some(0);
+        app.overlay = true;
+        let lines = window(&app);
+        for line in ["high          hyprland  0.55.2 → 0.56.0 · critical package, minor version jump · may fix 42 × crash", "low           mesa  1:25.2.4 rebuild · critical package, rebuild · may fix 7 × crash", "              4 · ffmpeg, firefox, spotify, yay", "AUR           2 · yay, spotify · built locally"] {
+            assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
+        }
+        assert!(!lines.iter().any(|line| line.starts_with("largest")));
+    }
+
+    #[test]
+    fn before_you_update_names_news_about_a_pending_update_and_the_snapshot_fix() {
+        let mut app = demo_at(30_000);
+        app.news.push(app::News { date: "2026-10-15".into(), title: "hyprland 0.56 needs a config change".into(), link: String::new(), manual_intervention: true });
+        app.tile = Some(5);
+        app.overlay = true;
+        let lines = window(&app);
+        assert!(lines[line_at(&lines, "10-15  hyprland 0.56")].ends_with("hyprland 0.56 needs a config change · affects pending hyprland"));
+        assert!(lines[line_at(&lines, "mkinitcpio 43")].ends_with("mkinitcpio 43 requires manual intervention (demo)"));
+        assert!(lines[line_at(&lines, "snapshot")].ends_with("snapper set up, no pacman hook · snap-pac adds one before each pacman transaction"));
+    }
+
+    #[test]
+    fn a_part_window_says_which_update_may_fix_which_problem() {
+        let mut app = demo_at(30_000);
+        app.part = Some(2);
+        app.overlay = true;
+        let lines = window(&app);
+        assert!(lines[line_at(&lines, "hyprland  0.55.2 → 0.56.0")].ends_with("· may fix 42 × crash"));
+        assert!(lines[line_at(&lines, "42 × crash · /usr/bin/Hyprland") + 1].ends_with("hyprland → 0.56.0"));
+        assert!(lines[line_at(&lines, "2 × config · Hyprland config errors") + 1].ends_with("fix in the Hyprland config"));
+    }
+
+    #[test]
+    fn an_event_window_shows_the_problem_behind_the_line() {
+        let mut app = demo_at(40_000);
+        app.focus = Pane::Events;
+        let pick = |app: &App, text: &str| app.visible_events().iter().position(|event| event.message.contains(text)).unwrap() as isize;
+        let index = pick(&app, "Failed to connect to the bus");
+        app.select(Pane::Events, index);
+        app.overlay = true;
+        let lines = window(&app);
+        assert!(lines.contains(&"problem       7 × crash · /usr/lib/chromium/chromium since 10-03".to_string()), "{lines:?}");
+        assert!(lines[line_at(&lines, "problem ") + 1].ends_with("chromium → 142.0.7444.59"));
+        let index = pick(&app, "upgraded linux");
+        app.select(Pane::Events, index);
+        assert!(window(&app).contains(&"its problems  31 × error · kernel since 10-03".to_string()));
+    }
+
+    #[test]
+    fn the_day_window_picks_a_day_and_shows_its_programs_and_pacman_changes() {
+        let mut app = demo_at(30_000);
+        app.tile = Some(1);
+        app.overlay = true;
+        let chosen = |app: &App| app.shown_days()[app.chosen_day()].date.clone();
+        assert_eq!(app.shown_days().len(), 15);
+        assert_eq!(chosen(&app), "2026-10-12");
+        assert!(window(&app).contains(&"on 10-12      11 × crash · Hyprland · hyprland → 0.56.0".to_string()), "{:?}", window(&app));
+        assert!(screen(&app, 271, 60).last().unwrap().contains("↑↓ day"));
+        press(&mut app, &[KeyCode::Down]);
+        assert_eq!(chosen(&app), "2026-10-11");
+        for _ in 0..20 {
+            press(&mut app, &[KeyCode::Down]);
+        }
+        assert_eq!(chosen(&app), "2026-10-03");
+        let lines = window(&app);
+        assert_eq!(lines[line_at(&lines, "pacman ")], "pacman        upgraded linux  6.17.1.arch1 → 6.17.2.arch1");
+        press(&mut app, &[KeyCode::Enter]);
+        assert_eq!(chosen(&app), "2026-10-12");
+    }
+
+    #[test]
+    fn a_day_names_the_owner_of_programs_that_are_no_problem_now() {
+        let mut app = demo_at(30_000);
+        app.tile = Some(1);
+        app.overlay = true;
+        let day = app.shown_days()[app.chosen_day()].date.clone();
+        let activity = app.activity.iter_mut().find(|activity| activity.date == day).unwrap();
+        for (subject, package) in [("/usr/bin/gone", "gone"), ("/usr/lib/libva-helper", "mesa"), ("/opt/tool/bin/tool", "")] {
+            activity.sources.push(crate::app::DaySource { kind: "error".into(), subject: subject.into(), count: 1, package: package.into() });
+        }
+        let lines = window(&app);
+        for line in ["1 × error · gone · gone · no update pending", "1 × error · libva-helper · mesa → 1:25.2.4", "1 × error · tool"] {
+            assert!(lines.iter().any(|shown| shown.ends_with(line)), "{line:?} missing in {lines:?}");
+        }
+    }
+
+    #[test]
+    fn a_journal_line_without_a_problem_names_its_owner() {
+        let mut app = demo_at(30_000);
+        app.focus = Pane::Events;
+        let index = |app: &App, ident: &str| app.visible_events().iter().position(|event| event.ident == ident).unwrap() as isize;
+        app.select(Pane::Events, index(&app, "systemd"));
+        app.overlay = true;
+        let lines = window(&app);
+        assert!(lines.contains(&"owner         systemd · no update pending".to_string()), "{lines:?}");
+        app.select(Pane::Events, index(&app, "chromium"));
+        let lines = window(&app);
+        assert!(!lines.iter().any(|line| line.starts_with("owner")), "a line with a problem names its owner under the problem: {lines:?}");
+    }
+
+    #[test]
+    fn a_crash_names_the_package_of_the_library_it_happened_in() {
+        let mut app = demo_at(30_000);
+        app.focus = Pane::Problems;
+        let index = |app: &App, subject: &str| app.visible_problems().iter().position(|problem| problem.subject == subject).unwrap() as isize;
+        app.select(Pane::Problems, index(&app, "/usr/lib/chromium/chromium"));
+        app.overlay = true;
+        assert!(window(&app).contains(&"library       libgallium-25.2.4-arch1.1.so · mesa → 1:25.2.4".to_string()), "{:?}", window(&app));
+        app.select(Pane::Problems, index(&app, "/usr/bin/nautilus"));
+        assert!(window(&app).contains(&"library       libglib-2.0.so.0 · glib2 · no update pending".to_string()), "{:?}", window(&app));
+    }
+
+    #[test]
+    fn every_ring_has_a_free_row_above_it_as_below() {
+        let app = demo_at(30_000);
+        let (_, scene) = render(&app, 271, 60, app.started + Duration::from_secs(60));
+        let title_row = 2;
+        for placement in scene.placements.iter().filter(|placement| matches!(placement.picture, page::Picture::Ring(_))) {
+            assert_eq!(placement.rect.y, title_row + 2, "one free row between the title and the ring");
+        }
+    }
+
+    #[test]
+    fn a_problem_window_says_when_it_first_showed_and_what_changed_before() {
+        let mut app = demo_at(30_000);
+        app.focus = Pane::Problems;
+        let index = app.visible_problems().iter().position(|problem| problem.subject == "/usr/bin/Hyprland").unwrap();
+        app.select(Pane::Problems, index as isize);
+        app.overlay = true;
+        let lines = window(&app);
+        assert!(lines.contains(&"first seen    10-04".to_string()), "{lines:?}");
+        assert!(lines.contains(&"owner changed 10-03 · upgraded hyprland  0.55.1 → 0.55.2".to_string()));
+    }
+
+    #[test]
+    fn the_paging_keys_show_only_where_a_list_has_more_than_one_page() {
+        let mut app = demo_at(40_000);
+        let keys = |app: &App| screen(app, 271, 60).last().unwrap().clone();
+        app.focus = Pane::Events;
+        assert!(keys(&app).contains("PgUp/PgDn"), "{}", keys(&app));
+        app.focus = Pane::Updates;
+        assert!(!keys(&app).contains("PgUp/PgDn"), "{}", keys(&app));
+        app.visible = [false, false, true, false, false];
+        let (_, scene) = render(&app, 271, 60, app.started + Duration::from_secs(60));
+        app.map_fits = scene.map_fits;
+        assert!(app.map_fits);
+        assert!(!keys(&app).contains("PgUp/PgDn"));
+        press(&mut app, &[KeyCode::PageDown]);
+        assert_eq!(app.lists[0].selected, 0);
+    }
+
+    #[test]
+    fn an_old_dependency_with_a_problem_is_not_marked_as_a_risk_of_the_update() {
+        let mut app = demo_detail("quickshell");
+        app.anatomy.as_mut().unwrap().deps.get_mut("quickshell").unwrap().depends_on.insert(0, "dbus-broker".into());
+        let (buffer, scene) = render(&app, 170, 50, app.started + Duration::from_secs(60));
+        let window = scene.overlay.expect("a detail window");
+        let rows: Vec<String> = (window.y..window.bottom()).map(|y| (window.x..window.right()).map(|x| buffer[(x, y)].symbol()).collect()).collect();
+        let at = |text: &str| find(&rows, text).map(|(x, y)| (window.x + x, window.y + y)).unwrap_or_else(|| panic!("{text} missing in the window"));
+        assert_ne!(buffer[at("dbus-broker")].fg, palette::Palette::paper().teal);
+        assert_eq!(buffer[at("bluez ·")].fg, palette::Palette::paper().teal);
+    }
+
+    #[test]
+    fn an_update_nothing_requires_says_so() {
+        let lines = window(&demo_detail("spotify"));
+        assert!(lines.iter().any(|line| line == "required by   nothing"), "{lines:?}");
+        assert!(lines.iter().any(|line| line.starts_with("depends on    8 · alsa-lib, ")), "{lines:?}");
+    }
+
+    #[test]
+    fn a_crash_inside_a_library_names_the_update_of_its_package() {
+        let app = demo_detail("mesa");
+        let lines = window(&app);
+        assert!(lines.iter().any(|line| line == "may fix       7 × crash · /usr/lib/chromium/chromium · crashed in libgallium-25.2.4-arch1.1.so"), "{lines:?}");
+        let (_, _, spec) = demo_map(271, 60);
+        let mesa = app.visible_updates().iter().position(|update| update.name == "mesa").unwrap();
+        let ffmpeg = app.visible_updates().iter().position(|update| update.name == "ffmpeg").unwrap();
+        assert_eq!(spec.nodes.len(), app.visible_updates().len());
+        assert!(spec.nodes[mesa].fixes && !spec.nodes[ffmpeg].fixes);
+        let wayland = demo_detail("hyprland");
+        assert!(!window(&wayland).iter().any(|line| line.contains("crashed in")), "wayland has no update, so the Hyprland crash stays with hyprland");
+    }
+
+    #[test]
+    fn rollback_says_whether_the_installed_version_is_in_a_package_cache() {
+        let line = |name: &str| window(&demo_detail(name)).into_iter().find(|line| line.starts_with("rollback"));
+        assert_eq!(line("hyprland").as_deref(), Some("rollback      0.55.2-1 in the pacman cache"));
+        assert_eq!(line("yay").as_deref(), Some("rollback      12.5.2-1 in the yay cache"));
+        assert_eq!(line("spotify").as_deref(), Some("rollback      1:1.2.74-1 not in a package cache"));
+        let mut unchecked = demo_detail("hyprland");
+        unchecked.anatomy.as_mut().unwrap().cached = None;
+        assert!(!window(&unchecked).iter().any(|line| line.starts_with("rollback")), "an older scanner did not look, so the row stays empty");
+    }
+
+    #[test]
+    fn the_kernel_update_says_a_reboot_follows() {
+        let lines = window(&demo_detail("linux"));
+        assert!(lines.iter().any(|line| line == "reboot        needed after this update"), "{lines:?}");
+        assert!(!window(&demo_detail("mesa")).iter().any(|line| line.starts_with("reboot")));
+    }
+
+    #[test]
+    fn the_demo_days_name_the_programs_behind_every_count() {
+        let app = demo_at(30_000);
+        for day in &app.activity {
+            let sum = |kind: &str| day.sources.iter().filter(|source| source.kind == kind).map(|source| source.count).sum::<u64>();
+            assert_eq!((sum("crash"), sum("error")), (day.crashes, day.errors), "{}", day.date);
+        }
     }
 }

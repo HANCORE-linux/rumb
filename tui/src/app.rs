@@ -132,6 +132,8 @@ pub struct JournalLine {
     pub priority: String,
     #[serde(default, deserialize_with = "crate::source::or_empty")]
     pub unit: String,
+    #[serde(default, deserialize_with = "crate::source::or_empty")]
+    pub package: String,
 }
 
 /// Facts about the installed software as a whole.
@@ -156,6 +158,8 @@ pub struct Anatomy {
     pub repos: BTreeMap<String, u64>,
     #[serde(default)]
     pub deps: HashMap<String, Deps>,
+    #[serde(default)]
+    pub cached: Option<HashMap<String, String>>,
     #[serde(default)]
     pub journal: Vec<JournalLine>,
     #[serde(default)]
@@ -215,6 +219,8 @@ pub struct Problem {
     pub last: String,
     #[serde(default)]
     pub message: String,
+    #[serde(default)]
+    pub libraries: String,
 }
 
 impl Problem {
@@ -274,6 +280,26 @@ pub struct Activity {
     pub date: String,
     pub crashes: u64,
     pub errors: u64,
+    #[serde(default)]
+    pub sources: Vec<DaySource>,
+    #[serde(default)]
+    pub changes: Vec<DayChange>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DaySource {
+    pub kind: String,
+    pub subject: String,
+    pub count: u64,
+    #[serde(default)]
+    pub package: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DayChange {
+    pub action: String,
+    pub name: String,
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -351,6 +377,7 @@ pub struct EventLine {
     pub message: String,
     pub priority: String,
     pub unit: String,
+    pub package: String,
 }
 
 #[derive(Default)]
@@ -409,6 +436,7 @@ pub struct App {
     pub theme_filter: String,
     pub theme: String,
     pub tile: Option<usize>,
+    pub day: Option<usize>,
     pub last_tile: usize,
     pub part: Option<usize>,
     pub last_part: usize,
@@ -469,6 +497,7 @@ impl App {
             theme_filter: String::new(),
             theme: String::new(),
             tile: None,
+            day: None,
             last_tile: 0,
             part: None,
             last_part: 0,
@@ -514,7 +543,7 @@ impl App {
             Event::Done { label, value, .. } => self.done(&label, &value),
             Event::Result {} => self.finish(now),
             Event::Activity { line } => self.activity(&line, now),
-            Event::Journal { time, day, ident, program, message, priority, unit } => self.journal(JournalLine { time, day, ident, program, message, priority, unit }, now),
+            Event::Journal { time, day, ident, program, message, priority, unit, package } => self.journal(JournalLine { time, day, ident, program, message, priority, unit, package }, now),
         }
     }
 
@@ -545,7 +574,7 @@ impl App {
             }
             if self.events.is_empty() {
                 for line in &anatomy.journal {
-                    self.events.push(EventLine { at: now, clock: line.time.clone(), day: line.day.clone(), source: Source::Journal, ident: line.ident.clone(), program: line.program.clone(), message: line.message.trim().to_string(), priority: line.priority.clone(), unit: line.unit.clone() });
+                    self.events.push(EventLine { at: now, clock: line.time.clone(), day: line.day.clone(), source: Source::Journal, ident: line.ident.clone(), program: line.program.clone(), message: line.message.trim().to_string(), priority: line.priority.clone(), unit: line.unit.clone(), package: line.package.clone() });
                 }
             }
             self.anatomy = Some(anatomy);
@@ -586,7 +615,7 @@ impl App {
         if self.finished_at.is_some() {
             self.journal_live += 1;
         }
-        self.push_event(EventLine { at: now, clock: line.time, day: line.day, source: Source::Journal, ident: line.ident, program: line.program, message: line.message.trim().to_string(), priority: line.priority, unit: line.unit }, now);
+        self.push_event(EventLine { at: now, clock: line.time, day: line.day, source: Source::Journal, ident: line.ident, program: line.program, message: line.message.trim().to_string(), priority: line.priority, unit: line.unit, package: line.package }, now);
     }
 
     fn push_event(&mut self, event: EventLine, now: Instant) {
@@ -643,7 +672,7 @@ impl App {
             _ => {}
         }
         let clock = clock_now();
-        self.push_event(EventLine { at: now, clock, day: today(), source: Source::Pacman, ident: "pacman".into(), program: String::new(), message: line.to_string(), priority: String::new(), unit: String::new() }, now);
+        self.push_event(EventLine { at: now, clock, day: today(), source: Source::Pacman, ident: "pacman".into(), program: String::new(), message: line.to_string(), priority: String::new(), unit: String::new(), package: String::new() }, now);
     }
 
     pub fn transacting(&self) -> bool {
@@ -820,6 +849,34 @@ impl App {
 
     pub fn lists_shown(&self) -> bool {
         self.visible[2..].iter().any(|on| *on)
+    }
+
+    pub fn shown_days(&self) -> Vec<&Activity> {
+        self.activity[self.activity.len().saturating_sub(30)..].iter().rev().filter(|activity| activity.crashes + activity.errors > 0 || !activity.changes.is_empty()).collect()
+    }
+
+    pub fn chosen_day(&self) -> usize {
+        let days = self.shown_days();
+        self.day.unwrap_or_else(|| days.iter().enumerate().filter(|(_, day)| day.crashes > 0).max_by_key(|(k, day)| (day.crashes, std::cmp::Reverse(*k))).map_or(0, |(k, _)| k)).min(days.len().saturating_sub(1))
+    }
+
+    pub fn move_day(&mut self, forward: bool) {
+        let last = self.shown_days().len().saturating_sub(1);
+        let chosen = self.chosen_day();
+        self.day = Some(if forward { (chosen + 1).min(last) } else { chosen.saturating_sub(1) });
+    }
+
+    pub fn first_seen(&self, problem: &Problem) -> Option<(&str, Option<(&str, &DayChange)>)> {
+        let kind = if problem.kind == "crash" { "crash" } else { "error" };
+        let first = self.activity.iter().find(|day| day.sources.iter().any(|source| source.kind == kind && source.subject == problem.subject))?;
+        let change = (!problem.package.is_empty())
+            .then(|| self.activity.iter().filter(|day| day.date <= first.date).flat_map(|day| day.changes.iter().filter(|change| change.name == problem.package).map(move |change| (day.date.as_str(), change))).last())
+            .flatten();
+        Some((first.date.as_str(), change))
+    }
+
+    pub fn cache_command(&self) -> bool {
+        self.anatomy.as_ref().and_then(|anatomy| anatomy.cache_freeable_bytes).is_some_and(|freeable| freeable > 0)
     }
 
     pub fn list_focused(&self, pane: Pane) -> bool {

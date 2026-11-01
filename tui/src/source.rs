@@ -57,6 +57,8 @@ pub enum Event {
         priority: String,
         #[serde(default, deserialize_with = "or_empty")]
         unit: String,
+        #[serde(default, deserialize_with = "or_empty")]
+        package: String,
     },
 }
 

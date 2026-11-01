@@ -6,7 +6,7 @@ use tiny_skia::Pixmap;
 use crate::palette::{Palette, mix};
 
 pub struct Encoder {
-    key: [u32; 17],
+    key: [u32; 18],
     colors: Vec<[u8; 3]>,
     lookup: Vec<u16>,
 }
@@ -18,17 +18,17 @@ fn rgb(color: Color) -> [u8; 3] {
     }
 }
 
-fn key_of(pal: &Palette) -> [u32; 17] {
+fn key_of(pal: &Palette) -> [u32; 18] {
     let pack = |color: Color| {
         let [r, g, b] = rgb(color);
         u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
     };
-    [pal.page, pal.panel, pal.kpi, pal.bar, pal.bar_text, pal.ink, pal.ink2, pal.label, pal.faint, pal.rule, pal.grid, pal.teal, pal.select, pal.alert, pal.warn, pal.relation, pal.options].map(pack)
+    [pal.page, pal.panel, pal.kpi, pal.bar, pal.bar_text, pal.ink, pal.ink2, pal.label, pal.faint, pal.rule, pal.grid, pal.teal, pal.select, pal.alert, pal.warn, pal.relation, pal.options, pal.eye].map(pack)
 }
 
 impl Encoder {
     pub fn new(pal: &Palette) -> Self {
-        let grounds = [pal.page, mix(pal.page, pal.ink, 0.04), mix(pal.page, pal.ink, 0.09), pal.ink];
+        let grounds = [pal.page, mix(pal.page, pal.ink, 0.04), mix(pal.page, pal.ink, 0.09), pal.ink, pal.select, pal.kpi, pal.eye];
         let inks = [pal.ink, pal.ink2, pal.label, pal.faint, pal.rule, pal.grid, pal.alert, pal.warn, pal.teal, pal.relation];
         let mut colors: Vec<[u8; 3]> = Vec::new();
         let mut add = |color: Color| {
@@ -297,7 +297,7 @@ mod tests {
         for name in crate::theme::names() {
             let pal = crate::theme::pick(Some(&name)).unwrap().palette;
             let mut encoder = Encoder::new(&pal);
-            for color in [pal.page, pal.ink, pal.alert, pal.warn, pal.teal, pal.relation, pal.options] {
+            for color in [pal.page, pal.ink, pal.alert, pal.warn, pal.teal, pal.relation, pal.options, pal.eye, pal.select, pal.kpi] {
                 let [r, g, b] = rgb(color);
                 let index = encoder.index(r, g, b);
                 let [pr, pg, pb] = encoder.colors[usize::from(index)];

@@ -14,7 +14,7 @@ Every release takes the same path, and each step waits for the maintainer's appr
 
 1. Create a worktree with a release branch from `main`:
    `git worktree add ../rumb-X.Y.Z -b release-X.Y.Z main`
-2. Do the work there. The release commit sets the version in `tui/Cargo.toml` and in the `rumb` entry of `tui/Cargo.lock`, the date in `man/rumb.1`, and refreshes `docs/overview.png` from the demo data at the same moment as before (frame 480 of the `motion_frames` test: 170×50, Labra).
+2. Do the work there. The release commit sets the version in `tui/Cargo.toml` and in the `rumb` entry of `tui/Cargo.lock`, the date in `man/rumb.1`, and refreshes `docs/overview.png` from the demo data at the same moment as before (frame 480 of the `motion_frames` test: 271×60 with 7×17 cells, Labra).
 3. Push the branch.
 4. Open a pull request against `main`.
 5. Merge it once the maintainer approves and CI is green.
