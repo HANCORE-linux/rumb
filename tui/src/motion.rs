@@ -346,7 +346,7 @@ impl Motion {
                 let result = start + TYPE * head.chars().count() as u32 + ms(280);
                 self.line(start, head, tail, Some(result), TYPE);
                 self.cursor = result + GAP;
-                self.send(result, Target::Tile(2), 0, 700, true);
+                self.send(now, Target::Tile(2), 0, 700, true);
                 self.feed_from(start, raw);
                 self.act(now, Act::Apply(Box::new(event), now));
             }

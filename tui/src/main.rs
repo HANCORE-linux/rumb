@@ -1839,6 +1839,28 @@ mod tests {
         let later = start + Duration::from_millis(last_updates + 1000);
         motion.step(&mut app, later, 1.0);
         assert!(!motion.held(motion::Target::List(Pane::Updates.index() as u8), later), "the updates list still waits a second after the recheck after the demo's pacman transaction");
+
+        let mut app = App::new(false, true, start);
+        let mut motion = Motion::new(true, start);
+        let mut at = 0;
+        let mut first = None;
+        for line in include_str!("../demo.ndjson").lines().filter(|line| !line.trim().is_empty()) {
+            let value: Value = serde_json::from_str(line).unwrap();
+            at += value["_delay"].as_u64().unwrap_or(0);
+            let now = start + Duration::from_millis(at);
+            first.get_or_insert_with(|| line.to_string());
+            motion.push(serde_json::from_str(line).unwrap(), line, &mut app, now);
+            motion.step(&mut app, now, 0.0);
+            if value["line"] == "transaction completed" {
+                let recheck = first.clone().unwrap();
+                motion.push(serde_json::from_str(&recheck).unwrap(), &recheck, &mut app, now);
+                let later = now + Duration::from_millis(1000);
+                motion.step(&mut app, later, 1.0);
+                assert!(!motion.held(motion::Target::Tile(2), later), "SINCE UPGRADE still waits a second after a recheck starts behind the transaction's lines");
+                return;
+            }
+        }
+        panic!("the demo has no pacman transaction");
     }
 
     #[test]
