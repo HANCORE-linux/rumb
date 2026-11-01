@@ -138,7 +138,6 @@ pub struct RingSpec {
     pub track: Option<u16>,
     pub ticks: u16,
     pub glow: Vec<(u16, u8, Color)>,
-    pub tag: Option<(u16, u8, String, Color)>,
     pub hand: Option<u16>,
     pub center: Vec<(String, Color, u8)>,
 }
@@ -221,16 +220,6 @@ pub fn ring(spec: &RingSpec, pal: &Palette, width: u32, height: u32, cell_height
         let (from, to) = (at(slot, hub), at(slot, r - unit));
         pen.line(from, to, sk(pal.ink2, 0.9), 0.8);
         pen.disc(to.0, to.1, 1.9 * unit, sk(pal.ink, 1.0));
-    }
-    if let Some((slot, row, label, color)) = &spec.tag
-        && let Some(atlas) = sized_atlas(9.0 * cell_height / 17.0)
-    {
-        let (x, y) = at(f32::from(*slot) + 0.5, radius(*row) + 2.5 * unit);
-        let line: Glyphs = label.chars().map(|ch| (ch, sk(*color, 1.0))).collect();
-        let span = line.len() as f32 * atlas.advance as f32;
-        let left = if x >= c.0 { x + 1.5 * unit } else { x - 1.5 * unit - span };
-        let baseline = (y + atlas.ascent as f32 * 0.45).clamp(atlas.ascent as f32, h - (atlas.height - atlas.ascent) as f32);
-        type_line(pen.pixmap, atlas, left.clamp(0.0, (w - span).max(0.0)), baseline, &line, &|_, _| 1.0);
     }
     let lines: Vec<(&Atlas, Glyphs)> = centre_lines(&spec.center, c, hub, cell_height)
         .into_iter()
@@ -405,12 +394,6 @@ pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_heig
     let spans = sector_spans(&spec.sectors);
     {
         let mut pen = Pen { pixmap: &mut pixmap, unit, mask: None };
-        for i in 0..170u32 {
-            let angle = noise(i * 3) * TAU;
-            let distance = 0.45 + noise(i * 3 + 1) * 0.75;
-            let (x, y) = at(angle.cos() * distance * 1.25, angle.sin() * distance * 0.8);
-            pen.disc(x, y, (0.5 + noise(i * 3 + 2) * 1.4) * unit, ink(0.12 + noise(i * 7) * 0.45));
-        }
         for radius in [0.3f32, 0.52, 0.7, 0.88] {
             pen.circle(c.0, c.1, r * radius, ink(0.12), 0.7, Some((2.0, 3.0)));
         }
@@ -1463,6 +1446,18 @@ fn option_lines(options: &Options, room_up: usize, room: usize) -> [String; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_update_map_draws_nothing_beside_its_rings_and_ports() {
+        let pal = crate::palette::Palette::labra();
+        let (w, h, cell) = (900u32, 420u32, 17.0f32);
+        let pixmap = orbit(&OrbitSpec { nodes: Vec::new(), links: Vec::new(), sectors: Vec::new() }, &pal, w, h, cell).unwrap();
+        let (_, unit) = canvas(w, h, pal.page, cell).unwrap();
+        let reach = dial(w as f32, h as f32, unit) * 1.15 + 7.0 * unit;
+        let ground = pixmap.pixel(0, 0).unwrap();
+        let stray = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|&(x, y)| (x as f32 + 0.5 - w as f32 / 2.0).hypot(y as f32 + 0.5 - h as f32 / 2.0) > reach && pixmap.pixel(x, y).unwrap() != ground).count();
+        assert_eq!(stray, 0);
+    }
 
     #[test]
     fn a_wide_word_in_a_ring_breaks_instead_of_shrinking() {

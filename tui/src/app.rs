@@ -274,6 +274,24 @@ pub struct Activity {
     pub date: String,
     pub crashes: u64,
     pub errors: u64,
+    #[serde(default)]
+    pub sources: Vec<DaySource>,
+    #[serde(default)]
+    pub changes: Vec<DayChange>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DaySource {
+    pub kind: String,
+    pub subject: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DayChange {
+    pub action: String,
+    pub name: String,
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -409,6 +427,7 @@ pub struct App {
     pub theme_filter: String,
     pub theme: String,
     pub tile: Option<usize>,
+    pub day: Option<usize>,
     pub last_tile: usize,
     pub part: Option<usize>,
     pub last_part: usize,
@@ -469,6 +488,7 @@ impl App {
             theme_filter: String::new(),
             theme: String::new(),
             tile: None,
+            day: None,
             last_tile: 0,
             part: None,
             last_part: 0,
@@ -820,6 +840,34 @@ impl App {
 
     pub fn lists_shown(&self) -> bool {
         self.visible[2..].iter().any(|on| *on)
+    }
+
+    pub fn shown_days(&self) -> Vec<&Activity> {
+        self.activity[self.activity.len().saturating_sub(30)..].iter().rev().filter(|activity| activity.crashes + activity.errors > 0 || !activity.changes.is_empty()).collect()
+    }
+
+    pub fn chosen_day(&self) -> usize {
+        let days = self.shown_days();
+        self.day.unwrap_or_else(|| days.iter().enumerate().filter(|(_, day)| day.crashes > 0).max_by_key(|(k, day)| (day.crashes, std::cmp::Reverse(*k))).map_or(0, |(k, _)| k)).min(days.len().saturating_sub(1))
+    }
+
+    pub fn move_day(&mut self, forward: bool) {
+        let last = self.shown_days().len().saturating_sub(1);
+        let chosen = self.chosen_day();
+        self.day = Some(if forward { (chosen + 1).min(last) } else { chosen.saturating_sub(1) });
+    }
+
+    pub fn first_seen(&self, problem: &Problem) -> Option<(&str, Option<(&str, &DayChange)>)> {
+        let kind = if problem.kind == "crash" { "crash" } else { "error" };
+        let first = self.activity.iter().find(|day| day.sources.iter().any(|source| source.kind == kind && source.subject == problem.subject))?;
+        let change = (!problem.package.is_empty())
+            .then(|| self.activity.iter().filter(|day| day.date <= first.date).flat_map(|day| day.changes.iter().filter(|change| change.name == problem.package).map(move |change| (day.date.as_str(), change))).last())
+            .flatten();
+        Some((first.date.as_str(), change))
+    }
+
+    pub fn cache_command(&self) -> bool {
+        self.anatomy.as_ref().and_then(|anatomy| anatomy.cache_freeable_bytes).is_some_and(|freeable| freeable > 0)
     }
 
     pub fn list_focused(&self, pane: Pane) -> bool {

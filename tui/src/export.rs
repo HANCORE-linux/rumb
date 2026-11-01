@@ -190,7 +190,7 @@ pub fn report(app: &App) -> String {
         let _ = writeln!(out, "- explicit: {}", thousands(anatomy.explicit));
         let _ = writeln!(out, "- foreign: {}", thousands(anatomy.repos.get("aur").copied().unwrap_or(0)));
         let _ = writeln!(out, "- orphans: {}", thousands(anatomy.orphans));
-        let freeable = anatomy.cache_freeable_bytes.map(|freeable| format!(", {} freeable with paccache -rk1", bytes(freeable))).unwrap_or_default();
+        let freeable = anatomy.cache_freeable_bytes.map(|freeable| format!(", {} freeable with {}", bytes(freeable), crate::page::CACHE_COMMAND)).unwrap_or_default();
         let _ = writeln!(out, "- pacman cache: {}{freeable}", bytes(anatomy.cache_bytes));
     }
 

@@ -530,6 +530,32 @@ collect_problems() {
     day=$(date -d "$day + 1 day" +%F)
   done
 
+  # The programs behind each day's crashes and errors, and what pacman changed that day
+  jq -c '[.[]? | select(.exe) | {day: (.time / 1000000 | floor | strflocaltime("%F")), subject: (.exe | gsub("[[:cntrl:]]"; " "))}]
+      | group_by(.day, .subject) | map({day: .[0].day, kind: "crash", subject: .[0].subject, count: length})' \
+    "$tmp/cores.json" >"$tmp/day_crashes.json" 2>/dev/null || echo '[]' >"$tmp/day_crashes.json"
+  jq -nc --argjson since "$since_epoch" "$journal_source"'
+      [inputs | select((.SYSLOG_IDENTIFIER | s) != "systemd-coredump")
+        | {day: (.__REALTIME_TIMESTAMP | tonumber / 1000000 | floor | strflocaltime("%F")), subject: (source | sub("^ident:"; ""))}]
+      | group_by(.day, .subject) | map({day: .[0].day, kind: "error", subject: .[0].subject, count: length})' \
+    "$tmp/journal.json" >"$tmp/day_errors.json" 2>/dev/null || echo '[]' >"$tmp/day_errors.json"
+  awk -v start="$(date -d "@$window_start" +%F)" '
+    / \[ALPM\] (upgraded|downgraded|installed|reinstalled|removed) / {
+      day = substr($1, 2, 10)
+      if (day < start) next
+      line = $0
+      sub(/^.*\[ALPM\] /, "", line)
+      action = line
+      sub(/ .*/, "", action)
+      rest = substr(line, length(action) + 2)
+      name = rest
+      sub(/ .*/, "", name)
+      version = rest
+      sub(/^[^ ]* \(/, "", version)
+      sub(/\)$/, "", version)
+      printf "%s\x1f%s\x1f%s\x1f%s\n", day, action, name, version
+    }' "$pacman_log" >"$tmp/day_changes.tsv" 2>/dev/null
+
   step problems "checking failed units"
   failed_total=0
   for scope in system user; do
@@ -580,7 +606,11 @@ collect_problems() {
   tsv_json "$tmp/problems.tsv" kind subject count package status update signal frames last message |
     jq 'map(.count |= tonumber)' >"$tmp/problems.json"
   tsv_json "$tmp/activity.tsv" date crashes errors |
-    jq 'map(.crashes |= tonumber | .errors |= tonumber)' >"$tmp/activity.json"
+    jq --slurpfile crashes "$tmp/day_crashes.json" --slurpfile errors "$tmp/day_errors.json" --rawfile changes "$tmp/day_changes.tsv" '
+      def by_day: group_by(.day) | map({key: .[0].day, value: map(del(.day))}) | from_entries;
+      (($crashes[0] // []) + ($errors[0] // []) | by_day) as $sources
+      | ($changes | split("\n") | map(select(length > 0) | gsub("[[:cntrl:]]"; " ") | split(" ") | {day: .[0], action: .[1], name: .[2], version: (.[3:] | join(" "))}) | by_day) as $pacman
+      | map(.crashes |= tonumber | .errors |= tonumber | .sources = ($sources[.date] // []) | .changes = ($pacman[.date] // []))' >"$tmp/activity.json"
   emit --slurpfile problems "$tmp/problems.json" --slurpfile activity "$tmp/activity.json" --argjson config_errors "$config_errors" --args \
     '{event: "stage", stage: "problems", data: {problems: $problems[0], activity: $activity[0], problem_check_errors: $ARGS.positional, config_errors: $config_errors}}' \
     "${problem_errors[@]}"

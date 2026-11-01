@@ -202,6 +202,7 @@ enum Action {
     Rescan,
     Export,
     Copy,
+    CopyCommand,
     Theme(bool),
     ThemeFilter,
 }
@@ -258,7 +259,13 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3], now: Instant) -> Actio
             KeyCode::Right => app.move_tile(true),
             KeyCode::Tab => app.cycle_focus(true),
             KeyCode::BackTab => app.cycle_focus(false),
-            KeyCode::Enter => app.overlay = true,
+            KeyCode::Enter if app.overlay && app.tile == Some(4) && app.cache_command() => return Action::CopyCommand,
+            KeyCode::Up if app.overlay && app.tile == Some(1) => app.move_day(false),
+            KeyCode::Down if app.overlay && app.tile == Some(1) => app.move_day(true),
+            KeyCode::Enter => {
+                app.overlay = true;
+                app.day = None;
+            }
             KeyCode::Char(digit @ '1'..='5') => {
                 app.press_panel(digit as usize - '1' as usize);
                 app.overlay = false;
@@ -310,6 +317,7 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3], now: Instant) -> Actio
         }
         KeyCode::Down => app.select(focus, selected + 1),
         KeyCode::Up => app.select(focus, selected - 1),
+        KeyCode::PageDown | KeyCode::PageUp if focus == Pane::Updates && app.updates_map && app.map_fits => {}
         KeyCode::PageDown => app.select(focus, selected + step),
         KeyCode::PageUp => app.select(focus, selected - step),
         KeyCode::Home => app.select(focus, 0),
@@ -413,10 +421,10 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
                 }
             }
         }
-        while let Ok((lines, result)) = copies.try_recv() {
+        while let Ok((copied, result)) = copies.try_recv() {
             copying -= 1;
             app.status = Some(match result {
-                Ok(()) => (format!("copied {} {}", page::thousands(lines as u64), if lines == 1 { "line" } else { "lines" }), true, Instant::now()),
+                Ok(()) => (copied, true, Instant::now()),
                 Err(error) => (format!("copy failed: {error}"), false, Instant::now()),
             });
         }
@@ -493,10 +501,16 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
                         app.status = Some((format!("theme not saved: {error}"), false, Instant::now()));
                     }
                 }
+                Action::CopyCommand => {
+                    let done = copy_done.clone();
+                    std::thread::spawn(move || done.send((format!("copied {}", page::CACHE_COMMAND), export::copy(page::CACHE_COMMAND.to_string()))));
+                    copying += 1;
+                }
                 Action::Copy => {
                     if let Some(text) = page::overlay_text(&app, &theme.palette) {
-                        let (lines, done) = (text.lines().count(), copy_done.clone());
-                        std::thread::spawn(move || done.send((lines, export::copy(text))));
+                        let lines = text.lines().count();
+                        let (copied, done) = (format!("copied {} {}", page::thousands(lines as u64), if lines == 1 { "line" } else { "lines" }), copy_done.clone());
+                        std::thread::spawn(move || done.send((copied, export::copy(text))));
                         copying += 1;
                     }
                 }
@@ -1432,6 +1446,7 @@ mod tests {
                 "kind          error",
                 "count         151 since 10-03 21:10",
                 "last          10-17 23:38",
+                "first seen    10-03",
                 "message       Activation request for 'org.freedesktop.home1' failed: The systemd unit 'dbus-org.freedesktop.home1.service' could not be found.",
                 "owner         dbus-broker",
                 "status        no update pending for the owner",
@@ -1986,6 +2001,8 @@ mod tests {
                             "enter" => KeyCode::Enter,
                             "tab" => KeyCode::Tab,
                             "backtab" => KeyCode::BackTab,
+                            "up" => KeyCode::Up,
+                            "down" => KeyCode::Down,
                             other => KeyCode::Char(other.chars().next()?),
                         };
                         Some((time.parse().ok()?, code))
@@ -2031,6 +2048,7 @@ mod tests {
                         filter_theme(&mut theme, &app.theme_filter);
                         app.theme.clone_from(&theme.name);
                     }
+                    Action::CopyCommand => app.status = Some((format!("copied {}", page::CACHE_COMMAND), true, now)),
                     _ if (app.focus, app.lists[app.focus.index()].selected, app.tile, app.part) != before => motion.select(&app, now),
                     _ => {}
                 }
@@ -2049,5 +2067,193 @@ mod tests {
         }
         costs.sort_by(f64::total_cmp);
         println!("frames written {} median {:.1} ms", costs.len(), costs.get(costs.len() / 2).copied().unwrap_or(0.0));
+    }
+
+    fn demo_at(millis: u64) -> App {
+        let now = Instant::now();
+        let mut app = App::new(true, false, now);
+        for (time, event) in demo_events() {
+            if time <= millis {
+                app.apply(event, now + Duration::from_millis(time));
+            }
+        }
+        app
+    }
+
+    fn window(app: &App) -> Vec<String> {
+        page::overlay_text(app, &palette::Palette::paper()).unwrap().lines().map(str::to_string).collect()
+    }
+
+    fn line_at(lines: &[String], text: &str) -> usize {
+        lines.iter().position(|line| line.contains(text)).unwrap_or_else(|| panic!("{text:?} missing in {lines:?}"))
+    }
+
+    #[test]
+    fn the_owner_window_says_how_risky_the_update_is_that_may_fix_a_problem() {
+        let mut app = demo_at(30_000);
+        app.tile = Some(3);
+        app.overlay = true;
+        let lines = window(&app);
+        assert!(lines[line_at(&lines, "hyprland  0.55.2")].ends_with("hyprland  0.55.2 → 0.56.0 · high risk · critical package, minor version jump"));
+        assert!(lines[line_at(&lines, "linux  6.17.2")].ends_with("linux  6.17.2.arch1 → 6.17.4.arch1 · medium risk · critical package"));
+        assert!(!lines.iter().any(|line| line.contains("->")), "{lines:?}");
+    }
+
+    #[test]
+    fn since_upgrade_lists_the_upgraded_packages_with_problems_first() {
+        let mut app = demo_at(30_000);
+        app.tile = Some(2);
+        app.overlay = true;
+        let lines = window(&app);
+        let (hyprland, linux, chromium, mesa) = (line_at(&lines, "hyprland  0.55.1"), line_at(&lines, "linux  6.17.1"), line_at(&lines, "chromium  141.0.7390.37"), line_at(&lines, "mesa  1:25.2.3"));
+        assert!(lines[hyprland].starts_with("with problems") && lines[hyprland].ends_with("· 42 × crash"));
+        assert!(lines[linux].ends_with("· 31 × error") && lines[chromium].ends_with("· 7 × crash"));
+        assert!(hyprland < linux && linux < chromium && chromium < mesa && lines[mesa].starts_with("others"));
+    }
+
+    #[test]
+    fn the_disk_window_offers_the_cache_command_and_enter_copies_it() {
+        let mut app = demo_at(30_000);
+        app.tile = Some(4);
+        app.overlay = true;
+        assert!(window(&app).contains(&format!("free cache    {} · frees 1.8 GiB", page::CACHE_COMMAND)));
+        assert!(screen(&app, 271, 60).last().unwrap().contains("Enter copy command"));
+        assert_eq!(press(&mut app, &[KeyCode::Enter]), Action::CopyCommand);
+        assert!(app.overlay);
+        app.tile = Some(3);
+        assert_eq!(press(&mut app, &[KeyCode::Enter]), Action::Nothing);
+    }
+
+    #[test]
+    fn the_pending_window_names_the_risky_updates_and_what_they_may_fix() {
+        let mut app = demo_at(30_000);
+        app.tile = Some(0);
+        app.overlay = true;
+        let lines = window(&app);
+        for line in ["high          hyprland  0.55.2 → 0.56.0 · critical package, minor version jump · may fix 42 × crash", "low           5 · ffmpeg, firefox, mesa, spotify, yay", "AUR           2 · yay, spotify · built locally"] {
+            assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
+        }
+        assert!(!lines.iter().any(|line| line.starts_with("largest")));
+    }
+
+    #[test]
+    fn before_you_update_names_news_about_a_pending_update_and_the_snapshot_fix() {
+        let mut app = demo_at(30_000);
+        app.news.push(app::News { date: "2026-10-15".into(), title: "hyprland 0.56 needs a config change".into(), link: String::new(), manual_intervention: true });
+        app.tile = Some(5);
+        app.overlay = true;
+        let lines = window(&app);
+        assert!(lines[line_at(&lines, "10-15  hyprland 0.56")].ends_with("hyprland 0.56 needs a config change · affects pending hyprland"));
+        assert!(lines[line_at(&lines, "mkinitcpio 43")].ends_with("mkinitcpio 43 requires manual intervention (demo)"));
+        assert!(lines[line_at(&lines, "snapshot")].ends_with("snapper set up, no pacman hook · snap-pac adds one before each pacman transaction"));
+    }
+
+    #[test]
+    fn a_part_window_says_which_update_may_fix_which_problem() {
+        let mut app = demo_at(30_000);
+        app.part = Some(2);
+        app.overlay = true;
+        let lines = window(&app);
+        assert!(lines[line_at(&lines, "hyprland  0.55.2 → 0.56.0")].ends_with("· may fix 42 × crash"));
+        assert!(lines[line_at(&lines, "42 × crash · /usr/bin/Hyprland") + 1].ends_with("hyprland → 0.56.0"));
+        assert!(lines[line_at(&lines, "2 × config · Hyprland config errors") + 1].ends_with("fix in the Hyprland config"));
+    }
+
+    #[test]
+    fn an_event_window_shows_the_problem_behind_the_line() {
+        let mut app = demo_at(40_000);
+        app.focus = Pane::Events;
+        let pick = |app: &App, text: &str| app.visible_events().iter().position(|event| event.message.contains(text)).unwrap() as isize;
+        let index = pick(&app, "Failed to connect to the bus");
+        app.select(Pane::Events, index);
+        app.overlay = true;
+        let lines = window(&app);
+        assert!(lines.contains(&"problem       7 × crash · /usr/lib/chromium/chromium since 10-03".to_string()), "{lines:?}");
+        assert!(lines[line_at(&lines, "problem ") + 1].ends_with("chromium → 142.0.7444.59"));
+        let index = pick(&app, "upgraded linux");
+        app.select(Pane::Events, index);
+        assert!(window(&app).contains(&"its problems  31 × error · kernel since 10-03".to_string()));
+    }
+
+    #[test]
+    fn the_day_window_picks_a_day_and_shows_its_programs_and_pacman_changes() {
+        let mut app = demo_at(30_000);
+        app.tile = Some(1);
+        app.overlay = true;
+        let chosen = |app: &App| app.shown_days()[app.chosen_day()].date.clone();
+        assert_eq!(app.shown_days().len(), 15);
+        assert_eq!(chosen(&app), "2026-10-12");
+        assert!(window(&app).contains(&"on 10-12      11 × crash · Hyprland · hyprland → 0.56.0".to_string()), "{:?}", window(&app));
+        assert!(screen(&app, 271, 60).last().unwrap().contains("↑↓ day"));
+        press(&mut app, &[KeyCode::Down]);
+        assert_eq!(chosen(&app), "2026-10-11");
+        for _ in 0..20 {
+            press(&mut app, &[KeyCode::Down]);
+        }
+        assert_eq!(chosen(&app), "2026-10-03");
+        let lines = window(&app);
+        assert_eq!(lines[line_at(&lines, "pacman ")], "pacman        upgraded linux  6.17.1.arch1 → 6.17.2.arch1");
+        press(&mut app, &[KeyCode::Enter]);
+        assert_eq!(chosen(&app), "2026-10-12");
+    }
+
+    #[test]
+    fn a_problem_window_says_when_it_first_showed_and_what_changed_before() {
+        let mut app = demo_at(30_000);
+        app.focus = Pane::Problems;
+        let index = app.visible_problems().iter().position(|problem| problem.subject == "/usr/bin/Hyprland").unwrap();
+        app.select(Pane::Problems, index as isize);
+        app.overlay = true;
+        let lines = window(&app);
+        assert!(lines.contains(&"first seen    10-04".to_string()), "{lines:?}");
+        assert!(lines.contains(&"owner changed 10-03 · upgraded hyprland  0.55.1 → 0.55.2".to_string()));
+    }
+
+    #[test]
+    fn the_paging_keys_show_only_where_a_list_has_more_than_one_page() {
+        let mut app = demo_at(40_000);
+        let keys = |app: &App| screen(app, 271, 60).last().unwrap().clone();
+        app.focus = Pane::Events;
+        assert!(keys(&app).contains("PgUp/PgDn"), "{}", keys(&app));
+        app.focus = Pane::Updates;
+        assert!(!keys(&app).contains("PgUp/PgDn"), "{}", keys(&app));
+        app.visible = [false, false, true, false, false];
+        let (_, scene) = render(&app, 271, 60, app.started + Duration::from_secs(60));
+        app.map_fits = scene.map_fits;
+        assert!(app.map_fits);
+        assert!(!keys(&app).contains("PgUp/PgDn"));
+        press(&mut app, &[KeyCode::PageDown]);
+        assert_eq!(app.lists[0].selected, 0);
+    }
+
+    #[test]
+    fn an_old_dependency_with_a_problem_is_not_marked_as_a_risk_of_the_update() {
+        let mut app = demo_detail("quickshell");
+        app.anatomy.as_mut().unwrap().deps.get_mut("quickshell").unwrap().depends_on.insert(0, "dbus-broker".into());
+        let (buffer, scene) = render(&app, 170, 50, app.started + Duration::from_secs(60));
+        let window = scene.overlay.expect("a detail window");
+        let rows: Vec<String> = (window.y..window.bottom()).map(|y| (window.x..window.right()).map(|x| buffer[(x, y)].symbol()).collect()).collect();
+        let at = |text: &str| find(&rows, text).map(|(x, y)| (window.x + x, window.y + y)).unwrap_or_else(|| panic!("{text} missing in the window"));
+        assert_ne!(buffer[at("dbus-broker")].fg, palette::Palette::paper().teal);
+        assert_eq!(buffer[at("bluez +")].fg, palette::Palette::paper().teal);
+    }
+
+    #[test]
+    fn an_empty_side_of_the_dependencies_says_so_beside_the_hub() {
+        let app = demo_detail("spotify");
+        let rows = screen(&app, 271, 60);
+        let (_, nothing) = find(&rows, "nothing requires it").expect("the empty side is named");
+        let (_, heading) = find(&rows, "it will depend on").unwrap();
+        assert!(nothing > heading);
+        assert!(find(&rows, "0 require it").is_none());
+    }
+
+    #[test]
+    fn the_demo_days_name_the_programs_behind_every_count() {
+        let app = demo_at(30_000);
+        for day in &app.activity {
+            let sum = |kind: &str| day.sources.iter().filter(|source| source.kind == kind).map(|source| source.count).sum::<u64>();
+            assert_eq!((sum("crash"), sum("error")), (day.crashes, day.errors), "{}", day.date);
+        }
     }
 }
