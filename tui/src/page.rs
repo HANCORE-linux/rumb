@@ -2609,8 +2609,24 @@ fn versions(old: &str, new: &str, room: usize) -> String {
         _ => (old, new),
     };
     let short = format!("{old} → {new}");
+    if short.chars().count() <= room {
+        return short;
+    }
+    let lead = |text: &str, parts: usize| text.split('.').take(parts).collect::<Vec<_>>().join(".");
+    for parts in (1..old.split('.').count().min(new.split('.').count())).rev() {
+        let (head_old, head_new) = (lead(old, parts), lead(new, parts));
+        let heads = format!("{head_old} → {head_new}");
+        if head_old != head_new && heads.chars().count() <= room {
+            return heads;
+        }
+    }
+    let common = old.char_indices().zip(new.chars()).take_while(|((_, a), b)| a == b).filter(|((_, ch), _)| matches!(ch, '.' | '-' | '+' | '_' | ':')).map(|((index, ch), _)| index + ch.len_utf8()).last().unwrap_or(0);
+    let tail = format!("…{} → {new}", &old[common..]);
+    if common > 0 && tail.chars().count() <= room {
+        return tail;
+    }
     let keep = room.saturating_sub(new.chars().count() + 3);
-    if short.chars().count() <= room || keep == 0 {
+    if keep == 0 {
         return fit(&short, room);
     }
     format!("{} → {new}", fit(old, keep))
@@ -3465,12 +3481,14 @@ mod tests {
     #[test]
     fn versions_shorten_to_the_changed_part_and_sizes_stay_short() {
         assert_eq!(versions("610.57.04-1", "615.78.08-1", 30), "610.57.04 → 615.78.08");
-        assert_eq!(versions("610.57.04-1", "615.78.08-1", 18), "610.5… → 615.78.08");
+        assert_eq!(versions("610.57.04-1", "615.78.08-1", 18), "610.57 → 615.78");
         assert_eq!(versions("6.17.2.arch1-1", "6.17.4.arch1-1", 18), "6.17.2 → 6.17.4");
         assert_eq!(versions("1:25.2.4-1", "1:25.2.4-2", 18), "1:25.2.4 rebuild");
-        assert_eq!(versions("1:1.2.74-1", "1:1.2.75-1", 18), "1:1.2.… → 1:1.2.75");
-        assert_eq!(versions("141.0.7390.54-1", "142.0.7444.59-1", 18), "1… → 142.0.7444.59");
-        assert_eq!(versions("1.0ä-1", "2.0ö-1", 6).chars().count(), 6);
+        assert_eq!(versions("1:1.2.74-1", "1:1.2.75-1", 18), "…74 → 1:1.2.75");
+        assert_eq!(versions("141.0.7390.54-1", "142.0.7444.59-1", 18), "141.0 → 142.0");
+        assert_eq!(versions("141.0.7390.54-1", "142.0.7444.59-1", 24), "141.0.7390 → 142.0.7444");
+        assert_eq!(versions("2026.10.21-1", "2026.10.24-1", 21), "…21 → 2026.10.24");
+        assert_eq!(versions("1.0ä-1", "2.0ö-1", 6), "1 → 2");
         assert_eq!(versions("a.b-1", "c.b-1", 4).chars().count(), 4);
         assert_eq!(short_bytes(517 * 1024), "517K");
         assert_eq!(short_bytes(6_815_744), "6.5M");
