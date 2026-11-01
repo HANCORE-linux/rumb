@@ -171,6 +171,20 @@ owners_of() {
   done
 }
 
+# Sets REPLY to the package behind a journal line: its executable, the kernel,
+# or a program of that name on PATH; "" when none is found.
+journal_owner() {
+  local path=$1
+  REPLY=""
+  if [[ -z $path && $2 == kernel ]]; then
+    REPLY=${kernel_package:-}
+    return
+  fi
+  [[ -n $path ]] || path=$(command -v -- "$2" 2>/dev/null) || return 0
+  [[ $path == /* ]] && owner_of "$path"
+  return 0
+}
+
 declare -A pending=()
 update_errors=()
 
@@ -456,8 +470,8 @@ check_updates
 # --- Current problems ---
 
 collect_problems() {
-  local count exe source scope unit fragment package units config_errors day today journal_total failed_total row
-  local -a scope_flag paths rows fragments
+  local count exe source scope unit fragment package units config_errors day today journal_total failed_total row path
+  local -a scope_flag paths rows fragments day_paths
   local -A crash_days=() error_days=()
   problem_errors=()
   : >"$tmp/problems.tsv"
@@ -559,6 +573,19 @@ collect_problems() {
         | {day: (.__REALTIME_TIMESTAMP | tonumber / 1000000 | floor | strflocaltime("%F")), subject: (source | sub("^ident:"; ""))}]
       | group_by(.day, .subject) | map({day: .[0].day, kind: "error", subject: .[0].subject, count: length})' \
     "$tmp/journal.json" >"$tmp/day_errors.json" 2>/dev/null || echo '[]' >"$tmp/day_errors.json"
+  mapfile -t day_paths < <(jq -r '.[]?.subject | select(startswith("/"))' "$tmp/day_crashes.json" "$tmp/day_errors.json" 2>/dev/null | sort -u)
+  owners_of "${day_paths[@]}"
+  printf 'kernel\x1f%s\n' "$kernel_package" >"$tmp/day_owners.tsv"
+  for source in "${day_paths[@]}"; do
+    owner_of "$source"
+    printf '%s\x1f%s\n' "$source" "$REPLY" >>"$tmp/day_owners.tsv"
+  done
+  while IFS= read -r source; do
+    path=$(command -v -- "$source" 2>/dev/null) && [[ $path == /* ]] || continue
+    owner_of "$path"
+    printf '%s\x1f%s\n' "$source" "$REPLY" >>"$tmp/day_owners.tsv"
+  done < <(jq -r '.[]?.subject | select(startswith("/") or . == "kernel" | not)' "$tmp/day_errors.json" 2>/dev/null | sort -u)
+  jq -Rn '[inputs | split("\u001f") | select(.[1] != "") | {(.[0]): .[1]}] | add // {}' <"$tmp/day_owners.tsv" >"$tmp/day_owners.json"
   awk -v start="$(date -d "@$window_start" +%F)" '
     / \[ALPM\] (upgraded|downgraded|installed|reinstalled|removed) / {
       day = substr($1, 2, 10)
@@ -626,9 +653,9 @@ collect_problems() {
   tsv_json "$tmp/problems.tsv" kind subject count package status update signal frames last message libraries |
     jq 'map(.count |= tonumber)' >"$tmp/problems.json"
   tsv_json "$tmp/activity.tsv" date crashes errors |
-    jq --slurpfile crashes "$tmp/day_crashes.json" --slurpfile errors "$tmp/day_errors.json" --rawfile changes "$tmp/day_changes.tsv" '
+    jq --slurpfile crashes "$tmp/day_crashes.json" --slurpfile errors "$tmp/day_errors.json" --slurpfile owners "$tmp/day_owners.json" --rawfile changes "$tmp/day_changes.tsv" '
       def by_day: group_by(.day) | map({key: .[0].day, value: map(del(.day))}) | from_entries;
-      (($crashes[0] // []) + ($errors[0] // []) | by_day) as $sources
+      (($crashes[0] // []) + ($errors[0] // []) | map(. + (($owners[0] // {})[.subject] // empty | {package: .}) // .) | by_day) as $sources
       | ($changes | split("\n") | map(select(length > 0) | gsub("[[:cntrl:]]"; " ") | split(" ") | {day: .[0], action: .[1], name: .[2], version: (.[3:] | join(" "))}) | by_day) as $pacman
       | map(.crashes |= tonumber | .errors |= tonumber | .sources = ($sources[.date] // []) | .changes = ($pacman[.date] // []))' >"$tmp/activity.json"
   emit --slurpfile problems "$tmp/problems.json" --slurpfile activity "$tmp/activity.json" --argjson config_errors "$config_errors" --args \
@@ -812,7 +839,16 @@ collect_anatomy() {
 
   journalctl -p err --since "@$since_epoch" -n 50 -o json \
     --output-fields=SYSLOG_IDENTIFIER,_COMM,_EXE,MESSAGE,_TRANSPORT,PRIORITY,_SYSTEMD_UNIT,_SYSTEMD_USER_UNIT -q --no-pager 2>/dev/null |
-    jq -c "$journal_line" 2>/dev/null | jq -sc . >"$tmp/journal_lines.json"
+    jq -c "$journal_line" 2>/dev/null >"$tmp/journal_lines.ndjson"
+  mapfile -t names < <(jq -r '.exe | select(startswith("/"))' "$tmp/journal_lines.ndjson" 2>/dev/null | sort -u)
+  owners_of "${names[@]}"
+  while IFS=$'\x1f' read -r file name; do
+    journal_owner "$file" "$name"
+    printf '%s\x1f%s\x1f%s\n' "$file" "$name" "$REPLY"
+  done < <(jq -r '[.exe, .ident] | join("\u001f")' "$tmp/journal_lines.ndjson" 2>/dev/null | sort -u) >"$tmp/journal_owners.tsv"
+  jq -Rn '[inputs | split("\u001f") | {(.[0] + "\u001f" + .[1]): .[2]}] | add // {}' <"$tmp/journal_owners.tsv" >"$tmp/journal_owners.json"
+  jq -sc --slurpfile owners "$tmp/journal_owners.json" 'map(. + {package: ($owners[0][.exe + "\u001f" + .ident] // "")} | del(.exe))' \
+    "$tmp/journal_lines.ndjson" >"$tmp/journal_lines.json" 2>/dev/null
   [[ -s $tmp/journal_lines.json ]] || echo '[]' >"$tmp/journal_lines.json"
 
   jq -Rn '[inputs | split("\u001f") | {(.[0]): (.[1] | tonumber)}] | add // {}' <"$tmp/repos.tsv" >"$tmp/repos.json"
@@ -843,6 +879,7 @@ journal_line='def s: if type == "string" then . else null end;
   | {time: ($at | strflocaltime("%H:%M:%S")),
      day: ($at | strflocaltime("%Y-%m-%d")),
      ident: (if (._TRANSPORT | s) == "kernel" then "kernel" else ((.SYSLOG_IDENTIFIER | s) // (._COMM | s) // "unknown") end),
+     exe: ((._EXE | s) // ""),
      program: ((((._EXE | s) // "") | split("/") | last // "") as $exe | if $exe != "" then $exe else ((._COMM | s) // "") end),
      message: ((.MESSAGE | s) // "binary message"),
      priority: ((.PRIORITY | s) // ""),
@@ -995,7 +1032,7 @@ follow_sources() {
 }
 
 follow_events() {
-  local line status message due=0 timeout
+  local line status message due=0 timeout file name
   trap 'rm -rf "$tmp"' EXIT
   trap 'exit 143' TERM
   while true; do
@@ -1021,7 +1058,11 @@ follow_events() {
         [[ $message == "transaction completed" ]] && due=$((SECONDS + 3))
         ;;
       'J ')
-        jq -c "$journal_line"' | {event: "journal"} + .' <<<"${line:2}" 2>/dev/null
+        line=$(jq -c "$journal_line" <<<"${line:2}" 2>/dev/null)
+        [[ -n $line ]] || continue
+        IFS=$'\x1f' read -r file name < <(jq -r '[.exe, .ident] | join("\u001f")' <<<"$line")
+        journal_owner "$file" "$name"
+        jq -c --arg package "$REPLY" '{event: "journal"} + del(.exe) + {package: $package}' <<<"$line"
         ;;
     esac
   done

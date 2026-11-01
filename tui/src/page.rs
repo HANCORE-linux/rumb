@@ -11,7 +11,7 @@ use crate::app::{App, EventLine, Pane, Problem, Severity, Source, Subsystem, Upd
 use crate::motion::{Motion, Signal, Target};
 use crate::palette::{Palette, mix};
 
-const TILES_HEIGHT: u16 = 14;
+const TILES_HEIGHT: u16 = 15;
 pub const CACHE_COMMAND: &str = "paccache -rk1";
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const UNITS: [usize; 13] = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000];
@@ -223,11 +223,11 @@ fn label(value: &str, pal: &Palette) -> Span<'static> {
 }
 
 fn place_ring(rings: &mut Vec<Placement>, inner: Rect, cell: (u16, u16), spec: crate::ink::RingSpec) -> Rect {
-    let rows = inner.height.saturating_sub(2);
+    let rows = inner.height.saturating_sub(3);
     let cols = ((f32::from(rows) * f32::from(cell.1.max(1)) / f32::from(cell.0.max(1))).round() as u16).min((inner.width / 2).max(inner.width.saturating_sub(25)));
-    rings.push(Placement { rect: Rect::new(inner.x, inner.y, cols, rows), picture: Picture::Ring(Box::new(spec)) });
+    rings.push(Placement { rect: Rect::new(inner.x, inner.y + 1, cols, rows), picture: Picture::Ring(Box::new(spec)) });
     let x = inner.x + cols + 2;
-    Rect::new(x, inner.y, inner.right().saturating_sub(x), rows)
+    Rect::new(x, inner.y + 1, inner.right().saturating_sub(x), rows)
 }
 
 fn column(buf: &mut Buffer, col: Rect, lines: Vec<Vec<Span<'static>>>) {
@@ -1567,6 +1567,23 @@ fn source_problem<'a>(app: &'a App, source: &crate::app::DaySource) -> Option<&'
     app.problems.iter().find(|problem| problem.subject == source.subject && (problem.kind == source.kind || problem.kind == "journal" && source.kind == "error"))
 }
 
+fn source_owner(app: &App, source: &crate::app::DaySource, pal: &Palette) -> Option<(String, Color)> {
+    if let Some(problem) = source_problem(app, source) {
+        return Some(owner_text(problem, pal));
+    }
+    if source.package.is_empty() {
+        return None;
+    }
+    Some(match app.updates.iter().find(|update| update.name == source.package) {
+        Some(update) => (format!("{} → {}", source.package, short_version(&update.new)), pal.teal),
+        None => (format!("{} · no update pending", source.package), pal.label),
+    })
+}
+
+fn source_package<'a>(app: &'a App, source: &'a crate::app::DaySource) -> &'a str {
+    source_problem(app, source).map_or(source.package.as_str(), |problem| problem.package.as_str())
+}
+
 fn source_name(app: &App, source: &crate::app::DaySource) -> String {
     source_problem(app, source).map_or_else(|| source.subject.rsplit('/').next().unwrap_or(&source.subject).to_string(), |problem| problem.name().to_string())
 }
@@ -1581,7 +1598,7 @@ fn change_text(change: &crate::app::DayChange) -> String {
 fn day_parts<'a>(app: &'a App, day: &'a crate::app::Activity) -> (Vec<&'a crate::app::DaySource>, Vec<&'a crate::app::DayChange>, Vec<&'a str>) {
     let mut sources: Vec<&crate::app::DaySource> = day.sources.iter().collect();
     sources.sort_by_key(|source| (source.kind != "crash", std::cmp::Reverse(source.count)));
-    let owners: Vec<&str> = sources.iter().filter_map(|source| source_problem(app, source)).map(|problem| problem.package.as_str()).filter(|name| !name.is_empty()).collect();
+    let owners: Vec<&str> = sources.iter().map(|source| source_package(app, source)).filter(|name| !name.is_empty()).collect();
     let mut changes: Vec<&crate::app::DayChange> = day.changes.iter().collect();
     changes.sort_by_key(|change| !owners.contains(&change.name.as_str()));
     (sources, changes, owners)
@@ -1635,13 +1652,11 @@ fn draw_days(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut
             if y > bottom {
                 break;
             }
-            let problem = source_problem(app, source);
             let crash = source.kind == "crash";
             right(buf, x + 5, y, &thousands(source.count), Style::new().fg(if crash { pal.teal } else { pal.ink }));
             text(buf, x + 7, y, &fit(&source_name(app, source), 20), Style::new().fg(pal.ink), 20);
             text(buf, x + 28, y, if crash { "crash" } else { "error" }, Style::new().fg(if crash { pal.teal } else { pal.label }), 6);
-            if let Some(problem) = problem {
-                let (owner, color) = owner_text(problem, pal);
+            if let Some((owner, color)) = source_owner(app, source, pal) {
                 text(buf, x + 34, y, &fit(&owner, w.saturating_sub(34) as usize), Style::new().fg(color), w.saturating_sub(34));
             }
             targets.push(y);
@@ -1778,7 +1793,7 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
                 let (sources, changes, _) = day_parts(app, day);
                 let on = format!("on {}", day.date.get(5..).unwrap_or(&day.date));
                 for (index, source) in sources.iter().enumerate() {
-                    let owner = source_problem(app, source).map(|problem| format!(" · {}", owner_text(problem, pal).0)).unwrap_or_default();
+                    let owner = source_owner(app, source, pal).map(|(owner, _)| format!(" · {owner}")).unwrap_or_default();
                     lines.push((if index == 0 { on.clone() } else { String::new() }, format!("{} × {} · {}{owner}", thousands(source.count), if source.kind == "crash" { "crash" } else { "error" }, source_name(app, source)), pal.teal));
                 }
                 for (index, change) in changes.iter().enumerate() {
@@ -2242,6 +2257,13 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
             for (index, frame) in problem.frames.split('|').filter(|frame| !frame.is_empty()).enumerate() {
                 lines.push((if index == 0 { "crashed in".into() } else { String::new() }, frame_text(frame), if index == 0 { pal.ink } else { pal.label }));
             }
+            for (index, (file, package)) in problem.libraries.split('|').filter_map(|pair| pair.split_once(' ')).enumerate() {
+                let (text, color) = match app.updates.iter().find(|update| update.name == package) {
+                    Some(update) => (format!("{file} · {package} → {}", short_version(&update.new)), pal.teal),
+                    None => (format!("{file} · {package} · no update pending"), pal.ink),
+                };
+                lines.push((if index == 0 { "library" } else { "" }.into(), text, color));
+            }
             if !problem.package.is_empty() {
                 lines.push(("owner".into(), problem.package.clone(), pal.ink));
             }
@@ -2296,6 +2318,12 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
             }
             wrapped(&mut lines, "message", &event.message, room, pal.ink);
             let since = app.since.as_deref().and_then(|since| since.get(5..10)).map(|day| format!(" since {day}")).unwrap_or_default();
+            if event_problems(app, event).is_empty() && !event.package.is_empty() {
+                lines.push(match app.updates.iter().find(|update| update.name == event.package) {
+                    Some(update) => ("owner".into(), format!("{} → {}", event.package, short_version(&update.new)), pal.teal),
+                    None => ("owner".into(), format!("{} · no update pending", event.package), pal.label),
+                });
+            }
             for (index, problem) in event_problems(app, event).into_iter().enumerate() {
                 let name = if event.source == Source::Pacman { "its problems" } else { "problem" };
                 lines.push((if index == 0 { name } else { "" }.into(), format!("{} × {} · {}{since}", thousands(problem.count), kind_label(&problem.kind), problem.subject), pal.teal));
@@ -2367,7 +2395,7 @@ pub fn min_size(app: &App) -> (u16, u16) {
     let (tiles, band) = (app.visible[0], app.visible[1]);
     let lists = app.visible[2..].iter().filter(|on| **on).count() as u16;
     let width = if tiles || band { 150 } else { (50 * lists).max(50) };
-    let height = 2 + if tiles { TILES_HEIGHT } else { 0 } + if tiles && band { 2 } else { 0 } + if band { 15 } else { 0 } + if lists > 0 { 11 } else { 0 };
+    let height = 2 + if tiles { TILES_HEIGHT } else { 0 } + if tiles && band { 2 } else { 0 } + if band { 15 } else { 0 } + if lists > 0 { if tiles { 10 } else { 11 } } else { 0 };
     (width, height)
 }
 
@@ -2843,7 +2871,7 @@ fn tiles_height(area: Rect, cell: (u16, u16)) -> u16 {
     let inner = (area.width.saturating_sub(2) / 6).saturating_sub(4);
     let cols = (inner / 2).max(inner.saturating_sub(25));
     let rows = (f32::from(cols) * f32::from(cell.0.max(1)) / f32::from(cell.1.max(1))) as u16;
-    (rows + 5).clamp(TILES_HEIGHT, (area.height / 4).max(TILES_HEIGHT))
+    (rows + 6).clamp(TILES_HEIGHT, (area.height / 4).max(TILES_HEIGHT))
 }
 
 fn grown_rows(area: Rect, tiles: Option<u16>) -> u16 {

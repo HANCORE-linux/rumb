@@ -691,9 +691,11 @@ mod tests {
         assert!(!buffer.content().iter().map(|cell| cell.symbol()).collect::<String>().contains("Terminal size too small:"));
         assert_eq!(scene.placements.len(), 8);
         app.visible = [true, false, false, false, false];
-        assert_eq!(page::min_size(&app), (150, 16));
+        assert_eq!(page::min_size(&app), (150, 17));
         app.visible = [false, false, true, true, false];
         assert_eq!(page::min_size(&app), (100, 13));
+        app.visible = [true, false, true, true, false];
+        assert_eq!(page::min_size(&app), (150, 27));
     }
 
     fn crowded_app(now: Instant) -> App {
@@ -727,7 +729,7 @@ mod tests {
             app.apply(source::Event::Activity { line: format!("upgraded {} (1.0-1 -> 2.0-1)", long(i)) }, now);
         }
         for i in 0..300 {
-            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: format!("ident-{i}"), program: String::new(), message: "x".repeat(300), priority: String::new(), unit: String::new() }, now);
+            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: format!("ident-{i}"), program: String::new(), message: "x".repeat(300), priority: String::new(), unit: String::new(), package: String::new() }, now);
         }
         app
     }
@@ -1367,8 +1369,8 @@ mod tests {
     fn events_from_earlier_days_show_their_date() {
         let now = Instant::now();
         let mut app = App::new(false, false, now);
-        app.apply(source::Event::Journal { time: "13:45:10".into(), day: "2000-01-02".into(), ident: "earlier".into(), program: String::new(), message: "old".into(), priority: String::new(), unit: String::new() }, now);
-        app.apply(source::Event::Journal { time: "14:00:00".into(), day: app::today(), ident: "today".into(), program: String::new(), message: "new".into(), priority: String::new(), unit: String::new() }, now);
+        app.apply(source::Event::Journal { time: "13:45:10".into(), day: "2000-01-02".into(), ident: "earlier".into(), program: String::new(), message: "old".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
+        app.apply(source::Event::Journal { time: "14:00:00".into(), day: app::today(), ident: "today".into(), program: String::new(), message: "new".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
         let rows = screen(&app, 150, 44);
         assert!(find(&rows, "01-02 13:45").is_some());
         assert!(find(&rows, "14:00:00").is_some());
@@ -1531,8 +1533,8 @@ mod tests {
         let now = Instant::now();
         let mut app = App::new(false, false, now);
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [{"kind": "journal", "subject": "/usr/bin/conmon", "count": 1915, "package": "conmon", "status": "no-update"}], "activity": []}) }, now);
-        app.apply(source::Event::Journal { time: "14:17:39".into(), day: String::new(), ident: "peaceful_golick".into(), program: "conmon".into(), message: "Compiling rumb".into(), priority: String::new(), unit: String::new() }, now);
-        app.apply(source::Event::Journal { time: "14:17:40".into(), day: String::new(), ident: "playerctld".into(), program: "playerctld".into(), message: "lost the bus".into(), priority: String::new(), unit: String::new() }, now);
+        app.apply(source::Event::Journal { time: "14:17:39".into(), day: String::new(), ident: "peaceful_golick".into(), program: "conmon".into(), message: "Compiling rumb".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
+        app.apply(source::Event::Journal { time: "14:17:40".into(), day: String::new(), ident: "playerctld".into(), program: "playerctld".into(), message: "lost the bus".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
         app.visible = [true; 5];
         app.focus = Pane::Problems;
         press(&mut app, &[KeyCode::Char('j')]);
@@ -1545,7 +1547,7 @@ mod tests {
     fn a_live_journal_event_shows_its_priority_and_unit() {
         let now = Instant::now();
         let mut app = App::new(false, false, now);
-        app.apply(source::Event::Journal { time: "14:20:00".into(), day: String::new(), ident: "bluetoothd".into(), program: "bluetoothd".into(), message: "Failed to set mode".into(), priority: "2".into(), unit: "bluetooth.service".into() }, now);
+        app.apply(source::Event::Journal { time: "14:20:00".into(), day: String::new(), ident: "bluetoothd".into(), program: "bluetoothd".into(), message: "Failed to set mode".into(), priority: "2".into(), unit: "bluetooth.service".into(), package: String::new() }, now);
         app.visible = [false, false, false, false, true];
         app.focus = Pane::Events;
         app.overlay = true;
@@ -1858,12 +1860,12 @@ mod tests {
         press(&mut app, &[KeyCode::Down, KeyCode::Down]);
         assert!(!app.follow);
         let chosen = app.visible_events()[2].ident.clone();
-        app.apply(source::Event::Journal { time: "12:00:01".into(), day: String::new(), ident: "late".into(), program: String::new(), message: "boom".into(), priority: String::new(), unit: String::new() }, now);
+        app.apply(source::Event::Journal { time: "12:00:01".into(), day: String::new(), ident: "late".into(), program: String::new(), message: "boom".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
         assert_eq!(app.visible_events()[app.lists[2].selected].ident, chosen);
         app.lists[2].filter = "ident-1".into();
         app.select(Pane::Events, 1);
         let chosen = app.visible_events()[1].ident.clone();
-        app.apply(source::Event::Journal { time: "12:00:02".into(), day: String::new(), ident: "other".into(), program: String::new(), message: "boom".into(), priority: String::new(), unit: String::new() }, now);
+        app.apply(source::Event::Journal { time: "12:00:02".into(), day: String::new(), ident: "other".into(), program: String::new(), message: "boom".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
         assert_eq!(app.visible_events()[app.lists[2].selected].ident, chosen);
         press(&mut app, &[KeyCode::Home]);
         assert!(app.follow);
@@ -1876,7 +1878,7 @@ mod tests {
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [], "activity": []}) }, now);
         app.apply(source::Event::Result {}, now);
         for _ in 0..3 {
-            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: "x".into(), program: String::new(), message: "y".into(), priority: String::new(), unit: String::new() }, now);
+            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: "x".into(), program: String::new(), message: "y".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
         }
         assert_eq!(app.journal_live, 3);
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [], "activity": []}) }, now);
@@ -1888,7 +1890,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let now = Instant::now();
         let mut app = crowded_app(now);
-        app.apply(source::Event::Journal { time: "12:00:03".into(), day: String::new(), ident: "evil|ident".into(), program: String::new(), message: "red \u{1b}[31mtext\u{7}".into(), priority: String::new(), unit: String::new() }, now);
+        app.apply(source::Event::Journal { time: "12:00:03".into(), day: String::new(), ident: "evil|ident".into(), program: String::new(), message: "red \u{1b}[31mtext\u{7}".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
         let dir = std::env::temp_dir().join(format!("rumb-export-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let first = export::write(&app, &dir, "20261019-120000").unwrap();
@@ -2253,6 +2255,58 @@ mod tests {
         assert_eq!(lines[line_at(&lines, "pacman ")], "pacman        upgraded linux  6.17.1.arch1 → 6.17.2.arch1");
         press(&mut app, &[KeyCode::Enter]);
         assert_eq!(chosen(&app), "2026-10-12");
+    }
+
+    #[test]
+    fn a_day_names_the_owner_of_programs_that_are_no_problem_now() {
+        let mut app = demo_at(30_000);
+        app.tile = Some(1);
+        app.overlay = true;
+        let day = app.shown_days()[app.chosen_day()].date.clone();
+        let activity = app.activity.iter_mut().find(|activity| activity.date == day).unwrap();
+        for (subject, package) in [("/usr/bin/gone", "gone"), ("/usr/lib/libva-helper", "mesa"), ("/opt/tool/bin/tool", "")] {
+            activity.sources.push(crate::app::DaySource { kind: "error".into(), subject: subject.into(), count: 1, package: package.into() });
+        }
+        let lines = window(&app);
+        for line in ["1 × error · gone · gone · no update pending", "1 × error · libva-helper · mesa → 1:25.2.4", "1 × error · tool"] {
+            assert!(lines.iter().any(|shown| shown.ends_with(line)), "{line:?} missing in {lines:?}");
+        }
+    }
+
+    #[test]
+    fn a_journal_line_without_a_problem_names_its_owner() {
+        let mut app = demo_at(30_000);
+        app.focus = Pane::Events;
+        let index = |app: &App, ident: &str| app.visible_events().iter().position(|event| event.ident == ident).unwrap() as isize;
+        app.select(Pane::Events, index(&app, "systemd"));
+        app.overlay = true;
+        let lines = window(&app);
+        assert!(lines.contains(&"owner         systemd · no update pending".to_string()), "{lines:?}");
+        app.select(Pane::Events, index(&app, "chromium"));
+        let lines = window(&app);
+        assert!(!lines.iter().any(|line| line.starts_with("owner")), "a line with a problem names its owner under the problem: {lines:?}");
+    }
+
+    #[test]
+    fn a_crash_names_the_package_of_the_library_it_happened_in() {
+        let mut app = demo_at(30_000);
+        app.focus = Pane::Problems;
+        let index = |app: &App, subject: &str| app.visible_problems().iter().position(|problem| problem.subject == subject).unwrap() as isize;
+        app.select(Pane::Problems, index(&app, "/usr/lib/chromium/chromium"));
+        app.overlay = true;
+        assert!(window(&app).contains(&"library       libgallium-25.2.4-arch1.1.so · mesa → 1:25.2.4".to_string()), "{:?}", window(&app));
+        app.select(Pane::Problems, index(&app, "/usr/bin/nautilus"));
+        assert!(window(&app).contains(&"library       libglib-2.0.so.0 · glib2 · no update pending".to_string()), "{:?}", window(&app));
+    }
+
+    #[test]
+    fn every_ring_has_a_free_row_above_it_as_below() {
+        let app = demo_at(30_000);
+        let (_, scene) = render(&app, 271, 60, app.started + Duration::from_secs(60));
+        let title_row = 2;
+        for placement in scene.placements.iter().filter(|placement| matches!(placement.picture, page::Picture::Ring(_))) {
+            assert_eq!(placement.rect.y, title_row + 2, "one free row between the title and the ring");
+        }
     }
 
     #[test]
