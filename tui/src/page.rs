@@ -39,6 +39,7 @@ pub struct Scene {
     pub chosen: [Option<Rect>; 3],
     pub band: Option<Rect>,
     pub overlay: Option<Rect>,
+    pub eye: Option<Rect>,
 }
 
 pub fn paint(picture: &Picture, pal: &Palette, width: u32, height: u32, cell_height: f32) -> Option<Pixmap> {
@@ -87,7 +88,7 @@ pub fn draw(frame: &mut Frame, app: &App, motion: &Motion, pal: &Palette, now: I
     }
     draw_nerve(buf, area, app, motion, pal, now, cell, &mut scene);
     if app.overlay {
-        let kept: Vec<Placement> = scene.placements.drain(..).filter(|placement| matches!(placement.picture, Picture::Ring(_) | Picture::Marks(_))).collect();
+        let kept = std::mem::take(&mut scene.placements);
         draw_overlay(buf, area, app, pal, &mut scene);
         if let Some(rect) = scene.overlay {
             let around = Rect::new(rect.x.saturating_sub(1), rect.y.saturating_sub(1), rect.width + 2, rect.height + 2);
@@ -1713,7 +1714,13 @@ fn draw_days(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut
     let pacman = if changes.is_empty() { 0 } else { usize::from(programs > 0) + 1 + listed + more };
     let width = area.width.saturating_sub(10).min(150);
     let height = (days.len().max(programs + pacman) as u16 + 4).min(area.height.saturating_sub(6));
-    let rect = place(area, app, scene, width, height);
+    let mut rect = place(area, app, scene, width, height);
+    if let Some(around) = scene.eye.map(|eye| Rect::new(eye.x.saturating_sub(1), eye.y.saturating_sub(1), eye.width + 2, eye.height + 2))
+        && rect.intersects(around)
+        && around.bottom() + height < area.bottom()
+    {
+        rect.y = around.bottom();
+    }
     scene.overlay = Some(rect);
     clear_around(buf, area, rect, pal);
     clear(buf, rect, pal);
@@ -2514,14 +2521,34 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
         draw_days(buf, area, app, pal, scene);
         return;
     }
-    let width = area.width.saturating_sub(20).min(104);
-    let room = width.saturating_sub(18) as usize;
-    let Some((title, mut lines)) = overlay_details(app, room, pal) else { return };
-    if app.tile.is_none() && app.part.is_none() && app.focus == Pane::Problems {
-        lines.push(("j".into(), format!("shows the live journal filtered to {title}"), pal.label));
+    let full = area.width.saturating_sub(20).min(104);
+    let content = |width: u16| {
+        let (title, mut lines) = overlay_details(app, width.saturating_sub(18) as usize, pal)?;
+        if app.tile.is_none() && app.part.is_none() && app.focus == Pane::Problems {
+            lines.push(("j".into(), format!("shows the live journal filtered to {title}"), pal.label));
+        }
+        let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(6));
+        Some((title, lines, height))
+    };
+    let Some((mut title, mut lines, height)) = content(full) else { return };
+    let mut rect = place(area, app, scene, full, height);
+    if let Some(eye) = scene.eye {
+        let around = Rect::new(eye.x.saturating_sub(1), eye.y.saturating_sub(1), eye.width + 2, eye.height + 2);
+        if rect.intersects(around) {
+            let leftward = rect.x + rect.width / 2 < eye.x + eye.width / 2;
+            let free = if leftward { around.x.saturating_sub(area.x + 1) } else { area.right().saturating_sub(around.right()) };
+            if free >= 72 {
+                let width = free.min(full);
+                if let Some((beside, rows, tall)) = content(width) {
+                    let x = if leftward { around.x - width - 1 } else { around.right() };
+                    rect = Rect::new(x, place(area, app, scene, width, tall).y, width, tall);
+                    (title, lines) = (beside, rows);
+                }
+            } else if around.bottom() + height < area.bottom() {
+                rect.y = around.bottom();
+            }
+        }
     }
-    let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(6));
-    let rect = place(area, app, scene, width, height);
     scene.overlay = Some(rect);
     clear_around(buf, area, rect, pal);
     clear(buf, rect, pal);
@@ -3431,6 +3458,9 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
         pupil: rain.pupil,
     });
     scene.placements.push(Placement { rect: eye, picture: Picture::Eye(Box::new(spec)) });
+    if app.pictures {
+        scene.eye = Some(eye);
+    }
     if !app.pictures {
         for (k, (line, color)) in [("this terminal shows no pictures", pal.label), ("foot, kitty and Ghostty show the eye", pal.faint)].into_iter().enumerate() {
             let x = eye.x + eye.width.saturating_sub(line.chars().count() as u16) / 2;

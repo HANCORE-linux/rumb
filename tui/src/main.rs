@@ -1279,6 +1279,26 @@ mod tests {
     }
 
     #[test]
+    fn the_eye_keeps_going_beside_an_open_window() {
+        let mut app = demo_at(30_000);
+        app.pictures = true;
+        let mut opened = |tile: Option<usize>, part: Option<usize>| {
+            (app.tile, app.part, app.overlay) = (tile, part, true);
+            let (_, scene) = render(&app, 271, 60, app.started + Duration::from_secs(60));
+            let window = scene.overlay.expect("a detail window");
+            let around = ratatui::layout::Rect::new(window.x.saturating_sub(1), window.y.saturating_sub(1), window.width + 2, window.height + 2);
+            assert!(scene.placements.iter().any(|placement| matches!(placement.picture, page::Picture::Eye(_))), "the eye stays with {tile:?} {part:?} open at {window:?}");
+            assert!(scene.placements.iter().all(|placement| placement.rect.intersection(around).is_empty()), "no picture under the window {window:?}");
+        };
+        for tile in 0..6 {
+            opened(Some(tile), None);
+        }
+        for part in 0..7 {
+            opened(None, Some(part));
+        }
+    }
+
+    #[test]
     fn the_band_never_drops_a_red_or_yellow_fact() {
         let now = Instant::now();
         let pal = palette::Palette::paper();
