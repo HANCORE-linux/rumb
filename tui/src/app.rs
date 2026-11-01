@@ -157,6 +157,8 @@ pub struct Anatomy {
     #[serde(default)]
     pub deps: HashMap<String, Deps>,
     #[serde(default)]
+    pub cached: Option<HashMap<String, String>>,
+    #[serde(default)]
     pub journal: Vec<JournalLine>,
     #[serde(default)]
     pub hostname: String,
@@ -215,6 +217,8 @@ pub struct Problem {
     pub last: String,
     #[serde(default)]
     pub message: String,
+    #[serde(default)]
+    pub libraries: String,
 }
 
 impl Problem {

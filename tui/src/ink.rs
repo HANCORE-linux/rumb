@@ -119,13 +119,6 @@ impl Pen<'_> {
     }
 }
 
-#[derive(Debug, Hash)]
-pub struct FanSpec {
-    pub left: Vec<u8>,
-    pub right: Vec<u8>,
-    pub panel: bool,
-}
-
 pub const DIAL: f32 = 0.84;
 
 /// A ring of dots for a tile, after a radial dot chart: `slots` columns run
@@ -383,6 +376,16 @@ fn ring_position(node: &OrbitNode, spans: &[(f32, f32)]) -> (f32, f32) {
     (angle.cos() * radius, angle.sin() * radius)
 }
 
+fn band_dot(node: &OrbitNode, spans: &[(f32, f32)], r: f32, unit: f32) -> f32 {
+    let (_, span) = spans.get(usize::from(node.sector)).copied().unwrap_or((0.0, TAU));
+    let span = (span - 2.0 * 0.035f32.min(span * 0.2)).max(0.001);
+    let count = f32::from(node.count.max(1));
+    let rows = (count / (span * 0.79 / 0.022).max(1.0)).ceil().max(1.0);
+    let columns = (count / rows).ceil().max(1.0);
+    let pitch = r * (span / columns * 0.7).min(0.18 / rows);
+    (3.0 * unit).min(pitch * 0.38)
+}
+
 pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_height: f32) -> Option<Pixmap> {
     let ground = pal.page;
     let (mut pixmap, unit) = canvas(width, height, ground, cell_height)?;
@@ -486,7 +489,11 @@ pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_heig
                     pen.disc(x, y, 3.4 * unit, sk(pal.ink2, 1.0));
                     pen.disc(x, y, 1.2 * unit, sk(ground, 1.0));
                 }
-                _ => pen.disc(x, y, 1.3 * unit, sk(pal.label, 0.95)),
+                _ => {
+                    let size = band_dot(node, &spans, r, unit);
+                    pen.disc(x, y, size + unit, sk(ground, 1.0));
+                    pen.disc(x, y, size, sk(pal.ink2, 1.0));
+                }
             }
             if node.fixes {
                 pen.circle(x, y, 15.0 * unit, sk(pal.teal, 0.8), 0.9, Some((2.0, 2.0)));
@@ -495,7 +502,7 @@ pub fn orbit(spec: &OrbitSpec, pal: &Palette, width: u32, height: u32, cell_heig
                 let ring = match node.ring {
                     0 => 9.5,
                     1 => 6.5,
-                    _ => 3.2,
+                    _ => 5.0,
                 };
                 pen.circle(x, y, ring * unit, sk(pal.relation, 1.0), 1.0, None);
             }
@@ -593,36 +600,6 @@ fn spread(labels: &mut [SectorLabel], gap: f32, height: f32, w: f32) {
             break;
         }
     }
-}
-
-pub fn fan(spec: &FanSpec, pal: &Palette, width: u32, height: u32, cell_height: f32) -> Option<Pixmap> {
-    let (mut pixmap, unit) = canvas(width, height, if spec.panel { pal.panel } else { pal.page }, cell_height)?;
-    let (w, h) = (width as f32, height as f32);
-    let rows = spec.left.len().max(spec.right.len()).max(1);
-    let cell = h / rows as f32;
-    let mut pen = Pen { pixmap: &mut pixmap, unit, mask: None };
-    let (cx, cy) = (w / 2.0, h / 2.0);
-    for (leaves, side) in [(&spec.left, -1.0f32), (&spec.right, 1.0)] {
-        let offset = (rows - leaves.len()) / 2;
-        for (index, kind) in leaves.iter().enumerate() {
-            let y = (offset + index) as f32 * cell + cell / 2.0;
-            let x = if side < 0.0 { 5.0 * unit } else { w - 5.0 * unit };
-            let (color, line) = match kind {
-                2 => (pal.teal, 0.75),
-                1 | 4 => (pal.ink, 0.6),
-                3 => (pal.faint, 0.3),
-                _ => (pal.ink2, 0.4),
-            };
-            let mut path = PathBuilder::new();
-            path.move_to(cx + side * 9.0 * unit, cy);
-            path.cubic_to(cx + side * w * 0.2, cy, x - side * w * 0.2, y, x, y);
-            pen.stroke(path, sk(color, line), 0.7, None);
-            pen.disc(x, y, if *kind == 3 { 1.2 } else { 2.0 } * unit, sk(color, 0.95));
-        }
-    }
-    pen.disc(cx, cy, 4.5 * unit, sk(pal.ink, 1.0));
-    pen.circle(cx, cy, 8.5 * unit, sk(pal.ink, 0.5), 0.8, None);
-    Some(pixmap)
 }
 
 fn canvas(width: u32, height: u32, background: Color, cell_height: f32) -> Option<(Pixmap, f32)> {
@@ -1446,6 +1423,22 @@ fn option_lines(options: &Options, room_up: usize, room: usize) -> [String; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn low_updates_are_visible_dots_that_never_touch() {
+        let low = |count: u16, slot: u16| OrbitNode { ring: 2, sector: 0, slot, count, fixes: false, selected: false, related: false, faint: false };
+        let unit = 17.0f32 / 21.0;
+        for (r, count) in [360.0f32, 120.0].into_iter().flat_map(|r| [1u16, 7, 40, 138, 400].map(|count| (r, count))) {
+            let spans = sector_spans(&[("other".into(), count)]);
+            let size = band_dot(&low(count, 0), &spans, r, unit);
+            let centres: Vec<(f32, f32)> = (0..count).map(|slot| ring_position(&low(count, slot), &spans)).map(|(x, y)| (x * r, y * r)).collect();
+            let nearest = centres.iter().enumerate().flat_map(|(a, p)| centres[a + 1..].iter().map(move |q| (p.0 - q.0).hypot(p.1 - q.1))).fold(f32::MAX, f32::min);
+            assert!(2.0 * size < nearest, "{count} updates in a dial of {r} px: dots of {size} px with {nearest} px between centres");
+            if count <= 7 {
+                assert_eq!(size, 3.0 * unit, "{count} updates leave room for the full dot");
+            }
+        }
+    }
 
     #[test]
     fn the_update_map_draws_nothing_beside_its_rings_and_ports() {

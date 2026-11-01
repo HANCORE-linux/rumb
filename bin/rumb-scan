@@ -207,8 +207,9 @@ parse_updates() {
 }
 
 crash_details() {
-  local exe=$1 pid="" epoch="" info
-  crash_signal="" crash_frames="" crash_last=""
+  local exe=$1 own=${2:-} pid="" epoch="" info maps frame module path
+  local -A listed=()
+  crash_signal="" crash_frames="" crash_last="" crash_libraries=""
   read -r pid epoch < <(jq -r --arg exe "$exe" --argjson since "$since_epoch" \
     '[.[]? | select(.exe == $exe and .time / 1000000 >= $since)] | max_by(.time) // empty | "\(.pid) \(.time / 1000000 | floor)"' "$tmp/cores.json" 2>/dev/null)
   [[ $pid =~ ^[0-9]+$ ]] || return 0
@@ -235,10 +236,29 @@ crash_details() {
       }
       if (++shown == 3) exit
     }' <<<"$info" | paste -sd '|')
+  [[ -n $crash_frames ]] || return 0
+  maps=$(LC_ALL=C timeout 5 journalctl -q --no-pager --all -o json -n 1 "COREDUMP_PID=$pid" "COREDUMP_EXE=$exe" 2>/dev/null |
+    jq -r '.COREDUMP_PROC_MAPS // "" | if type == "array" then implode else . end' 2>/dev/null)
+  [[ -n $maps ]] || return 0
+  while IFS= read -r frame; do
+    if [[ $frame == *" ("*")" ]]; then
+      module=${frame##* (}
+      module=${module%)}
+    else
+      module=${frame%% + *}
+    fi
+    [[ -n $module && -z ${listed[$module]+set} ]] || continue
+    listed[$module]=1
+    path=$(awk -v base="$module" '{ n = split($6, parts, "/") } n > 1 && parts[n] == base { print $6; exit }' <<<"$maps")
+    [[ -n $path ]] || continue
+    owner_of "$path"
+    [[ -n $REPLY && $REPLY != "$own" ]] && crash_libraries+="${crash_libraries:+|}$module $REPLY"
+  done < <(tr '|' '\n' <<<"$crash_frames")
+  return 0
 }
 
 add_problem() {
-  local kind=$1 subject=$2 count=$3 package=$4 path=${5:-} signal=${6:-} frames=${7:-} last=${8:-} message=${9:-} status update=""
+  local kind=$1 subject=$2 count=$3 package=$4 path=${5:-} signal=${6:-} frames=${7:-} last=${8:-} message=${9:-} libraries=${10:-} status update=""
 
   if [[ $kind == config ]]; then
     status=config
@@ -253,7 +273,7 @@ add_problem() {
     status=no-update
   fi
 
-  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$kind" "${subject//[[:cntrl:]]/ }" "$count" "$package" "$status" "$update" "$signal" "${frames//[[:cntrl:]]/ }" "$last" "${message//[[:cntrl:]]/ }" >>"$tmp/problems.tsv"
+  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$kind" "${subject//[[:cntrl:]]/ }" "$count" "$package" "$status" "$update" "$signal" "${frames//[[:cntrl:]]/ }" "$last" "${message//[[:cntrl:]]/ }" "${libraries//[[:cntrl:]]/ }" >>"$tmp/problems.tsv"
 }
 
 tsv_json() {
@@ -457,8 +477,8 @@ collect_problems() {
       [[ -n $exe ]] || continue
       owner_of "$exe"
       package=$REPLY
-      crash_details "$exe"
-      add_problem crash "$exe" "$count" "$package" "$exe" "$crash_signal" "$crash_frames" "$crash_last"
+      crash_details "$exe" "$package"
+      add_problem crash "$exe" "$count" "$package" "$exe" "$crash_signal" "$crash_frames" "$crash_last" "" "$crash_libraries"
     done < <(uniq -c "$tmp/crashes.txt" | sort -rn)
     if [[ " ${problem_errors[*]} " == *" crashes "* ]]; then
       done_step problems "reading crash reports" null
@@ -603,7 +623,7 @@ collect_problems() {
     done_step problems "checking Hyprland config" "$config_errors"
   fi
 
-  tsv_json "$tmp/problems.tsv" kind subject count package status update signal frames last message |
+  tsv_json "$tmp/problems.tsv" kind subject count package status update signal frames last message libraries |
     jq 'map(.count |= tonumber)' >"$tmp/problems.json"
   tsv_json "$tmp/activity.tsv" date crashes errors |
     jq --slurpfile crashes "$tmp/day_crashes.json" --slurpfile errors "$tmp/day_errors.json" --rawfile changes "$tmp/day_changes.tsv" '
@@ -620,7 +640,8 @@ collect_problems
 collect_anatomy() {
   local os desktop omarchy="" kernel_running kernel_pkg="" kernel_installed="" reboot_pending=false cache_dir cache_bytes=0 cache_freeable paccache_out paccache_bytes foreign day today upgrades_json
   local uptime_seconds nvidia_loaded="" nvidia_installed="" hyprland_running="" hyprland_installed="" hyprland_bin packages explicit orphans
-  local -a names upgrades=()
+  local cache_home=${XDG_CACHE_HOME:-$HOME/.cache} name old dir file kept
+  local -a names upgrades=() cache_dirs=()
   local -A per_day=()
 
   os=$(. /etc/os-release 2>/dev/null && printf '%s' "${NAME:-}")
@@ -700,6 +721,24 @@ collect_anatomy() {
   ((foreign > 0)) && printf 'aur\x1f%d\n' "$foreign" >>"$tmp/repos.tsv"
 
   mapfile -t names < <(cut -d$'\x1f' -f1 "$tmp/updates.tsv")
+  mapfile -t cache_dirs < <(pacman-conf CacheDir 2>/dev/null)
+  : >"$tmp/cached.tsv"
+  while IFS=$'\x1f' read -r name old _; do
+    kept=""
+    for dir in "${cache_dirs[@]}"; do
+      for file in "${dir%/}/$name-$old-"*.pkg.tar.*; do
+        [[ -f $file && $file != *.sig ]] && kept=pacman && break 2
+      done
+    done
+    if [[ -z $kept ]]; then
+      for file in "$cache_home/yay/$name/$name-$old-"*.pkg.tar.* "$cache_home/paru/clone/$name/$name-$old-"*.pkg.tar.*; do
+        [[ -f $file && $file != *.sig ]] || continue
+        [[ $file == "$cache_home/yay/"* ]] && kept=yay || kept=paru
+        break
+      done
+    fi
+    [[ -n $kept ]] && printf '%s\x1f%s\n' "$name" "$kept" >>"$tmp/cached.tsv"
+  done <"$tmp/updates.tsv"
   : >"$tmp/deps.tsv"
   if ((${#names[@]})); then
     deps_fields='
@@ -777,6 +816,7 @@ collect_anatomy() {
   [[ -s $tmp/journal_lines.json ]] || echo '[]' >"$tmp/journal_lines.json"
 
   jq -Rn '[inputs | split("\u001f") | {(.[0]): (.[1] | tonumber)}] | add // {}' <"$tmp/repos.tsv" >"$tmp/repos.json"
+  jq -Rn '[inputs | split("\u001f") | {(.[0]): .[1]}] | add // {}' <"$tmp/cached.tsv" >"$tmp/cached.json"
   jq -Rn 'def list: . // "" | split(",") | map(select(. != ""));
     [inputs | split("\u001f") | {(.[0]): {depends: (.[1] | tonumber), required_by: (.[2] | tonumber), depends_on: (.[3] | list), required_names: (.[4] | list),
       version: (.[5] // ""), added: (.[6] | list), dropped: (.[7] | list)}}] | add // {}' \
@@ -788,13 +828,13 @@ collect_anatomy() {
     --argjson orphans "$orphans" --arg orphan_names "$orphan_names" --argjson upgrades_per_day "$upgrades_json" \
     --argjson uptime_seconds "$uptime_seconds" --arg nvidia_loaded "$nvidia_loaded" --arg nvidia_installed "$nvidia_installed" \
     --arg hyprland_running "$hyprland_running" --arg hyprland_installed "$hyprland_installed" \
-    --slurpfile repos "$tmp/repos.json" --slurpfile deps "$tmp/deps.json" --slurpfile journal "$tmp/journal_lines.json" \
+    --slurpfile repos "$tmp/repos.json" --slurpfile deps "$tmp/deps.json" --slurpfile journal "$tmp/journal_lines.json" --slurpfile cached "$tmp/cached.json" \
     '{event: "stage", stage: "anatomy", data: {hostname: $hostname, os: $os, desktop: $desktop, omarchy: $omarchy,
       packages: $packages, explicit: $explicit, orphans: $orphans, orphan_names: ($orphan_names | split("\n") | map(select(length > 0)) | .[:40]), cache_bytes: $cache_bytes, cache_freeable_bytes: $cache_freeable,
       kernel_running: $kernel_running, kernel_installed: $kernel_installed, kernel_package: $kernel_package, reboot_pending: $reboot_pending,
       uptime_seconds: $uptime_seconds, nvidia_loaded: $nvidia_loaded, nvidia_installed: $nvidia_installed,
       hyprland_running: $hyprland_running, hyprland_installed: $hyprland_installed,
-      upgrades_per_day: $upgrades_per_day, repos: $repos[0], deps: $deps[0], journal: $journal[0]}}'
+      upgrades_per_day: $upgrades_per_day, repos: $repos[0], deps: $deps[0], cached: $cached[0], journal: $journal[0]}}'
 }
 
 journal_line='def s: if type == "string" then . else null end;

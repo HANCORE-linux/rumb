@@ -949,19 +949,16 @@ mod tests {
     }
 
     #[test]
-    fn update_details_put_facts_left_and_dependencies_right() {
-        let now = Instant::now();
-        let mut app = App::new(true, false, now);
-        for (_, event) in demo_events() {
-            app.apply(event, now);
-        }
-        app.focus = Pane::Updates;
-        app.overlay = true;
-        let (buffer, scene) = render(&app, 170, 50, now);
-        assert!(scene.placements.iter().any(|placement| matches!(placement.picture, page::Picture::Fan(_))));
-        let rows: Vec<String> = (0..50).map(|y| (0..170).map(|x| buffer[(x, y)].symbol()).collect()).collect();
-        let x = rows.iter().find_map(|row| row.find("version ").map(|at| row[..at].chars().count() as u16)).expect("facts shown");
-        assert!((0..50).filter(|y| buffer[(x + 47, *y)].symbol() == "│").count() >= 3);
+    fn update_details_use_the_rows_of_every_window() {
+        let app = demo_detail("hyprland");
+        let (buffer, scene) = render(&app, 170, 50, app.started + Duration::from_secs(60));
+        let rect = scene.overlay.expect("window shown");
+        let rows: Vec<String> = (rect.y..rect.bottom()).map(|y| (rect.x..rect.right()).map(|x| buffer[(x, y)].symbol()).collect()).collect();
+        let column = |label: &str| rows.iter().find_map(|row| row.find(&format!("{label} ")).map(|at| row[..at].chars().count())).unwrap_or_else(|| panic!("{label} missing: {rows:#?}"));
+        let labels = ["version", "may fix", "rollback", "updating too", "new deps", "depends on", "required by"];
+        assert!(labels.iter().all(|label| column(label) == column("version")), "{rows:#?}");
+        assert!(rows.iter().all(|row| !row.trim_matches('│').contains('│')), "{rows:#?}");
+        assert!(!scene.placements.iter().any(|placement| rect.intersects(placement.rect)), "no picture inside the window");
     }
 
     #[test]
@@ -1455,10 +1452,10 @@ mod tests {
         app.focus = Pane::Updates;
         app.select(Pane::Updates, 0);
         let text = page::overlay_text(&app, &pal).unwrap();
-        for line in ["risk          high · critical package, minor version jump", "+ new dependency    ↑ updates now"] {
+        for line in ["risk          high · critical package, minor version jump", "may fix       42 × crash · /usr/bin/Hyprland", "updating too  quickshell, mesa", "new deps      hyprwire"] {
             assert!(text.lines().any(|row| row == line), "{line} missing in\n{text}");
         }
-        assert!(text.lines().any(|row| row.starts_with("it will depend on 24: hyprwire +, mesa ↑, ")), "{text}");
+        assert!(text.lines().any(|row| row.starts_with("depends on    24 · aquamarine, cairo, ") && !row.contains("more")), "{text}");
         app.overlay = false;
         app.tile = Some(5);
         assert_eq!(press(&mut app, &[KeyCode::Char('c')]), Action::Nothing);
@@ -1532,25 +1529,28 @@ mod tests {
 
     #[test]
     fn an_update_shows_the_dependencies_of_its_new_version() {
-        let rows = screen(&demo_detail("hyprland"), 170, 50);
-        let all = rows.join("\n");
-        assert!(all.contains("it will depend on 24"), "{all}");
-        assert!(all.contains("hyprwire +"));
-        assert!(rows.iter().any(|row| row.contains("dropped deps") && row.contains("libxcursor")));
-        assert_eq!(all.matches("libxcursor").count(), 1);
-        assert!(all.contains("+ new dependency"));
+        let lines = window(&demo_detail("hyprland"));
+        for line in ["updating too  quickshell, mesa", "new deps      hyprwire", "dropped deps  libxcursor"] {
+            assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
+        }
+        let depends = &lines[line_at(&lines, "depends on")];
+        assert!(depends.starts_with("depends on    24 · aquamarine, cairo, glslang"), "{depends}");
+        assert!(!depends.contains("hyprwire") && !depends.contains("mesa"), "a name listed above is not repeated: {depends}");
+        assert_eq!(lines.join("\n").matches("libxcursor").count(), 1);
+        let rows = screen(&demo_detail("hyprland"), 271, 60);
+        assert!(rows.iter().any(|row| row.contains("depends on    24 · aquamarine, cairo, glslang, hyprcursor, hyprgraphics, hyprlang, + 16 more")), "{rows:#?}");
+        let (x, y) = find(&rows, "required by   11 · hypridle").unwrap();
+        assert!(rows[usize::from(y) + 1][..].chars().skip(usize::from(x) + 14).collect::<String>().starts_with("hyprpolkitagent, "), "the second row of names sits under the first");
     }
 
     #[test]
     fn a_new_dependency_with_a_problem_keeps_the_problem_colour() {
         let app = demo_detail("quickshell");
+        assert!(window(&app).iter().any(|line| line == "new deps      bluez · 36 × error · /usr/lib/bluetooth/bluetoothd"));
         let (buffer, _) = render(&app, 170, 50, app.started + Duration::from_secs(60));
-        let found = (0..50u16).find_map(|y| {
-            let row: String = (0..170u16).map(|x| buffer[(x, y)].symbol()).collect();
-            row.find("bluez +").map(|at| (row[..at].chars().count() as u16, y))
-        });
-        let (x, y) = found.expect("bluez is listed as a new dependency");
-        assert_eq!(buffer[(x, y)].fg, palette::Palette::paper().teal);
+        let rows: Vec<String> = (0..50u16).map(|y| (0..170u16).map(|x| buffer[(x, y)].symbol()).collect()).collect();
+        let at = find(&rows, "bluez ·").expect("bluez is listed as a new dependency");
+        assert_eq!(buffer[at].fg, palette::Palette::paper().teal);
     }
 
     fn demo_map(columns: u16, rows: u16) -> (u32, u32, ink::OrbitSpec) {
@@ -2130,7 +2130,7 @@ mod tests {
         app.tile = Some(0);
         app.overlay = true;
         let lines = window(&app);
-        for line in ["high          hyprland  0.55.2 → 0.56.0 · critical package, minor version jump · may fix 42 × crash", "low           5 · ffmpeg, firefox, mesa, spotify, yay", "AUR           2 · yay, spotify · built locally"] {
+        for line in ["high          hyprland  0.55.2 → 0.56.0 · critical package, minor version jump · may fix 42 × crash", "low           mesa  1:25.2.4 rebuild · critical package, rebuild · may fix 7 × crash", "              4 · ffmpeg, firefox, spotify, yay", "AUR           2 · yay, spotify · built locally"] {
             assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
         }
         assert!(!lines.iter().any(|line| line.starts_with("largest")));
@@ -2235,17 +2235,46 @@ mod tests {
         let rows: Vec<String> = (window.y..window.bottom()).map(|y| (window.x..window.right()).map(|x| buffer[(x, y)].symbol()).collect()).collect();
         let at = |text: &str| find(&rows, text).map(|(x, y)| (window.x + x, window.y + y)).unwrap_or_else(|| panic!("{text} missing in the window"));
         assert_ne!(buffer[at("dbus-broker")].fg, palette::Palette::paper().teal);
-        assert_eq!(buffer[at("bluez +")].fg, palette::Palette::paper().teal);
+        assert_eq!(buffer[at("bluez ·")].fg, palette::Palette::paper().teal);
     }
 
     #[test]
-    fn an_empty_side_of_the_dependencies_says_so_beside_the_hub() {
-        let app = demo_detail("spotify");
-        let rows = screen(&app, 271, 60);
-        let (_, nothing) = find(&rows, "nothing requires it").expect("the empty side is named");
-        let (_, heading) = find(&rows, "it will depend on").unwrap();
-        assert!(nothing > heading);
-        assert!(find(&rows, "0 require it").is_none());
+    fn an_update_nothing_requires_says_so() {
+        let lines = window(&demo_detail("spotify"));
+        assert!(lines.iter().any(|line| line == "required by   nothing"), "{lines:?}");
+        assert!(lines.iter().any(|line| line.starts_with("depends on    8 · alsa-lib, ")), "{lines:?}");
+    }
+
+    #[test]
+    fn a_crash_inside_a_library_names_the_update_of_its_package() {
+        let app = demo_detail("mesa");
+        let lines = window(&app);
+        assert!(lines.iter().any(|line| line == "may fix       7 × crash · /usr/lib/chromium/chromium · crashed in libgallium-25.2.4-arch1.1.so"), "{lines:?}");
+        let (_, _, spec) = demo_map(271, 60);
+        let mesa = app.visible_updates().iter().position(|update| update.name == "mesa").unwrap();
+        let ffmpeg = app.visible_updates().iter().position(|update| update.name == "ffmpeg").unwrap();
+        assert_eq!(spec.nodes.len(), app.visible_updates().len());
+        assert!(spec.nodes[mesa].fixes && !spec.nodes[ffmpeg].fixes);
+        let wayland = demo_detail("hyprland");
+        assert!(!window(&wayland).iter().any(|line| line.contains("crashed in")), "wayland has no update, so the Hyprland crash stays with hyprland");
+    }
+
+    #[test]
+    fn rollback_says_whether_the_installed_version_is_in_a_package_cache() {
+        let line = |name: &str| window(&demo_detail(name)).into_iter().find(|line| line.starts_with("rollback"));
+        assert_eq!(line("hyprland").as_deref(), Some("rollback      0.55.2-1 in the pacman cache"));
+        assert_eq!(line("yay").as_deref(), Some("rollback      12.5.2-1 in the yay cache"));
+        assert_eq!(line("spotify").as_deref(), Some("rollback      1:1.2.74-1 not in a package cache"));
+        let mut unchecked = demo_detail("hyprland");
+        unchecked.anatomy.as_mut().unwrap().cached = None;
+        assert!(!window(&unchecked).iter().any(|line| line.starts_with("rollback")), "an older scanner did not look, so the row stays empty");
+    }
+
+    #[test]
+    fn the_kernel_update_says_a_reboot_follows() {
+        let lines = window(&demo_detail("linux"));
+        assert!(lines.iter().any(|line| line == "reboot        needed after this update"), "{lines:?}");
+        assert!(!window(&demo_detail("mesa")).iter().any(|line| line.starts_with("reboot")));
     }
 
     #[test]

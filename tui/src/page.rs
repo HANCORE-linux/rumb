@@ -20,7 +20,6 @@ const UNITS: [usize; 13] = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000
 pub enum Picture {
     Specimen { subsystem: Subsystem, signal: bool, glow: Option<(Color, f32)>, aim: f32 },
     Eye(Box<crate::ink::EyeSpec>),
-    Fan(Box<crate::ink::FanSpec>),
     Orbit(Box<crate::ink::OrbitSpec>),
     Ring(Box<crate::ink::RingSpec>),
     Marks(Box<crate::ink::MarksSpec>),
@@ -45,7 +44,6 @@ pub struct Scene {
 pub fn paint(picture: &Picture, pal: &Palette, width: u32, height: u32, cell_height: f32) -> Option<Pixmap> {
     let (subsystem, signal, glow, aim) = match picture {
         Picture::Eye(spec) => return crate::ink::eye(spec, pal, width, height, cell_height),
-        Picture::Fan(spec) => return crate::ink::fan(spec, pal, width, height, cell_height),
         Picture::Orbit(spec) => return crate::ink::orbit(spec, pal, width, height, cell_height),
         Picture::Ring(spec) => return crate::ink::ring(spec, pal, width, height, cell_height),
         Picture::Marks(spec) => return crate::ink::marks(spec, pal, width, height, cell_height),
@@ -1089,7 +1087,7 @@ fn draw_updates_map(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pa
             sector,
             slot,
             count: counts[usize::from(sector)][usize::from(ring)],
-            fixes: app.problems.iter().any(|problem| problem.status == "possibly-fixed" && problem.package == update.name),
+            fixes: !fixes(app, update).is_empty(),
             selected: index == selected,
             related: related.contains(update.name.as_str()),
             faint: dot == 1,
@@ -1538,8 +1536,20 @@ fn owner_text(problem: &Problem, pal: &Palette) -> (String, Color) {
     }
 }
 
+fn fixes<'a>(app: &'a App, update: &Update) -> Vec<(&'a Problem, Option<&'a str>)> {
+    app.problems
+        .iter()
+        .filter_map(|problem| {
+            if problem.status == "possibly-fixed" && problem.package == update.name {
+                return Some((problem, None));
+            }
+            problem.libraries.split('|').find_map(|pair| pair.split_once(' ').filter(|(_, package)| *package == update.name).map(|(file, _)| (problem, Some(file))))
+        })
+        .collect()
+}
+
 fn may_fix(app: &App, update: &Update) -> String {
-    let tally: Vec<String> = app.problems.iter().filter(|problem| problem.status == "possibly-fixed" && problem.package == update.name).map(|problem| format!("{} × {}", thousands(problem.count), kind_label(&problem.kind))).collect();
+    let tally: Vec<String> = fixes(app, update).into_iter().map(|(problem, _)| format!("{} × {}", thousands(problem.count), kind_label(&problem.kind))).collect();
     if tally.is_empty() { String::new() } else { format!(" · may fix {}", tally.join(" · ")) }
 }
 
@@ -1955,14 +1965,6 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
     (name, lines)
 }
 
-struct DepBlock {
-    left: Vec<(String, u8)>,
-    right: Vec<(String, u8)>,
-    depends: u64,
-    required_by: u64,
-    new_version: bool,
-}
-
 const MORE: u8 = 3;
 const NEW: u8 = 4;
 
@@ -2118,38 +2120,18 @@ pub fn overlay_text(app: &App, pal: &Palette) -> Option<String> {
     if !app.overlay {
         return None;
     }
-    let (mut text, lines, block) = overlay_details(app, usize::MAX, usize::MAX, pal)?;
+    let (mut text, lines) = overlay_details(app, usize::MAX, pal)?;
     for (name, value, _) in &lines {
         text.push('\n');
         text.push_str(format!("{name:<13} {value}").trim_end());
     }
-    if let Some(block) = block {
-        let names = |side: &[(String, u8)]| {
-            side.iter()
-                .map(|(name, kind)| match *kind {
-                    1 => format!("{name} ↑"),
-                    2 => format!("{name} ●"),
-                    _ => name.clone(),
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let (left, right) = dep_heads(&block);
-        text.push_str(&format!("\n{left}: {}\n{right}: {}", names(&block.left), names(&block.right)));
-        let marks: Vec<String> = dep_marks(&block).iter().map(|(mark, meaning)| format!("{mark} {meaning}")).collect();
-        if !marks.is_empty() {
-            text.push('\n');
-            text.push_str(&marks.join("    "));
-        }
-    }
     Some(text)
 }
 
-type Details = (String, Vec<(String, String, Color)>, Option<DepBlock>);
+type Details = (String, Vec<(String, String, Color)>);
 
-fn overlay_details(app: &App, room: usize, beside: usize, pal: &Palette) -> Option<Details> {
+fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
     let mut lines: Vec<(String, String, Color)> = Vec::new();
-    let mut block: Option<DepBlock> = None;
     let title;
     if let Some(tile) = app.tile {
         let (name, details) = tile_details(app, tile, room, pal);
@@ -2166,8 +2148,6 @@ fn overlay_details(app: &App, room: usize, beside: usize, pal: &Palette) -> Opti
             let update = updates.get(app.lists[0].selected.min(updates.len().saturating_sub(1)))?;
             title = update.name.clone();
             let deps = app.anatomy.as_ref().and_then(|anatomy| anatomy.deps.get(&update.name));
-            let listed = deps.is_some_and(|deps| !deps.depends_on.is_empty() || !deps.required_names.is_empty());
-            let value_w = if listed { beside } else { room };
             lines.push(("version".into(), format!("{} → {}", update.old, update.new), pal.ink));
             let risk_color = match update.risk.as_str() {
                 "high" => pal.alert,
@@ -2175,7 +2155,7 @@ fn overlay_details(app: &App, room: usize, beside: usize, pal: &Palette) -> Opti
                 _ => pal.ink,
             };
             let risk = if update.reason.is_empty() { update.risk.clone() } else { format!("{} · {}", update.risk, update.reason) };
-            wrapped(&mut lines, "risk", &risk, value_w, risk_color);
+            wrapped(&mut lines, "risk", &risk, room, risk_color);
             if !update.bump.is_empty() && !update.reason.contains(update.bump.as_str()) {
                 lines.push(("jump".into(), update.bump.clone(), pal.ink));
             }
@@ -2187,27 +2167,49 @@ fn overlay_details(app: &App, room: usize, beside: usize, pal: &Palette) -> Opti
             if let Some(delta) = update.installed_delta_bytes {
                 lines.push(("disk change".into(), signed_bytes(delta), pal.ink));
             }
-            for problem in app.problems.iter().filter(|problem| problem.package == update.name) {
-                wrapped(&mut lines, "problem", &format!("{} × {} · {}", thousands(problem.count), kind_label(&problem.kind), problem.subject), value_w, pal.teal);
+            for (index, (problem, library)) in fixes(app, update).into_iter().enumerate() {
+                let place = library.map(|file| format!(" · crashed in {file}")).unwrap_or_default();
+                wrapped(&mut lines, if index == 0 { "may fix" } else { "" }, &format!("{} × {} · {}{place}", thousands(problem.count), kind_label(&problem.kind), problem.subject), room, pal.teal);
+            }
+            for (index, news) in app.news.iter().filter(|news| mentioned(&news.title, &update.name)).enumerate() {
+                wrapped(&mut lines, if index == 0 { "news" } else { "" }, &format!("{}  {}", news.date.get(5..).unwrap_or(&news.date), news.title), room, if news.manual_intervention { pal.alert } else { pal.ok });
+            }
+            if app.reboot_after().iter().any(|(_, after)| after.name == update.name) {
+                lines.push(("reboot".into(), "needed after this update".into(), pal.warn));
+            }
+            if let Some(cached) = app.anatomy.as_ref().and_then(|anatomy| anatomy.cached.as_ref()) {
+                lines.push(match cached.get(&update.name) {
+                    Some(cache) => ("rollback".into(), format!("{} in the {cache} cache", update.old), pal.ink),
+                    None => ("rollback".into(), format!("{} not in a package cache", update.old), pal.warn),
+                });
             }
             if let Some(deps) = deps {
-                if !deps.dropped.is_empty() {
-                    wrapped(&mut lines, "dropped deps", &deps.dropped.join(", "), value_w, pal.ink);
+                let along: Vec<&str> = app.sorted_updates().into_iter().map(|other| other.name.as_str()).filter(|name| deps.depends_on.iter().chain(&deps.required_names).any(|dep| dep == name)).collect();
+                if !along.is_empty() {
+                    wrapped(&mut lines, "updating too", &along.join(", "), room, pal.ink);
                 }
-                if listed {
-                    let pending: std::collections::HashSet<&str> = app.updates.iter().map(|update| update.name.as_str()).collect();
-                    let troubled: std::collections::HashSet<&str> = app.problems.iter().map(|problem| problem.package.as_str()).filter(|name| !name.is_empty()).collect();
-                    block = Some(DepBlock {
-                        left: dep_side(&deps.depends_on, &deps.added, &pending, &troubled, 9),
-                        right: dep_side(&deps.required_names, &[], &pending, &troubled, 9),
-                        depends: deps.depends,
-                        required_by: deps.required_by,
-                        new_version: !deps.version.is_empty(),
-                    });
-                } else {
-                    let count = |count: u64| if count == 0 { "nothing".to_string() } else { format!("{count} {}", if count == 1 { "package" } else { "packages" }) };
-                    lines.push(("depends on".into(), count(deps.depends), pal.ink));
-                    lines.push(("required by".into(), count(deps.required_by), pal.ink));
+                let mut added: Vec<(String, Color)> = Vec::new();
+                for name in &deps.added {
+                    if let Some(problem) = app.problems.iter().find(|problem| problem.package == *name) {
+                        added.push((format!("{name} · {} × {} · {}", thousands(problem.count), kind_label(&problem.kind), problem.subject), pal.teal));
+                    }
+                }
+                let mut calm: Vec<&str> = deps.added.iter().filter(|name| !app.problems.iter().any(|problem| problem.package == **name)).map(String::as_str).collect();
+                calm.sort_unstable();
+                if !calm.is_empty() {
+                    added.push((calm.join(", "), pal.ink));
+                }
+                for (index, (text, color)) in added.into_iter().enumerate() {
+                    wrapped(&mut lines, if index == 0 { "new deps" } else { "" }, &text, room, color);
+                }
+                if !deps.dropped.is_empty() {
+                    wrapped(&mut lines, "dropped deps", &deps.dropped.join(", "), room, pal.ink);
+                }
+                let shown: Vec<&str> = along.iter().copied().chain(deps.added.iter().map(String::as_str)).collect();
+                for (name, total, names, rows) in [("depends on", deps.depends, &deps.depends_on, 1), ("required by", deps.required_by, &deps.required_names, 2)] {
+                    for (index, row) in name_rows(total, names, &shown, room, rows).into_iter().enumerate() {
+                        lines.push((if index == 0 { name } else { "" }.into(), row, pal.ink));
+                    }
                 }
             }
         }
@@ -2301,7 +2303,7 @@ fn overlay_details(app: &App, room: usize, beside: usize, pal: &Palette) -> Opti
         }
     }
     }
-    Some((title, lines, block))
+    Some((title, lines))
 }
 
 fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut Scene) {
@@ -2311,39 +2313,44 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
     }
     let width = area.width.saturating_sub(20).min(104);
     let room = width.saturating_sub(18) as usize;
-    let Some((title, mut lines, block)) = overlay_details(app, room, 32, pal) else { return };
+    let Some((title, mut lines)) = overlay_details(app, room, pal) else { return };
     if app.tile.is_none() && app.part.is_none() && app.focus == Pane::Problems {
         lines.push(("j".into(), format!("shows the live journal filtered to {title}"), pal.label));
     }
-    let Some(block) = block else {
-        let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(6));
-        let rect = place(area, app, scene, width, height);
-        scene.overlay = Some(rect);
-        clear_around(buf, area, rect, pal);
-        clear(buf, rect, pal);
-        let inner = frame(buf, rect, &title, true, pal);
-        facts(buf, inner.x, inner.y + 1, inner.width, &lines, inner.height.saturating_sub(1), pal);
-        return;
-    };
-    let block_rows = dep_rows(&block);
-    let width = area.width.saturating_sub(10).min(150);
-    let facts_w = 46u16;
-    let height = ((lines.len() as u16).max(block_rows) + 4).min(area.height.saturating_sub(6));
+    let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(6));
     let rect = place(area, app, scene, width, height);
     scene.overlay = Some(rect);
     clear_around(buf, area, rect, pal);
     clear(buf, rect, pal);
     let inner = frame(buf, rect, &title, true, pal);
-    facts(buf, inner.x, inner.y + 1, facts_w, &lines, inner.height.saturating_sub(1), pal);
-    if inner.height < block_rows + 1 {
-        return;
+    facts(buf, inner.x, inner.y + 1, inner.width, &lines, inner.height.saturating_sub(1), pal);
+}
+
+fn name_rows(total: u64, names: &[String], shown: &[&str], width: usize, rows: usize) -> Vec<String> {
+    if total == 0 {
+        return vec!["nothing".to_string()];
     }
-    for y in inner.y + 1..inner.bottom() {
-        buf[(inner.x + facts_w + 1, y)].set_symbol("│").set_style(Style::new().fg(pal.rule));
+    let mut rest: Vec<&str> = names.iter().map(String::as_str).filter(|name| !shown.contains(name)).collect();
+    rest.sort_unstable();
+    let mut lines = vec![total.to_string()];
+    for (index, name) in rest.iter().enumerate() {
+        let gap = if index == 0 { " · " } else { ", " };
+        let after = rest.len() - index - 1;
+        let tail = if after > 0 && lines.len() == rows { format!(", + {after} more") } else { String::new() };
+        let full = lines.len() == rows;
+        let current = lines.last_mut().unwrap();
+        if current.chars().count() + gap.chars().count() + name.chars().count() + tail.chars().count() <= width {
+            current.push_str(gap);
+            current.push_str(name);
+        } else if !full {
+            current.push(',');
+            lines.push((*name).to_string());
+        } else {
+            current.push_str(&format!("{gap}+ {} more", rest.len() - index));
+            break;
+        }
     }
-    let x = inner.x + facts_w + 3;
-    let y = inner.y + 1 + (lines.len() as u16).saturating_sub(block_rows) / 2;
-    dep_block(buf, x, y, inner.right().saturating_sub(x), &block, pal, scene);
+    lines
 }
 
 fn facts(buf: &mut Buffer, x: u16, y: u16, width: u16, lines: &[(String, String, Color)], rows: u16, pal: &Palette) {
@@ -2351,88 +2358,6 @@ fn facts(buf: &mut Buffer, x: u16, y: u16, width: u16, lines: &[(String, String,
         let row = y + k as u16;
         text(buf, x, row, name, Style::new().fg(pal.label), 13);
         text(buf, x + 14, row, &fit(value, width.saturating_sub(14) as usize), Style::new().fg(*color), width.saturating_sub(14));
-    }
-}
-
-fn dep_heads(block: &DepBlock) -> (String, String) {
-    let depends = if block.depends == 0 { "nothing".to_string() } else { block.depends.to_string() };
-    let left = format!("{} {depends}", if block.new_version { "it will depend on" } else { "it depends on" });
-    let right = match block.required_by {
-        0 => "nothing requires it".to_string(),
-        1 => "1 requires it".to_string(),
-        count => format!("{count} require it"),
-    };
-    (left, right)
-}
-
-fn dep_marks(block: &DepBlock) -> Vec<(&'static str, &'static str)> {
-    let kinds: Vec<u8> = block.left.iter().chain(&block.right).map(|(_, kind)| *kind).collect();
-    let mut marks = Vec::new();
-    if block.left.iter().any(|(name, _)| name.ends_with(" +")) {
-        marks.push(("+", "new dependency"));
-    }
-    if kinds.contains(&1) {
-        marks.push(("↑", "updates now"));
-    }
-    if kinds.contains(&2) {
-        marks.push(("●", "has a problem"));
-    }
-    marks
-}
-
-fn dep_rows(block: &DepBlock) -> u16 {
-    let rows = block.left.len().max(block.right.len()).max(1) as u16;
-    let legend = block.left.iter().chain(&block.right).any(|(name, kind)| *kind == 1 || *kind == 2 || name.ends_with(" +"));
-    1 + rows + if legend { 2 } else { 0 }
-}
-
-fn dep_block(buf: &mut Buffer, x: u16, y: u16, width: u16, block: &DepBlock, pal: &Palette, scene: &mut Scene) {
-    let rows = block.left.len().max(block.right.len()).max(1) as u16;
-    let (left_w, right_w) = if width >= 90 { (26u16, 32u16) } else { ((width * 26 / 90).max(12), (width * 32 / 90).max(14)) };
-    let pic_x = x + left_w + 1;
-    let pic_w = width.saturating_sub(left_w + right_w + 2);
-    let right_x = pic_x + pic_w + 1;
-    let (left_head, right_head) = dep_heads(block);
-    let body = y + 1;
-    let hub = body + rows / 2;
-    let left_y = if block.left.is_empty() { hub } else { y };
-    let right_y = if block.right.is_empty() { hub } else { y };
-    text(buf, (pic_x - 1).saturating_sub(left_head.chars().count() as u16), left_y, &left_head, Style::new().fg(pal.label), left_w);
-    text(buf, right_x, right_y, &right_head, Style::new().fg(pal.label), right_w);
-    let tone = |kind: u8| match kind {
-        2 => pal.teal,
-        1 | NEW => pal.ink,
-        _ => pal.label,
-    };
-    for (side, names) in [(0u8, &block.left), (1u8, &block.right)] {
-        let offset = (rows - names.len() as u16) / 2;
-        for (index, (name, kind)) in names.iter().enumerate() {
-            let row = body + offset + index as u16;
-            let label = if *kind == 1 { format!("{name} ↑") } else { name.clone() };
-            let label = fit(&label, if side == 0 { left_w as usize - 1 } else { right_w as usize });
-            let style = Style::new().fg(tone(*kind));
-            if side == 0 {
-                text(buf, (pic_x - 1).saturating_sub(label.chars().count() as u16), row, &label, style, left_w);
-            } else {
-                text(buf, right_x, row, &label, style, right_w);
-            }
-        }
-    }
-    let leaves = |names: &[(String, u8)]| names.iter().map(|(_, kind)| *kind).collect::<Vec<u8>>();
-    scene.placements.push(Placement {
-        rect: Rect::new(pic_x, body, pic_w, rows),
-        picture: Picture::Fan(Box::new(crate::ink::FanSpec { left: leaves(&block.left), right: leaves(&block.right), panel: true })),
-    });
-    let marks = dep_marks(block);
-    if !marks.is_empty() {
-        let mut spans = Vec::new();
-        for (mark, meaning) in marks {
-            let gap = if spans.is_empty() { "" } else { "    " };
-            spans.push(Span::styled(format!("{gap}{mark} "), Style::new().fg(if mark == "●" { pal.teal } else { pal.ink })));
-            spans.push(Span::styled(meaning, Style::new().fg(pal.label)));
-        }
-        let spans_w = self::width(&spans);
-        put(buf, (pic_x + pic_w / 2).saturating_sub(spans_w / 2), body + rows + 1, spans, (x + width).saturating_sub(pic_x));
     }
 }
 
