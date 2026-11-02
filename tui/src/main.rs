@@ -560,6 +560,21 @@ mod tests {
     }
 
     #[test]
+    fn rings_show_in_tiles_from_about_185_columns() {
+        let now = Instant::now();
+        let rings = |width: u16| {
+            let mut app = demo_at(30_000);
+            app.pictures = true;
+            app.visible = [true, true, false, false, false];
+            let (_, scene) = render(&app, width, 42, now + Duration::from_secs(60));
+            scene.placements.iter().filter(|placement| matches!(placement.picture, page::Picture::Ring(_))).count()
+        };
+        assert_eq!(rings(170), 0, "too narrow: the tiles stay text");
+        assert_eq!(rings(190), 6);
+        assert_eq!(rings(271), 6);
+    }
+
+    #[test]
     fn the_default_layout_is_the_instruments_and_the_eye() {
         let mut app = App::new(true, false, Instant::now());
         assert_eq!(app.wanted, [true, true, false, false, false]);

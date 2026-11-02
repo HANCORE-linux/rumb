@@ -167,8 +167,7 @@ fn draw_header(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Inst
 fn draw_tiles(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant, cell: (u16, u16), rings: &mut Vec<Placement>) {
     let count = 6u16;
     let width = area.width.saturating_sub(2) / count;
-    let ring = (9.0 * f32::from(cell.1) / f32::from(cell.0.max(1))).round() as u16;
-    if !app.pictures || width.saturating_sub(4) < ring + 18 {
+    if !app.pictures || width.saturating_sub(4) < MIN_RING_TILE {
         draw_text_tiles(buf, area, app, pal, now);
         return;
     }
@@ -218,6 +217,8 @@ fn short_word(word: &str) -> &str {
         "store paths" => "paths",
         "/boot free" => "/boot",
         "not needed" => "no",
+        "pending" => "due",
+        "all ran" => "ok",
         "after update" => "after",
         "generation" => "gen",
         "closure" => "size",
@@ -229,9 +230,18 @@ fn tile_legend(buf: &mut Buffer, area: Rect, spans: Vec<Span<'static>>) {
     if area.height < 4 || area.width < 6 {
         return;
     }
+    let room = usize::from(area.width.saturating_sub(4));
     let mut line = vec![Span::raw(" ")];
     line.extend(spans);
     line.push(Span::raw(" "));
+    while usize::from(width(&line)) > room {
+        let Some(last) = line.len().checked_sub(2) else { break };
+        let content = line[last].content.to_string();
+        match content.rfind(" · ") {
+            Some(at) => line[last] = Span::styled(content[..at].to_string(), line[last].style),
+            None => break,
+        }
+    }
     put(buf, area.x + 1, area.bottom() - 2, line, area.width.saturating_sub(4));
 }
 
@@ -243,9 +253,13 @@ fn label(value: &str, pal: &Palette) -> Span<'static> {
     Span::styled(value.to_string(), Style::new().fg(pal.label))
 }
 
+/// The narrowest tile content that still shows a ring beside its numbers.
+const MIN_RING_TILE: u16 = 27;
+
 fn place_ring(rings: &mut Vec<Placement>, inner: Rect, cell: (u16, u16), spec: crate::ink::RingSpec) -> Rect {
     let rows = inner.height.saturating_sub(3);
-    let cols = ((f32::from(rows) * f32::from(cell.1.max(1)) / f32::from(cell.0.max(1))).round() as u16).min((inner.width / 2).max(inner.width.saturating_sub(25)));
+    let wide = (inner.width / 2).max(inner.width.saturating_sub(25));
+    let cols = ((f32::from(rows) * f32::from(cell.1.max(1)) / f32::from(cell.0.max(1))).round() as u16).min(wide.min(inner.width * 9 / 20).max(inner.width.saturating_sub(25)));
     rings.push(Placement { rect: Rect::new(inner.x, inner.y + 1, cols, rows), picture: Picture::Ring(Box::new(spec)) });
     let x = inner.x + cols + 2;
     Rect::new(x, inner.y + 1, inner.right().saturating_sub(x), rows)
@@ -261,7 +275,7 @@ fn column(buf: &mut Buffer, col: Rect, lines: Vec<Vec<Span<'static>>>) {
 #[allow(clippy::too_many_arguments)]
 fn keyed(buf: &mut Buffer, col: Rect, y: u16, dot: Color, name: &str, value: &str, color: Color, pal: &Palette) {
     text(buf, col.x, y, "●", Style::new().fg(dot), 1);
-    text(buf, col.x + 2, y, name, Style::new().fg(pal.label), col.width.saturating_sub(2));
+    text(buf, col.x + 2, y, name, Style::new().fg(pal.label), col.width.saturating_sub(3 + value.chars().count() as u16));
     right(buf, col.right(), y, value, Style::new().fg(color).add_modifier(Modifier::BOLD));
 }
 
@@ -421,11 +435,14 @@ fn ring_since(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Insta
     let col = place_ring(rings, inner, cell, spec);
     let mut lines = Vec::new();
     if let Some(when) = last.get(5..16) {
-        lines.push(vec![label(&format!("on {}", when.replace('T', " ")), pal)]);
+        let on = if col.width >= 16 { "on " } else { "" };
+        lines.push(vec![label(&format!("{on}{}", when.replace('T', " ")), pal)]);
     }
     if let Some(count) = upgraded_that_day(app, last, scan) {
         lines.push(vec![faint(&format!("{count} changed"), pal)]);
-        lines.push(vec![faint("that day", pal)]);
+        if col.width >= 16 {
+            lines.push(vec![faint("that day", pal)]);
+        }
     }
     column(buf, col, lines);
     tile_legend(buf, area, vec![faint(&format!("circle = {full}"), pal)]);
@@ -464,11 +481,11 @@ fn ring_generations(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now:
     let top = col.y + col.height.saturating_sub(4) / 2;
     text(buf, col.x, top, &format!("{} kept", old + 1), Style::new().fg(pal.label), col.width);
     match app.preflight.as_ref().and_then(|preflight| preflight.rollback_generation) {
-        Some(rollback) => keyed(buf, col, top + 2, pal.ink2, "rollback", &rollback.to_string(), pal.ink, pal),
-        None => keyed(buf, col, top + 2, pal.ink2, "rollback", "none", pal.warn, pal),
+        Some(rollback) => row(buf, col, top + 2, "rollback", &rollback.to_string(), pal.ink, pal),
+        None => row(buf, col, top + 2, "rollback", "none", pal.warn, pal),
     }
     if !oldest.is_empty() {
-        keyed(buf, col, top + 3, pal.ink2, "oldest", &oldest, pal.ink, pal);
+        row(buf, col, top + 3, "oldest", &oldest, pal.ink, pal);
     }
     tile_legend(buf, area, vec![faint("1 wedge = 1 generation · newest first", pal)]);
 }
@@ -2852,8 +2869,7 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
     let keys = Rect::new(area.x, area.bottom() - 1, area.width, 1);
     let band_visible = app.visible[1];
     let alone = band_visible && !app.lists_shown();
-    let ring = (9.0 * f32::from(cell.1) / f32::from(cell.0.max(1))).round() as u16;
-    let tile_h = if app.pictures && (area.width.saturating_sub(2) / 6).saturating_sub(4) >= ring + 18 { tiles_height(area, cell) } else { TILES_HEIGHT };
+    let tile_h = if app.pictures && (area.width.saturating_sub(2) / 6).saturating_sub(4) >= MIN_RING_TILE { tiles_height(area, cell) } else { TILES_HEIGHT };
     let rows = if alone { grown_rows(area, app.visible[0].then_some(tile_h)) } else { band_rows(area) };
     let eye_w = ((f32::from(rows) * 3.6).round() as u16).min(area.width.saturating_sub(4));
     let eye_x = area.x + (area.width - eye_w) / 2;
