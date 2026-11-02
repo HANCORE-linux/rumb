@@ -1,2 +1,4 @@
+*.AppImage
+result
 /tui/target/
 /visualizations/

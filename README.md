@@ -5,47 +5,45 @@
   </picture>
 </h1>
 
-<p align="center">Track software health. Spot trouble early.</p>
+<p align="center">NixOS system health at a glance.</p>
 
-<p align="center">A terminal dashboard for Arch Linux and Omarchy: what the next update brings, and what is already failing. It only reads and never asks for root.</p>
+<p align="center">A terminal dashboard for NixOS: which flake inputs are behind, what is failing since the last switch, which generations you can roll back to, and how much room is left on <code>/nix</code> and <code>/boot</code>. It only reads and never asks for root.</p>
 
-<p align="center">
-  <img src="docs/overview.png" alt="The eye reads the scan and signals each tile" width="100%">
-</p>
+This is a NixOS fork of [HANCORE-linux/rumb](https://github.com/HANCORE-linux/rumb). The look, the eye and the dashboard come from upstream; the scanner and the instruments were rewritten for NixOS.
 
-## Omarchy
+## Run
 
-```sh
-omarchy pkg add rumb     # install
-omarchy update           # update, with the rest of the system
-omarchy pkg drop rumb    # uninstall
-```
-
-## Arch Linux, from source
+From this repository:
 
 ```sh
-sudo pacman -S --needed git make cargo jq pacman-contrib fakeroot
-git clone https://github.com/HANCORE-linux/rumb && cd rumb
-make && sudo make install                  # install
-git pull && make && sudo make install      # update
-sudo make uninstall                        # uninstall
+nix run github:jardel20/rumb/nixos            # the dashboard
+nix run github:jardel20/rumb/nixos -- --demo  # bundled demo data
+nix build .#appimage                          # an AppImage (inside a clone)
 ```
 
-`make install` puts rumb in `/usr/local`, and `/usr/local/bin` comes before `/usr/bin` in `PATH`. Before you switch to the Omarchy package, run `sudo make uninstall` in the `rumb` folder (clone it again if it is gone), or `rumb` keeps starting the old copy.
+Or add this flake as an input and put `packages.x86_64-linux.default` in `environment.systemPackages`.
 
-Run `rumb`. The manual is `man rumb`.
+## What it shows
+
+| Instrument | Source |
+|---|---|
+| PENDING | flake inputs of `/etc/nixos/flake.lock` (or `$RUMB_FLAKE`) whose remote moved on, ranked by how old the lock is |
+| PROBLEMS / DAY | core dumps, journal errors and the days the system switched generation |
+| SINCE SWITCH | how long the current generation runs and which packages it changed (`nix store diff-closures`) |
+| GENERATIONS | the current generation, how many are kept, the rollback target, the oldest |
+| DISK AND STORE | `/nix` use, store paths of the system closure, system and user packages, old generations, closure size, `/boot` free |
+| BEFORE YOU UPDATE | risk, reboot (booted vs current kernel, initrd and modules), programs running replaced files, rollback, `/boot`, space, NixOS news |
+
+The subsystems around the eye group updates and problems by kernel, graphics, compositor (niri), toolkit, shell (Noctalia), base and other.
 
 ## Terminals
 
-rumb draws the eye, the icons and the graphs as images.
+rumb draws the eye, the icons and the graphs as images. foot, kitty and Ghostty are supported; other terminals show the text version.
 
-- foot, kitty and Ghostty are supported.
-- Alacritty cannot show images, so the eye and the icons stay empty. It is not supported.
-- Other terminals are untested.
+It starts with the instruments and the eye (120×34 or larger); keys 3, 4 and 5 add the updates, problems and live events lists. A smaller terminal hides the eye first, then the lists that do not fit, then the instruments.
 
-## Contributing
+## Themes
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) explains how to build rumb, run the checks and open a pull request.
-- Design changes are not accepted, only proposals: open an issue with before/after screenshots.
+The default theme is `shadesofjade`; `esc` opens the options in the eye to pick another, and rumb remembers it. `--themes` lists the bundled palettes. The `system` theme follows the colors Noctalia writes to `~/.config/noctalia/colors.json`.
 
 [MIT](LICENSE)

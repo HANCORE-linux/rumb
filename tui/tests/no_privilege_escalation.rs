@@ -3,13 +3,16 @@ use std::path::{Path, PathBuf};
 
 const FORBIDDEN: [&str; 5] = ["sudo", "pkexec", "doas", "su", "run0"];
 
+/// Commands that change the system; the scanner may name none of them.
+const CHANGING: [&str; 3] = ["nixos-rebuild", "nix-collect-garbage", "nix-env"];
+
 fn words(line: &str) -> impl Iterator<Item = &str> {
     line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')).filter(|word| !word.is_empty())
 }
 
 fn sources() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut files = vec![root.join("export-themes")];
+    let mut files = Vec::new();
     for dir in [root.join("src"), root.join("../bin")] {
         for entry in fs::read_dir(&dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display())) {
             files.push(entry.unwrap().path());
@@ -29,9 +32,19 @@ fn never_escalates_privileges() {
             if let Some(word) = words(line).find(|word| FORBIDDEN.contains(word)) {
                 panic!("{place} names {word}: {line}");
             }
-            if words(line).any(|word| word == "checkupdates") {
-                assert!(!words(line).any(|word| word == "-d" || word == "--download"), "{place} lets checkupdates download as root: {line}");
-            }
         }
+    }
+}
+
+#[test]
+fn the_scanner_never_changes_the_system() {
+    let scanner = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bin/rumb-scan");
+    let text = fs::read_to_string(&scanner).unwrap();
+    for (number, line) in text.lines().enumerate() {
+        let place = format!("rumb-scan:{}", number + 1);
+        if let Some(word) = words(line).find(|word| CHANGING.contains(word)) {
+            panic!("{place} names {word}: {line}");
+        }
+        assert!(!line.contains("flake update") && !line.contains("--gc") && !line.contains("store gc") && !line.contains("--delete"), "{place} changes the store: {line}");
     }
 }

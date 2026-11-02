@@ -1547,8 +1547,8 @@ mod tests {
     #[test]
     fn pupil_lines_break_between_words() {
         assert_eq!(lines("› systemctl --failed  1 units", Some(20), &[12, 12, 12]), ["› systemctl", "--failed", "1 units"]);
-        assert_eq!(lines("› yay -Qua  2 aur", Some(10), &[12, 12]), ["› yay -Qua", "2 aur"]);
+        assert_eq!(lines("› git ls-remote  2 inputs", Some(15), &[16, 16]), ["› git ls-remote", "2 inputs"]);
         assert_eq!(lines("› /sys/module/nvidia/version", None, &[16, 16]), ["› /sys/module/", "nvidia/version"]);
-        assert_eq!(lines("› uname -r  7.2.5-3-omarchy", Some(10), &[30]), ["› uname -r  7.2.5-3-omarchy"]);
+        assert_eq!(lines("› uname -r  6.18.59", Some(10), &[30]), ["› uname -r  6.18.59"]);
     }
 }

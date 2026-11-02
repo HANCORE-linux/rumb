@@ -11,7 +11,7 @@ mod theme;
 
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -51,19 +51,53 @@ fn watch_terminal() {
     });
 }
 
-const USAGE: &str = "rumb — Track software health. Spot trouble early.
+/// Runs one scan and prints the Markdown report, for pipes and NO_COLOR.
+fn plain_report(script: &std::path::Path, args: &[String]) -> ExitCode {
+    let (scan, rx) = match source::spawn_script(script, args) {
+        Ok(spawned) => spawned,
+        Err(error) => {
+            eprintln!("Could not run {}: {error}", script.display());
+            return ExitCode::from(1);
+        }
+    };
+    let mut app = App::new(false, false, Instant::now());
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            source::Msg::Event(event, _) => {
+                let done = matches!(event, source::Event::Result {});
+                app.apply(event, Instant::now());
+                if done {
+                    break;
+                }
+            }
+            source::Msg::Invalid => {}
+            source::Msg::Eof { stderr } => {
+                eprint!("{stderr}");
+                drop(scan);
+                return ExitCode::from(1);
+            }
+        }
+    }
+    drop(scan);
+    print!("{}", export::report(&app));
+    ExitCode::SUCCESS
+}
 
-Usage: rumb [--demo] [--no-anim] [--theme <name>] [--since <time>] [--no-aur]
+const USAGE: &str = "rumb — NixOS system health at a glance.
+
+Usage: rumb [--demo] [--no-anim] [--theme <name>] [--since <time>] [--offline]
 
   --demo          Play bundled demo data instead of checking this system
   --no-anim       Show the results without animation
   --theme <name>  Colors to use; by default the theme chosen with esc, else
-                  the current Omarchy theme, live, and labra without Omarchy
-  --themes        List the theme names: the official Omarchy themes and the
-                  HANCORE themes
+                  shadesofjade; \"system\" follows the Noctalia colors live
+  --themes        List the theme names
   --version       Print the version
   --since <time>  Passed on to rumb-scan
-  --no-aur        Passed on to rumb-scan
+  --offline       Do not ask the flake remotes or fetch the NixOS news
+
+rumb starts with the instruments and the eye; keys 3-5 add the updates,
+problems and live events lists.
 
 Keys: 1-5 show or hide the instruments, subsystems, updates, problems and
 live events; tab and shift+tab move the focus between the instruments, the
@@ -75,8 +109,10 @@ or clears, and with nothing open shows the options in the eye, where left/right
 change the theme that rumb remembers and typing filters the themes; r rescans;
 q quits.
 
-The dashboard needs a terminal of at least 150x44; a smaller one shows the
-size it needs. Without a terminal (or with NO_COLOR set) rumb prints the plain
+With every panel shown the dashboard fits 150x47 (the default needs 120x34);
+a smaller terminal hides the eye first, then
+the lists that do not fit side by side, then the instruments (keys 1-5 in
+yellow), and shows the size it needs only below 40x13. Without a terminal (or with NO_COLOR set) rumb prints the plain
 text report instead.";
 
 struct Options {
@@ -93,7 +129,7 @@ fn parse_args() -> Result<Options, String> {
         match arg.as_str() {
             "--demo" => options.demo = true,
             "--no-anim" => options.no_anim = true,
-            "--no-aur" => options.args.push(arg),
+            "--offline" => options.args.push(arg),
             "--theme" => options.theme = Some(args.next().ok_or("--theme needs a name")?),
             "--themes" => {
                 println!("{}", theme::choices().join("\n"));
@@ -151,13 +187,7 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
         let script = script.expect("checked above");
-        return match Command::new(&script).args(&options.args).status() {
-            Ok(status) => ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8),
-            Err(error) => {
-                eprintln!("Could not run {}: {error}", script.display());
-                ExitCode::from(1)
-            }
-        };
+        return plain_report(&script, &options.args);
     }
 
     let default_hook = std::panic::take_hook();
@@ -202,7 +232,6 @@ enum Action {
     Rescan,
     Export,
     Copy,
-    CopyCommand,
     Theme(bool),
     ThemeFilter,
 }
@@ -259,7 +288,6 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3], now: Instant) -> Actio
             KeyCode::Right => app.move_tile(true),
             KeyCode::Tab => app.cycle_focus(true),
             KeyCode::BackTab => app.cycle_focus(false),
-            KeyCode::Enter if app.overlay && app.tile == Some(4) && app.cache_command() => return Action::CopyCommand,
             KeyCode::Up if app.overlay && app.tile == Some(1) => app.move_day(false),
             KeyCode::Down if app.overlay && app.tile == Some(1) => app.move_day(true),
             KeyCode::Enter => {
@@ -330,7 +358,8 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3], now: Instant) -> Actio
         KeyCode::Char('j') if shown && focus == Pane::Problems => {
             if let Some(name) = app.visible_problems().get(app.lists[list].selected).map(|problem| problem.name().to_string()) {
                 app.lists[Pane::Events.index()].filter = name;
-                app.visible[Pane::Events.panel()] = true;
+                app.wanted[Pane::Events.panel()] = true;
+                app.refit();
                 app.focus = Pane::Events;
                 app.overlay = false;
                 app.select(Pane::Events, 0);
@@ -433,7 +462,7 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
         motion.step(&mut app, now, now.saturating_duration_since(last_frame).as_secs_f32());
         last_frame = now;
         let size = terminal.size()?;
-        app.fit_page(page::fits(&app, size.width, size.height));
+        app.fit_to(size.width, size.height);
         let cell = pictures.as_ref().map_or((10, 21), pictures::Pictures::cell);
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         let drawn = terminal.draw(|frame| {
@@ -501,11 +530,6 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
                         app.status = Some((format!("theme not saved: {error}"), false, Instant::now()));
                     }
                 }
-                Action::CopyCommand => {
-                    let done = copy_done.clone();
-                    std::thread::spawn(move || done.send((format!("copied {}", page::CACHE_COMMAND), export::copy(page::CACHE_COMMAND.to_string()))));
-                    copying += 1;
-                }
                 Action::Copy => {
                     if let Some(text) = page::overlay_text(&app, &theme.palette) {
                         let lines = text.lines().count();
@@ -527,6 +551,31 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tests look at every panel; the dashboard starts with fewer (see the_default_layout_is_the_instruments_and_the_eye).
+    fn all_panels(mut app: App) -> App {
+        app.visible = [true; 5];
+        app.wanted = [true; 5];
+        app
+    }
+
+    #[test]
+    fn the_default_layout_is_the_instruments_and_the_eye() {
+        let mut app = App::new(true, false, Instant::now());
+        assert_eq!(app.wanted, [true, true, false, false, false]);
+        app.fit_to(190, 42);
+        assert_eq!(app.visible, [true, true, false, false, false]);
+        assert_eq!(page::min_size(&app), (120, 34));
+        let rows = screen(&app, 190, 42);
+        assert!(rows.iter().any(|row| row.contains(":: GENERATIONS")));
+        assert!(!rows.iter().any(|row| row.contains("UPDATES ·")), "the lists wait for keys 3-5");
+        press(&mut app, &[KeyCode::Char('3')]);
+        assert!(app.visible[2]);
+        let default = app::DEFAULT_PANELS;
+        assert_eq!(page::fitted(default, 160, 30), [true, false, false, false, false], "the eye goes first");
+        assert_eq!(page::fitted(default, 100, 30), [false, false, true, true, false], "too narrow for the instruments: the lists stand in");
+        assert_eq!(page::fitted(default, 60, 20), [false, false, true, false, false]);
+    }
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::{Color, Modifier};
@@ -660,74 +709,81 @@ mod tests {
     fn small_terminal_shows_needed_size() {
         let pal = palette::Palette::paper();
         let now = Instant::now();
-        let app = App::new(true, false, now);
-        for (width, height) in [(100, 30), (149, 44), (150, 43)] {
+        let mut app = all_panels(App::new(true, false, now));
+        app.visible = [false, false, true, false, false];
+        for (width, height) in [(30, 12), (39, 13), (40, 12)] {
             let (buffer, scene) = render(&app, width, height, now);
             let rows: Vec<String> = (0..height).map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect()).collect();
             let current = format!("Width = {width} Height = {height}");
             let (y, x) = rows.iter().enumerate().find_map(|(y, row)| row.find(&current).map(|x| (y as u16, x as u16))).expect("current size shown");
             assert!(rows.iter().any(|row| row.contains("Terminal size too small:")), "{width}x{height}");
-            assert!(rows.iter().any(|row| row.contains("Width = 150 Height = 44")), "{width}x{height}");
+            assert!(rows.iter().any(|row| row.contains("Width = 40 Height = 13")), "{width}x{height}");
             assert!(scene.placements.is_empty(), "{width}x{height}");
             let fg = |offset: u16| buffer[(x + offset, y)].fg;
-            assert_eq!(fg(8), if width < 150 { pal.alert } else { pal.ink }, "{width}x{height}");
-            assert_eq!(fg(21), if height < 44 { pal.alert } else { pal.ink }, "{width}x{height}");
+            assert_eq!(fg(8), if width < 40 { pal.alert } else { pal.ink }, "{width}x{height}");
         }
         render(&app, 20, 1, now);
         render(&app, 1, 1, now);
-        let (buffer, scene) = render(&app, 150, 44, now);
+        let (buffer, _) = render(&app, 40, 13, now);
         assert!(!buffer.content().iter().map(|cell| cell.symbol()).collect::<String>().contains("Terminal size too small:"));
-        assert_eq!(scene.placements.len(), 8);
+    }
+
+    #[test]
+    fn a_small_terminal_hides_panels_in_order() {
+        let all = [true; 5];
+        assert_eq!(page::fitted(all, 150, 47), all);
+        assert_eq!(page::fitted(all, 150, 44), [true, false, true, true, true]);
+        assert_eq!(page::fitted(all, 120, 36), [true, false, true, true, true]);
+        assert_eq!(page::fitted(all, 100, 30), [false, false, true, true, false]);
+        assert_eq!(page::fitted(all, 80, 24), [false, false, true, true, false]);
+        assert_eq!(page::fitted(all, 60, 20), [false, false, true, false, false]);
+        assert_eq!(page::fitted([false, true, false, false, false], 150, 17), [false, true, false, false, false]);
     }
 
     #[test]
     fn hidden_panels_lower_the_needed_size() {
         let now = Instant::now();
-        let mut app = App::new(true, false, now);
-        assert_eq!(page::min_size(&app), (150, 44));
+        let mut app = all_panels(App::new(true, false, now));
+        assert_eq!(page::min_size(&app), (120, 47));
         app.visible = [false, true, false, false, false];
-        assert_eq!(page::min_size(&app), (150, 17));
+        assert_eq!(page::min_size(&app), (120, 17));
         let (buffer, scene) = render(&app, 150, 17, now);
         assert!(!buffer.content().iter().map(|cell| cell.symbol()).collect::<String>().contains("Terminal size too small:"));
         assert_eq!(scene.placements.len(), 8);
         app.visible = [true, false, false, false, false];
-        assert_eq!(page::min_size(&app), (150, 17));
+        assert_eq!(page::min_size(&app), (120, 17));
         app.visible = [false, false, true, true, false];
-        assert_eq!(page::min_size(&app), (100, 13));
+        assert_eq!(page::min_size(&app), (80, 13));
         app.visible = [true, false, true, true, false];
-        assert_eq!(page::min_size(&app), (150, 27));
+        assert_eq!(page::min_size(&app), (120, 27));
     }
 
     fn crowded_app(now: Instant) -> App {
-        let mut app = App::new(true, false, now);
+        let mut app = all_panels(App::new(true, false, now));
         for (_, event) in demo_events() {
             app.apply(event, now);
         }
         let long = |i: usize| format!("pkg-{i:03}-with-a-rather-long-name");
-        let updates: Vec<Value> = (0..500)
+        let updates: Vec<Value> = (0..450)
             .map(|i| {
-                let (source, risk) = (if i % 7 == 0 { "aur" } else { "repo" }, ["high", "medium", "low"][i % 3]);
-                json!({"name": long(i), "old": "1.0-1", "new": "2.0-1", "source": source, "bump": "major", "risk": risk,
-                    "reason": "critical package, major version jump", "download_bytes": 1000 * i, "installed_delta_bytes": 10 * i})
+                let risk = ["high", "medium", "low"][i % 3];
+                json!({"name": long(i), "old": "8a41c0e", "new": "d3b9f72", "source": "flake", "bump": "commit", "risk": risk, "reason": "critical input, locked 112 days ago"})
             })
             .collect();
         let mut problems: Vec<Value> = (0..60)
             .map(|i| {
                 json!({"kind": "failed-unit", "subject": format!("unit-{i}.service"), "count": 1, "package": long(0),
-                    "status": "possibly-fixed", "update": format!("{} 1.0-1 -> 2.0-1", long(0))})
+                    "status": "possibly-fixed", "update": format!("{} 8a41c0e -> d3b9f72", long(0))})
             })
             .collect();
-        problems.extend((0..60).map(|i| json!({"kind": "journal", "subject": format!("/usr/bin/tool-{i}"), "count": i + 1, "package": format!("tool-{i}"), "status": "no-update", "update": ""})));
+        problems.extend((0..60).map(|i| json!({"kind": "journal", "subject": format!("tool-{i}-1.0/bin/tool-{i}"), "count": i + 1, "package": format!("tool-{i}"), "status": "no-update", "update": ""})));
         let news: Vec<Value> = (0..40)
-            .map(|i| json!({"date": "2026-10-01", "title": format!("News item {i} with a rather long title that needs truncation"), "link": "https://archlinux.org/news/x/", "manual_intervention": i % 5 == 0}))
+            .map(|i| json!({"date": "2026-10-01", "title": format!("News item {i} with a rather long title that needs truncation"), "link": "https://nixos.org/blog/announcements/x/", "manual_intervention": i % 5 == 0}))
             .collect();
         app.apply(source::Event::Stage { stage: "updates".into(), data: json!({"updates": updates, "update_check_errors": []}) }, now);
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": problems, "activity": []}) }, now);
         app.apply(source::Event::Stage { stage: "news".into(), data: json!({"news": news, "news_check_failed": false}) }, now);
-        app.apply(source::Event::Activity { line: "transaction started".into() }, now);
-        for i in 450..500 {
-            app.apply(source::Event::Activity { line: format!("upgraded {} (1.0-1 -> 2.0-1)", long(i)) }, now);
-        }
+        app.apply(source::Event::Activity { line: "switched to generation 499".into() }, now);
         for i in 0..300 {
             app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: format!("ident-{i}"), program: String::new(), message: "x".repeat(300), priority: String::new(), unit: String::new(), package: String::new() }, now);
         }
@@ -740,7 +796,7 @@ mod tests {
         let mut app = crowded_app(now);
         let later = now + Duration::from_secs(60);
         let mut failures = Vec::new();
-        for (width, height) in [(150, 44), (200, 60)] {
+        for (width, height) in [(150, 47), (200, 60)] {
             for mask in 0..32u8 {
                 for focus in Pane::ALL {
                     for (overlay, editing) in [(false, false), (true, false), (false, true)] {
@@ -770,7 +826,7 @@ mod tests {
             list.selected = 0;
         }
         app.editing = false;
-        for (width, height) in [(150, 44), (200, 60), (150, 17)] {
+        for (width, height) in [(150, 47), (200, 60), (150, 17)] {
             for mask in 0..32u8 {
                 app.visible = std::array::from_fn(|panel| mask & (1 << panel) != 0);
                 for overlay in [false, true] {
@@ -794,7 +850,7 @@ mod tests {
         for selected in [0usize, 300, 449] {
             app.select(Pane::Updates, selected as isize);
             let name = app.visible_updates()[selected].name[..7].to_string();
-            let rows = screen(&app, 150, 44);
+            let rows = screen(&app, 150, 47);
             assert!(rows.iter().any(|row| row.contains(&name)), "selection {selected} not listed");
             assert!(rows.iter().any(|row| row.contains(&format!("{} of 450", selected + 1))), "no position for {selected}");
         }
@@ -819,7 +875,7 @@ mod tests {
         assert!(!app.editing);
         assert_eq!(app.lists[0].filter, "pkg-04");
         assert_eq!(app.rows(Pane::Updates), 10);
-        assert!(screen(&app, 150, 44).iter().any(|row| row.contains("UPDATES · 10")));
+        assert!(screen(&app, 150, 47).iter().any(|row| row.contains("UPDATES · 10")));
 
         press(&mut app, &[KeyCode::Enter]);
         assert!(app.overlay);
@@ -914,27 +970,27 @@ mod tests {
     fn a_window_too_small_for_the_eye_keeps_the_options_shut() {
         let now = Instant::now();
         let mut app = crowded_app(now);
-        assert!(!page::fits(&app, 80, 24) && page::fits(&app, 170, 50));
-        app.fit_page(page::fits(&app, 80, 24));
-        assert!(screen(&app, 80, 24).iter().any(|row| row.contains("Terminal size too small:")));
+        app.fit_to(80, 24);
+        assert!(!app.visible[1] && app.wanted[1]);
+        assert!(screen(&app, 80, 24).iter().any(|row| row.contains("no room for 1, 2")));
         assert_eq!(press(&mut app, &[KeyCode::Esc]), Action::Nothing);
         assert!(!app.options);
         assert_eq!(press(&mut app, &[KeyCode::Char('q')]), Action::Quit);
 
-        app.fit_page(page::fits(&app, 170, 50));
+        app.fit_to(170, 50);
         press(&mut app, &[KeyCode::Esc]);
         assert!(app.options);
-        app.fit_page(page::fits(&app, 80, 24));
+        app.fit_to(80, 24);
         assert!(!app.options && app.dilation(now) == 0.0);
         assert_eq!(press(&mut app, &[KeyCode::Char('q')]), Action::Quit);
-        app.fit_page(page::fits(&app, 170, 50));
+        app.fit_to(170, 50);
         assert!(!app.options && screen(&app, 170, 50).last().unwrap().trim().ends_with("q quit   Esc options"));
     }
 
     #[test]
     fn the_pupil_opens_and_closes_in_one_calm_motion() {
         let now = Instant::now();
-        let mut app = App::new(true, true, now);
+        let mut app = all_panels(App::new(true, true, now));
         assert_eq!(app.dilation(now), 0.0);
         app.toggle_options(now);
         let at = |ms: u64| app.dilation(now + Duration::from_millis(ms));
@@ -945,7 +1001,7 @@ mod tests {
         app.toggle_options(now + Duration::from_millis(180));
         assert!((app.dilation(now + Duration::from_millis(180)) - half).abs() < 1e-6);
         assert_eq!(app.dilation(now + Duration::from_millis(540)), 0.0);
-        let mut still = App::new(true, false, now);
+        let mut still = all_panels(App::new(true, false, now));
         still.toggle_options(now);
         assert_eq!(still.dilation(now), 1.0);
     }
@@ -988,35 +1044,16 @@ mod tests {
         assert_eq!(x, rect.right() + 2, "the text starts two cells after the ring");
     }
 
-    #[test]
-    fn the_map_headings_stay_inside_the_frame_in_a_narrow_window() {
-        let mut app = demo_at(26_000);
-        app.visible = [false, false, true, false, false];
-        app.focus = Pane::Updates;
-        for (width, height) in [(92u16, 32u16), (100, 34), (271, 60)] {
-            let rows = screen(&app, width, height);
-            assert!(find(&rows, "outer band low").is_some(), "{width}×{height} shows the map");
-            let (x, y) = find(&rows, "it will depend on 24").unwrap_or_else(|| panic!("{width}: heading cut: {rows:#?}"));
-            assert!(x >= 2 && rows[usize::from(y)].starts_with('│'), "{width}: heading starts at column {x}");
-        }
-        let deps = app.anatomy.as_mut().unwrap().deps.get_mut("hyprland").unwrap();
-        (deps.depends, deps.depends_on, deps.added) = (0, Vec::new(), Vec::new());
-        for (width, height) in [(92u16, 32u16), (100, 34)] {
-            let rows = screen(&app, width, height);
-            let (x, y) = find(&rows, "depends on nothing").unwrap_or_else(|| panic!("{width}: {rows:#?}"));
-            assert!(x >= 2 && rows[usize::from(y)].starts_with('│'), "{width}: heading starts at column {x}: {}", rows[usize::from(y)]);
-        }
-    }
 
     #[test]
     fn update_details_use_the_rows_of_every_window() {
-        let app = demo_detail("hyprland");
+        let app = demo_detail("niri");
         let (buffer, scene) = render(&app, 170, 50, app.started + Duration::from_secs(60));
         let rect = scene.overlay.expect("window shown");
         let rows: Vec<String> = (rect.y..rect.bottom()).map(|y| (rect.x..rect.right()).map(|x| buffer[(x, y)].symbol()).collect()).collect();
         let column = |label: &str| rows.iter().find_map(|row| row.find(&format!("{label} ")).map(|at| row[..at].chars().count())).unwrap_or_else(|| panic!("{label} missing: {rows:#?}"));
-        let labels = ["version", "may fix", "rollback", "updating too", "new deps", "depends on", "required by"];
-        assert!(labels.iter().all(|label| column(label) == column("version")), "{rows:#?}");
+        let labels = ["commit", "risk", "source", "update with", "part", "may fix"];
+        assert!(labels.iter().all(|label| column(label) == column("commit")), "{rows:#?}");
         assert!(rows.iter().all(|row| !row.trim_matches('│').contains('│')), "{rows:#?}");
         assert!(!scene.placements.iter().any(|placement| rect.intersects(placement.rect)), "no picture inside the window");
     }
@@ -1050,7 +1087,7 @@ mod tests {
     #[test]
     fn the_iris_shows_only_risk_colours() {
         let now = Instant::now();
-        let mut app = App::new(true, false, now);
+        let mut app = all_panels(App::new(true, false, now));
         for (time, event) in demo_events().into_iter().filter(|(time, _)| *time <= 8_500) {
             app.apply(event, now + Duration::from_millis(time));
         }
@@ -1068,10 +1105,10 @@ mod tests {
     fn the_header_names_the_running_version() {
         let now = Instant::now();
         let version = env!("CARGO_PKG_VERSION");
-        let empty = App::new(true, false, now);
+        let empty = all_panels(App::new(true, false, now));
         let header = screen(&empty, 170, 50)[0].clone();
         assert!(header.contains(&format!("rumb {version}")) && !header.contains(&format!("rumb {version} ·")), "{header}");
-        let mut app = App::new(true, false, now);
+        let mut app = all_panels(App::new(true, false, now));
         for (time, event) in demo_events() {
             app.apply(event, now + Duration::from_millis(time));
         }
@@ -1084,7 +1121,7 @@ mod tests {
         let now = Instant::now();
         let mut app = crowded_app(now);
         let mut motion = Motion::new(true, now);
-        let start = source::Event::Start { last_upgrade: None, problems_since: "2026-10-21T20:00:00+02:00".into(), now: None, omarchy: false, last_upgraded: Vec::new() };
+        let start = source::Event::Start { last_upgrade: None, problems_since: "2026-10-21T20:00:00+02:00".into(), now: None, last_upgraded: Vec::new() };
         motion.push(start, r#"{"event":"start","problems_since":"2026-10-21T20:00:00+02:00"}"#, &mut app, now);
         let mut looked = Vec::new();
         for frame in 1..=30 * 24 {
@@ -1136,7 +1173,7 @@ mod tests {
         assert_eq!(app.tile, Some(5));
         press(&mut app, &[KeyCode::Enter]);
         assert!(app.overlay);
-        assert!(screen(&app, 150, 44).iter().any(|row| row.contains(":: BEFORE YOU UPDATE")));
+        assert!(screen(&app, 150, 47).iter().any(|row| row.contains(":: BEFORE YOU UPDATE")));
         press(&mut app, &[KeyCode::Esc]);
         assert!(!app.overlay);
         assert_eq!(app.tile, Some(5));
@@ -1181,23 +1218,24 @@ mod tests {
 
     fn system_app(now: Instant) -> App {
         let gib = 1024 * 1024 * 1024u64;
-        let mut app = App::new(false, false, now);
-        app.apply(done("reading the running kernel", json!({"running": "7.2.5-3-omarchy", "installed": "7.2.5-3", "package": "linux-omarchy", "uptime_seconds": 2_188_986, "reboot_pending": false})), now);
-        app.apply(done("reading the loaded nvidia module", json!({"loaded": "610.57.04", "installed": "610.57.04-1"})), now);
-        app.apply(done("reading the running Hyprland", json!({"running": "0.56.2", "installed": "0.56.2-2"})), now);
+        let mut app = all_panels(App::new(false, false, now));
+        app.apply(done("reading the running kernel", json!({"running": "6.18.59", "installed": "6.18.59", "package": "linux", "uptime_seconds": 2_188_986, "reboot_pending": false})), now);
+        app.apply(done("reading the loaded nvidia module", json!({"loaded": "610.57.04", "installed": "610.57.04"})), now);
+        app.apply(done("reading the running niri", json!({"running": "26.04", "installed": "26.04"})), now);
         let updates = json!([
-            {"name": "linux-omarchy", "old": "7.2.5-3", "new": "7.2.8-9", "source": "repo", "bump": "patch", "risk": "medium", "reason": "critical package", "download_bytes": 6 * gib, "installed_delta_bytes": gib / 2},
-            {"name": "nvidia-utils", "old": "610.57.04-1", "new": "615.78.08-1", "source": "repo", "bump": "major", "risk": "high", "reason": "critical package, major version jump", "download_bytes": gib, "installed_delta_bytes": 0},
-            {"name": "netwatch-tui", "old": "0.4.0-1", "new": "0.5.0-1", "source": "aur", "bump": "minor", "risk": "low"}
+            {"name": "nixpkgs", "old": "1c89083", "new": "5c9de89", "source": "flake", "bump": "commit", "risk": "medium", "reason": "critical input, locked 41 days ago"},
+            {"name": "home-manager", "old": "095fef2", "new": "77be0d4", "source": "flake", "bump": "commit", "risk": "high", "reason": "critical input, locked 112 days ago"},
+            {"name": "fenix", "old": "44ec3e0", "new": "91a7d3e", "source": "flake", "bump": "commit", "risk": "low", "reason": "locked 5 days ago"}
         ]);
         app.apply(stage("updates", json!({"updates": updates})), now);
         app.apply(stage("problems", json!({"problems": [
-            {"kind": "journal", "subject": "/usr/bin/conmon", "count": 1915, "package": "conmon", "status": "no-update"},
+            {"kind": "journal", "subject": "conmon-2.1.13/bin/conmon", "count": 1915, "package": "conmon", "status": "no-update"},
             {"kind": "journal", "subject": "hancore", "count": 3, "package": "", "status": "unknown-owner"}
         ], "activity": [], "config_errors": 0})), now);
-        app.apply(stage("anatomy", json!({"packages": 1342, "explicit": 300, "orphans": 12, "cache_bytes": 1000, "kernel_running": "7.2.5-3-omarchy", "kernel_installed": "7.2.5-3", "kernel_package": "linux-omarchy", "hostname": "box"})), now);
-        app.apply(stage("preflight", json!({"free_bytes": 167 * gib, "free_ok": true, "snapper_configured": true, "snapshot_before_update": true, "snapshot_by": "omarchy-update", "disk_total_bytes": 465 * gib, "disk_used_bytes": 289 * gib})), now);
+        app.apply(stage("anatomy", json!({"store_paths": 3828, "system_packages": 266, "user_packages": 3, "old_generations": 12, "closure_bytes": 33 * gib, "kernel_running": "6.18.59", "kernel_installed": "6.18.59", "kernel_package": "linux", "hostname": "box", "generation": 498})), now);
+        app.apply(stage("preflight", json!({"free_bytes": 167 * gib, "free_ok": true, "disk_total_bytes": 465 * gib, "disk_used_bytes": 289 * gib, "rollback_generation": 497, "boot_total_bytes": 256 << 20, "boot_free_bytes": 133 << 20})), now);
         app.apply(source::Event::Result {}, now);
+        assert_eq!(app.error, None);
         app
     }
 
@@ -1226,9 +1264,9 @@ mod tests {
     #[test]
     fn the_since_ring_sweeps_the_time_since_the_upgrade() {
         let now = Instant::now();
-        let mut app = App::new(false, false, now);
+        let mut app = all_panels(App::new(false, false, now));
         let upgrade = "2026-10-16T22:58:12+02:00";
-        app.apply(source::Event::Start { last_upgrade: Some(upgrade.into()), problems_since: upgrade.into(), now: Some("2026-10-17T23:58:12+02:00".into()), omarchy: false, last_upgraded: Vec::new() }, now);
+        app.apply(source::Event::Start { last_upgrade: Some(upgrade.into()), problems_since: upgrade.into(), now: Some("2026-10-17T23:58:12+02:00".into()), last_upgraded: Vec::new() }, now);
         let (_, scene) = render(&app, 358, 85, now + Duration::from_secs(60));
         let hands: Vec<u16> = scene.placements.iter().filter_map(|placement| if let page::Picture::Ring(spec) = &placement.picture { spec.hand } else { None }).collect();
         assert_eq!(hands, [35]);
@@ -1237,7 +1275,7 @@ mod tests {
     #[test]
     fn a_detail_window_keeps_the_dots_it_leaves_free() {
         let now = Instant::now();
-        let mut app = App::new(true, false, now);
+        let mut app = all_panels(App::new(true, false, now));
         for (time, event) in demo_events() {
             app.apply(event, now + Duration::from_millis(time));
         }
@@ -1302,11 +1340,11 @@ mod tests {
     fn the_band_never_drops_a_red_or_yellow_fact() {
         let now = Instant::now();
         let pal = palette::Palette::paper();
-        for (width, height) in [(150, 44), (170, 50), (358, 85)] {
-            let mut app = App::new(false, false, now);
-            app.apply(done("reading the running kernel", json!({"running": "7.2.5-3-omarchy", "installed": "7.2.8-9", "package": "linux-omarchy", "uptime_seconds": 90_000, "reboot_pending": true})), now);
-            app.apply(done("reading the loaded nvidia module", json!({"loaded": "610.57.04", "installed": "615.78.08-1"})), now);
-            app.apply(done("reading the running Hyprland", json!({"running": "0.56.2", "installed": "0.56.3-1"})), now);
+        for (width, height) in [(150, 47), (170, 50), (358, 85)] {
+            let mut app = all_panels(App::new(false, false, now));
+            app.apply(done("reading the running kernel", json!({"running": "6.18.58", "installed": "6.18.59", "package": "linux", "uptime_seconds": 90_000, "reboot_pending": true})), now);
+            app.apply(done("reading the loaded nvidia module", json!({"loaded": "610.57.04", "installed": "615.78.08"})), now);
+            app.apply(done("reading the running niri", json!({"running": "25.08", "installed": "25.11"})), now);
             let (buffer, _) = render(&app, width, height, now);
             let rows: Vec<String> = (0..height).map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect()).collect();
             for word in ["· reboot", "· relogin"] {
@@ -1315,54 +1353,17 @@ mod tests {
             }
             assert_eq!(rows.iter().filter(|row| row.contains("· reboot")).count(), 2, "{width}x{height}");
 
-            let mut app = App::new(false, false, now);
-            app.apply(done("reading the loaded nvidia module", json!({"loaded": "610.57.04", "installed": "610.57.04-1"})), now);
-            app.apply(done("reading the running Hyprland", json!({"running": "0.56.2", "installed": "0.56.2-2"})), now);
-            app.apply(stage("updates", json!({"updates": [{"name": "nvidia-utils", "old": "610.57.04-1", "new": "615.78.08-1", "source": "repo", "bump": "major", "risk": "high"}]})), now);
+            let mut app = all_panels(App::new(false, false, now));
+            app.apply(done("reading the loaded nvidia module", json!({"loaded": "610.57.04", "installed": "610.57.04"})), now);
+            app.apply(done("reading the running niri", json!({"running": "25.11", "installed": "25.11"})), now);
             app.apply(stage("problems", json!({"problems": [], "activity": [], "config_errors": 2})), now);
             let rows = screen(&app, width, height);
-            assert!(find(&rows, "· 615.78 pending").is_some(), "nvidia at {width}x{height}");
+            assert!(find(&rows, "nvidia 610.57 loaded ✓").is_some(), "nvidia at {width}x{height}");
             assert!(find(&rows, "· 2 config errors").is_some(), "config at {width}x{height}");
         }
     }
 
-    #[test]
-    fn before_you_update_says_what_really_happens() {
-        let now = Instant::now();
-        let mut app = system_app(now);
-        app.tile = Some(5);
-        app.overlay = true;
-        let rows = screen(&app, 358, 85);
-        for line in ["omarchy-update takes one first · pacman -Syu takes none", "after this update · kernel 7.2.5-3 → 7.2.8-9 · nvidia 610.57 → 615.78", "167 GiB available · ≈ 7.5 GiB needed", "nvidia-utils  610.57.04 → 615.78.08 · critical package, major version jump"] {
-            assert!(find(&rows, line).is_some(), "missing {line:?}");
-        }
-        app.overlay = false;
-        let value = |rows: &[String], name: &str| {
-            let row = rows.iter().take(16).find(|row| row.contains(&format!(" {name} "))).unwrap_or_else(|| panic!("no {name} row"));
-            row.split(&format!(" {name} ")).nth(1).and_then(|tail| tail.split('│').next()).unwrap_or_default().trim().to_string()
-        };
-        let wide = screen(&app, 358, 85);
-        assert_eq!([value(&wide, "risk"), value(&wide, "reboot"), value(&wide, "snapshot"), value(&wide, "space")], ["high", "after update", "omarchy-update", "ok"]);
-        let narrow = screen(&app, 150, 44);
-        assert_eq!([value(&narrow, "reboot"), value(&narrow, "snapshot")], ["after update", "omarchy"]);
-        assert!(find(&wide, "³UPDATES · 3 · 7.0 GiB download + 1 AUR").is_some());
-    }
 
-    #[test]
-    fn space_needed_is_download_plus_growth() {
-        let now = Instant::now();
-        let mut app = system_app(now);
-        assert_eq!(app.space_needed(), 7 * 1024 * 1024 * 1024 + 512 * 1024 * 1024);
-        assert_eq!(app.space_severity(), Some(app::Severity::Ok));
-        if let Some(preflight) = app.preflight.as_mut() {
-            preflight.free_bytes = 7 * 1024 * 1024 * 1024;
-        }
-        assert_eq!(app.space_severity(), Some(app::Severity::Bad));
-        for update in &mut app.updates {
-            update.installed_delta_bytes = Some(-(1 << 40));
-        }
-        assert_eq!(app.space_needed(), 7 * 1024 * 1024 * 1024);
-    }
 
     #[test]
     fn windows_open_over_what_they_explain() {
@@ -1388,15 +1389,15 @@ mod tests {
     #[test]
     fn events_from_earlier_days_show_their_date() {
         let now = Instant::now();
-        let mut app = App::new(false, false, now);
+        let mut app = all_panels(App::new(false, false, now));
         app.apply(source::Event::Journal { time: "13:45:10".into(), day: "2000-01-02".into(), ident: "earlier".into(), program: String::new(), message: "old".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
         app.apply(source::Event::Journal { time: "14:00:00".into(), day: app::today(), ident: "today".into(), program: String::new(), message: "new".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
-        let rows = screen(&app, 150, 44);
+        let rows = screen(&app, 150, 47);
         assert!(find(&rows, "01-02 13:45").is_some());
         assert!(find(&rows, "14:00:00").is_some());
         assert!(!rows.iter().any(|row| row.contains("following")), "the feed is not live yet");
         app.apply(source::Event::Result {}, now);
-        assert!(screen(&app, 150, 44).iter().any(|row| row.contains("LIVE EVENTS · following")));
+        assert!(screen(&app, 150, 47).iter().any(|row| row.contains("LIVE EVENTS · following")));
     }
 
     #[test]
@@ -1405,23 +1406,14 @@ mod tests {
         assert!(screen(&app, 358, 85).iter().any(|row| row.contains("1 of 450")));
     }
 
-    #[test]
-    fn the_map_head_line_calls_a_rebuild_a_rebuild() {
-        let now = Instant::now();
-        let mut app = crowded_app(now);
-        app.apply(stage("updates", json!({"updates": [{"name": "mesa", "old": "1:25.2.4-1", "new": "1:25.2.4-2", "source": "repo", "bump": "rebuild", "risk": "low"}]})), now);
-        let rows = screen(&app, 358, 85);
-        assert!(rows.iter().any(|row| row.contains("▸ mesa  1:25.2.4 rebuild · low")));
-        assert!(!rows.iter().any(|row| row.contains("1:25.2.4 → 1:25.2.4")));
-    }
 
     #[test]
     fn problems_without_an_owner_belong_to_other() {
         use app::{Subsystem, problem_part};
         assert_eq!(problem_part("journal", "hancore", ""), Subsystem::Apps);
-        assert_eq!(problem_part("config", "Hyprland config errors", ""), Subsystem::Compositor);
+        assert_eq!(problem_part("config", "niri config errors", ""), Subsystem::Compositor);
         assert_eq!(problem_part("journal", "kernel", ""), Subsystem::Kernel);
-        assert_eq!(problem_part("crash", "/usr/bin/Hyprland", "hyprland"), Subsystem::Compositor);
+        assert_eq!(problem_part("crash", "niri-25.11/bin/niri", "niri"), Subsystem::Compositor);
         assert_eq!(Subsystem::Apps.label(), "other");
         let rows = screen(&system_app(Instant::now()), 358, 85);
         assert!(find(&rows, " 2  other").is_some() || find(&rows, " 2 other").is_some(), "badge counts the unowned problem");
@@ -1467,21 +1459,6 @@ mod tests {
         assert_eq!(app.part, None);
     }
 
-    #[test]
-    fn the_kernel_window_names_the_reboot_this_update_brings() {
-        let now = Instant::now();
-        let mut app = system_app(now);
-        app.part = Some(0);
-        app.overlay = true;
-        let rows = screen(&app, 358, 85);
-        assert!(find(&rows, ":: kernel").is_some());
-        assert!(find(&rows, "after this update · kernel 7.2.5-3 → 7.2.8-9").is_some());
-        assert!(find(&rows, "linux-omarchy  7.2.5 → 7.2.8").is_some());
-        app.part = Some(6);
-        let rows = screen(&app, 358, 85);
-        assert!(find(&rows, "1,915 × error · /usr/bin/conmon").is_some());
-        assert!(find(&rows, "3 × error · hancore").is_some());
-    }
 
     #[test]
     fn problem_windows_say_only_what_is_known() {
@@ -1503,7 +1480,7 @@ mod tests {
     fn c_copies_the_open_window_as_text_in_one_piece() {
         let pal = palette::Palette::labra();
         let started = Instant::now();
-        let mut app = App::new(true, false, started);
+        let mut app = all_panels(App::new(true, false, started));
         for (time, event) in demo_events() {
             if time <= 30_000 {
                 app.apply(event, started + Duration::from_millis(time));
@@ -1519,7 +1496,7 @@ mod tests {
             page::overlay_text(&app, &pal).unwrap().lines().collect::<Vec<_>>(),
             [
                 "dbus-broker-launch",
-                "subject       /usr/bin/dbus-broker-launch",
+                "subject       dbus-broker-36/bin/dbus-broker-launch",
                 "kind          error",
                 "count         151 since 10-03 21:10",
                 "last          10-17 23:38",
@@ -1532,26 +1509,25 @@ mod tests {
         app.focus = Pane::Updates;
         app.select(Pane::Updates, 0);
         let text = page::overlay_text(&app, &pal).unwrap();
-        for line in ["risk          high · critical package, minor version jump", "may fix       42 × crash · /usr/bin/Hyprland", "updating too  quickshell, mesa", "new deps      hyprwire"] {
+        for line in ["commit        8a41c0e → d3b9f72", "risk          high · critical input, locked 112 days ago", "update with   nix flake update nixpkgs"] {
             assert!(text.lines().any(|row| row == line), "{line} missing in\n{text}");
         }
-        assert!(text.lines().any(|row| row.starts_with("depends on    24 · aquamarine, cairo, ") && !row.contains("more")), "{text}");
         app.overlay = false;
         app.tile = Some(5);
         assert_eq!(press(&mut app, &[KeyCode::Char('c')]), Action::Nothing);
         app.overlay = true;
         assert_eq!(press(&mut app, &[KeyCode::Char('c')]), Action::Copy);
-        assert!(page::overlay_text(&app, &pal).unwrap().starts_with("BEFORE YOU UPDATE\nrisk          2 high\n"));
+        assert!(page::overlay_text(&app, &pal).unwrap().starts_with("BEFORE YOU UPDATE\nrisk          1 high\n"), "{}", page::overlay_text(&app, &pal).unwrap());
         app.tile = None;
         app.part = Some(0);
         assert_eq!(press(&mut app, &[KeyCode::Char('c')]), Action::Copy);
-        assert!(page::overlay_text(&app, &pal).unwrap().starts_with("kernel\nrunning       6.17.2-arch1-1\n"));
+        assert!(page::overlay_text(&app, &pal).unwrap().starts_with("kernel\nrunning       6.17.2\n"), "{}", page::overlay_text(&app, &pal).unwrap());
     }
 
     #[test]
     fn j_finds_journal_lines_by_program_when_the_identifier_differs() {
         let now = Instant::now();
-        let mut app = App::new(false, false, now);
+        let mut app = all_panels(App::new(false, false, now));
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [{"kind": "journal", "subject": "/usr/bin/conmon", "count": 1915, "package": "conmon", "status": "no-update"}], "activity": []}) }, now);
         app.apply(source::Event::Journal { time: "14:17:39".into(), day: String::new(), ident: "peaceful_golick".into(), program: "conmon".into(), message: "Compiling rumb".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
         app.apply(source::Event::Journal { time: "14:17:40".into(), day: String::new(), ident: "playerctld".into(), program: "playerctld".into(), message: "lost the bus".into(), priority: String::new(), unit: String::new(), package: String::new() }, now);
@@ -1566,7 +1542,7 @@ mod tests {
     #[test]
     fn a_live_journal_event_shows_its_priority_and_unit() {
         let now = Instant::now();
-        let mut app = App::new(false, false, now);
+        let mut app = all_panels(App::new(false, false, now));
         app.apply(source::Event::Journal { time: "14:20:00".into(), day: String::new(), ident: "bluetoothd".into(), program: "bluetoothd".into(), message: "Failed to set mode".into(), priority: "2".into(), unit: "bluetooth.service".into(), package: String::new() }, now);
         app.visible = [false, false, false, false, true];
         app.focus = Pane::Events;
@@ -1582,7 +1558,7 @@ mod tests {
     #[test]
     fn a_journal_problem_shows_its_newest_message() {
         let now = Instant::now();
-        let mut app = App::new(false, false, now);
+        let mut app = all_panels(App::new(false, false, now));
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [{"kind": "journal", "subject": "/usr/lib/bluetooth/bluetoothd", "count": 36, "package": "bluez", "status": "no-update", "last": "10-17 23:52", "message": "src/adapter.c: Failed to clear UUIDs: Busy (0x0a)"}], "activity": []}) }, now);
         app.visible = [false, false, false, true, false];
         app.focus = Pane::Problems;
@@ -1594,7 +1570,7 @@ mod tests {
 
     fn demo_detail(name: &str) -> App {
         let now = Instant::now();
-        let mut app = App::new(true, false, now);
+        let mut app = all_panels(App::new(true, false, now));
         for (time, event) in demo_events() {
             if time <= 26_000 {
                 app.apply(event, now + Duration::from_millis(time));
@@ -1607,35 +1583,11 @@ mod tests {
         app
     }
 
-    #[test]
-    fn an_update_shows_the_dependencies_of_its_new_version() {
-        let lines = window(&demo_detail("hyprland"));
-        for line in ["updating too  quickshell, mesa", "new deps      hyprwire", "dropped deps  libxcursor"] {
-            assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
-        }
-        let depends = &lines[line_at(&lines, "depends on")];
-        assert!(depends.starts_with("depends on    24 · aquamarine, cairo, glslang"), "{depends}");
-        assert!(!depends.contains("hyprwire") && !depends.contains("mesa"), "a name listed above is not repeated: {depends}");
-        assert_eq!(lines.join("\n").matches("libxcursor").count(), 1);
-        let rows = screen(&demo_detail("hyprland"), 271, 60);
-        assert!(rows.iter().any(|row| row.contains("depends on    24 · aquamarine, cairo, glslang, hyprcursor, hyprgraphics, hyprlang, + 16 more")), "{rows:#?}");
-        let (x, y) = find(&rows, "required by   11 · hypridle").unwrap();
-        assert!(rows[usize::from(y) + 1][..].chars().skip(usize::from(x) + 14).collect::<String>().starts_with("hyprpolkitagent, "), "the second row of names sits under the first");
-    }
 
-    #[test]
-    fn a_new_dependency_with_a_problem_keeps_the_problem_colour() {
-        let app = demo_detail("quickshell");
-        assert!(window(&app).iter().any(|line| line == "new deps      bluez · 36 × error · /usr/lib/bluetooth/bluetoothd"));
-        let (buffer, _) = render(&app, 170, 50, app.started + Duration::from_secs(60));
-        let rows: Vec<String> = (0..50u16).map(|y| (0..170u16).map(|x| buffer[(x, y)].symbol()).collect()).collect();
-        let at = find(&rows, "bluez ·").expect("bluez is listed as a new dependency");
-        assert_eq!(buffer[at].fg, palette::Palette::paper().teal);
-    }
 
     fn demo_map(columns: u16, rows: u16) -> (u32, u32, ink::OrbitSpec) {
         let now = Instant::now();
-        let mut app = App::new(true, false, now);
+        let mut app = all_panels(App::new(true, false, now));
         for (time, event) in demo_events() {
             if time <= 26_000 {
                 app.apply(event, now + Duration::from_millis(time));
@@ -1654,48 +1606,7 @@ mod tests {
             .expect("the update map is drawn")
     }
 
-    #[test]
-    fn the_map_links_end_at_the_ports_outside_the_dial() {
-        let (width, height, spec) = demo_map(170, 50);
-        assert_eq!(spec.links.iter().filter(|link| link.left).count(), 24);
-        let pal = palette::Palette::paper();
-        let with = ink::orbit(&spec, &pal, width, height, 21.0).unwrap();
-        let without = ink::orbit(&ink::OrbitSpec { links: Vec::new(), ..spec }, &pal, width, height, 21.0).unwrap();
-        let (cx, cy) = (width as f32 / 2.0, height as f32 / 2.0);
-        let radius = ink::dial(width as f32, height as f32, 1.0);
-        let changed: Vec<f32> = with
-            .pixels()
-            .iter()
-            .zip(without.pixels())
-            .enumerate()
-            .filter(|(_, (a, b))| a != b)
-            .map(|(index, _)| (((index as u32 % width) as f32 - cx).powi(2) + ((index as u32 / width) as f32 - cy).powi(2)).sqrt())
-            .collect();
-        assert!(!changed.is_empty());
-        let inside = changed.iter().filter(|distance| **distance < radius * 1.08).count();
-        assert_eq!(inside, 0, "{inside} of {} link pixels inside the dial", changed.len());
-    }
 
-    #[test]
-    fn the_map_leaves_room_for_the_links() {
-        let pal = palette::Palette::paper();
-        for (columns, rows) in [(110, 36), (130, 40), (170, 50)] {
-            let (width, height, spec) = demo_map(columns, rows);
-            let with = ink::orbit(&spec, &pal, width, height, 21.0).unwrap();
-            let without = ink::orbit(&ink::OrbitSpec { links: Vec::new(), ..spec }, &pal, width, height, 21.0).unwrap();
-            let reach = with
-                .pixels()
-                .iter()
-                .zip(without.pixels())
-                .enumerate()
-                .filter(|(_, (a, b))| a != b)
-                .map(|(index, _)| index as u32 % width)
-                .filter(|x| *x < width / 2)
-                .max()
-                .unwrap();
-            assert!(reach >= 66, "the links reach only {reach} px into a {width} px map at {columns}x{rows}");
-        }
-    }
 
     #[test]
     fn the_map_labels_stay_inside_the_picture() {
@@ -1731,7 +1642,7 @@ mod tests {
     }
 
     fn demo_until(millis: u64, start: Instant) -> App {
-        let mut app = App::new(true, true, start);
+        let mut app = all_panels(App::new(true, true, start));
         for (time, event) in demo_events() {
             if time <= millis {
                 app.apply(event, start);
@@ -1756,51 +1667,12 @@ mod tests {
         assert!(settled.nodes.iter().all(|node| !node.faint));
     }
 
-    #[test]
-    fn a_new_selection_brings_its_names_in_from_the_ports() {
-        let start = Instant::now();
-        let mut app = demo_until(26_000, start);
-        let mut motion = Motion::new(true, start);
-        motion.step(&mut app, start, 0.0);
-        let later = start + Duration::from_secs(3);
-        app.select(Pane::Updates, 1);
-        motion.step(&mut app, later, 0.0);
-        let chosen = app.visible_updates()[1].name.clone();
-        let names = app.anatomy.as_ref().unwrap().deps[&chosen].depends_on.clone();
-        let shown = |after: Duration| {
-            let (_, text) = draw_map(&app, &motion, later + after);
-            names.iter().filter(|name| text.contains(&format!(" {name} "))).count()
-        };
-        let (early, full) = (shown(Duration::from_millis(20)), shown(Duration::from_secs(1)));
-        assert_eq!(full, names.len().min(23));
-        assert!(early < full / 2, "{early} of {full} names right after the selection");
-    }
 
-    #[test]
-    fn a_rescan_brings_the_map_names_in_again() {
-        let start = Instant::now();
-        let mut app = demo_until(26_000, start);
-        let mut motion = Motion::new(true, start);
-        motion.step(&mut app, start, 0.0);
-        let rescan = start + Duration::from_secs(5);
-        let anatomy = demo_events().into_iter().map(|(_, event)| event).find(|event| matches!(event, source::Event::Stage { stage, .. } if stage == "anatomy")).unwrap();
-        app.apply(anatomy, rescan);
-        motion.step(&mut app, rescan, 0.0);
-        let chosen = app.visible_updates()[0].name.clone();
-        let names = app.anatomy.as_ref().unwrap().deps[&chosen].depends_on.clone();
-        let shown = |after: Duration| {
-            let (_, text) = draw_map(&app, &motion, rescan + after);
-            names.iter().filter(|name| text.contains(&format!(" {name} "))).count()
-        };
-        let (early, full) = (shown(Duration::from_millis(20)), shown(Duration::from_secs(1)));
-        assert_eq!(full, names.len());
-        assert!(early < full / 2, "{early} of {full} names right after the rescan");
-    }
 
     #[test]
     fn scan_results_show_as_soon_as_they_arrive() {
         let start = Instant::now();
-        let mut app = App::new(false, true, start);
+        let mut app = all_panels(App::new(false, true, start));
         let mut motion = Motion::new(true, start);
         let mut at = 0;
         for line in include_str!("../demo.ndjson").lines().filter(|line| !line.trim().is_empty()) {
@@ -1819,54 +1691,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn lists_are_held_only_while_their_data_flies() {
-        let start = Instant::now();
-        let mut app = App::new(false, true, start);
-        let mut motion = Motion::new(true, start);
-        let mut at = 0;
-        let mut last_updates = 0;
-        for line in include_str!("../demo.ndjson").lines().filter(|line| !line.trim().is_empty()) {
-            let value: Value = serde_json::from_str(line).unwrap();
-            at += value["_delay"].as_u64().unwrap_or(0);
-            let now = start + Duration::from_millis(at);
-            motion.push(serde_json::from_str(line).unwrap(), line, &mut app, now);
-            motion.step(&mut app, now, 0.0);
-            if value["event"] == "stage" && value["stage"] == "updates" {
-                last_updates = at;
-            }
-        }
-        let later = start + Duration::from_millis(last_updates + 1000);
-        motion.step(&mut app, later, 1.0);
-        assert!(!motion.held(motion::Target::List(Pane::Updates.index() as u8), later), "the updates list still waits a second after the recheck after the demo's pacman transaction");
-
-        let mut app = App::new(false, true, start);
-        let mut motion = Motion::new(true, start);
-        let mut at = 0;
-        let mut first = None;
-        for line in include_str!("../demo.ndjson").lines().filter(|line| !line.trim().is_empty()) {
-            let value: Value = serde_json::from_str(line).unwrap();
-            at += value["_delay"].as_u64().unwrap_or(0);
-            let now = start + Duration::from_millis(at);
-            first.get_or_insert_with(|| line.to_string());
-            motion.push(serde_json::from_str(line).unwrap(), line, &mut app, now);
-            motion.step(&mut app, now, 0.0);
-            if value["line"] == "transaction completed" {
-                let recheck = first.clone().unwrap();
-                motion.push(serde_json::from_str(&recheck).unwrap(), &recheck, &mut app, now);
-                let later = now + Duration::from_millis(1000);
-                motion.step(&mut app, later, 1.0);
-                assert!(!motion.held(motion::Target::Tile(2), later), "SINCE UPGRADE still waits a second after a recheck starts behind the transaction's lines");
-                return;
-            }
-        }
-        panic!("the demo has no pacman transaction");
-    }
 
     #[test]
     fn each_scan_result_is_revealed_once() {
         let start = Instant::now();
-        let mut app = App::new(false, true, start);
+        let mut app = all_panels(App::new(false, true, start));
         let mut motion = Motion::new(true, start);
         let mut stream = Vec::new();
         let mut at = 0;
@@ -1892,29 +1721,6 @@ mod tests {
         assert!(first.iter().all(Option::is_some));
     }
 
-    #[test]
-    fn an_idle_glance_at_the_map_lets_its_names_light_up() {
-        let start = Instant::now();
-        let mut app = demo_until(26_000, start);
-        let mut motion = Motion::new(true, start);
-        let mut now = start;
-        let mut glow = None;
-        while glow.is_none() && now < start + Duration::from_secs(60) {
-            now += Duration::from_millis(33);
-            motion.step(&mut app, now, 0.033);
-            if motion.map_glow(now).is_some() {
-                glow = Some(now);
-            }
-        }
-        let glow = glow.expect("an idle glance at the update list lights the names");
-        let pal = palette::Palette::paper();
-        let colours = |at: Instant| {
-            let mut terminal = Terminal::new(TestBackend::new(170, 50)).unwrap();
-            terminal.draw(|frame| drop(page::draw(frame, &app, &motion, &pal, at, (10, 21)))).unwrap();
-            terminal.backend().buffer().content().iter().map(|cell| cell.fg).collect::<std::collections::HashSet<_>>().len()
-        };
-        assert!(colours(glow + Duration::from_millis(300)) > colours(glow + Duration::from_secs(6)));
-    }
 
     #[test]
     fn paused_events_keep_the_selected_line_when_new_ones_arrive() {
@@ -1938,7 +1744,7 @@ mod tests {
     #[test]
     fn live_journal_lines_count_until_the_next_problem_stage() {
         let now = Instant::now();
-        let mut app = App::new(false, false, now);
+        let mut app = all_panels(App::new(false, false, now));
         app.apply(source::Event::Stage { stage: "problems".into(), data: json!({"problems": [], "activity": []}) }, now);
         app.apply(source::Event::Result {}, now);
         for _ in 0..3 {
@@ -1964,7 +1770,7 @@ mod tests {
         assert_eq!(std::fs::metadata(&first).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o077, 0);
         let text = std::fs::read_to_string(&first).unwrap();
-        for part in ["# rumb report", "## Updates (450)", "## Problems (120)", "## Disk and packages", "## Live events", "pkg-000-with-a-rather-long-name", "freeable with paccache -rk1"] {
+        for part in ["# rumb report", "## Updates (450)", "## Problems (120)", "## Disk and store", "## Live events", "pkg-000-with-a-rather-long-name", "- old generations: 51"] {
             assert!(text.contains(part), "missing {part}");
         }
         assert!(!text.chars().any(|ch| ch.is_control() && ch != '\n'), "control character in the report");
@@ -1972,40 +1778,25 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[test]
-    fn only_real_upgrades_count_as_applied() {
-        let now = Instant::now();
-        let mut app = App::new(false, false, now);
-        let update = |name: &str| json!({"name": name, "old": "1.0-1", "new": "2.0-1", "source": "repo", "risk": "low"});
-        app.apply(source::Event::Stage { stage: "updates".into(), data: json!({"updates": [update("kept"), update("newer"), update("gone"), update("back")]}) }, now);
-        for line in ["reinstalled kept (1.0-1)", "upgraded newer (1.0-1 -> 2.1-1)", "removed gone (1.0-1)", "downgraded back (1.0-1 -> 0.9-1)"] {
-            app.apply(source::Event::Activity { line: line.into() }, now);
-        }
-        let pending: Vec<&str> = app.updates.iter().map(|u| u.name.as_str()).collect();
-        let applied: Vec<(&str, &str)> = app.applied.iter().map(|(u, _)| (u.name.as_str(), u.new.as_str())).collect();
-        assert_eq!(pending, ["kept", "back"]);
-        assert_eq!(applied, [("newer", "2.1-1")]);
-        assert_eq!(app.events.iter().filter(|event| event.source == app::Source::Pacman).count(), 4);
-    }
 
     #[test]
     fn unreadable_stage_data_fails_the_scan_with_its_reason() {
         let now = Instant::now();
-        let mut app = App::new(false, false, now);
+        let mut app = all_panels(App::new(false, false, now));
         app.apply(source::Event::Stage { stage: "updates".into(), data: json!({"updates": [{"name": "broken"}]}) }, now);
         assert_eq!(app.verdict().0, "SCAN FAILED");
         let error = app.error.clone().unwrap_or_default();
         assert!(error.contains("updates"), "{error}");
-        app.error = Some("Missing required command: checkupdates".into());
-        assert!(screen(&app, 170, 50).iter().any(|row| row.contains("Missing required command: checkupdates")));
+        app.error = Some("Missing required command: jq".into());
+        assert!(screen(&app, 170, 50).iter().any(|row| row.contains("Missing required command: jq")));
     }
 
     #[test]
     fn journal_lines_without_a_program_still_load() {
         let now = Instant::now();
-        let mut app = App::new(false, false, now);
+        let mut app = all_panels(App::new(false, false, now));
         let line = json!({"time": "20:29:22", "day": "2026-10-21", "ident": "kernel", "program": null, "message": "virt/tdx: TDX not supported by the host platform"});
-        app.apply(source::Event::Stage { stage: "anatomy".into(), data: json!({"packages": 1, "explicit": 1, "orphans": 0, "cache_bytes": 0, "kernel_running": "7.2.8-10-omarchy", "journal": [line]}) }, now);
+        app.apply(source::Event::Stage { stage: "anatomy".into(), data: json!({"store_paths": 1, "system_packages": 1, "old_generations": 0, "closure_bytes": 0, "kernel_running": "6.18.59", "journal": [line]}) }, now);
         assert_eq!(app.error, None);
         assert_eq!(app.anatomy.as_ref().map(|anatomy| anatomy.journal[0].program.as_str()), Some(""));
         let live: source::Event = serde_json::from_str(r#"{"event": "journal", "time": "20:29:24", "ident": "kernel", "program": null, "message": "Bluetooth: hci0: Reading supported features failed (-16)"}"#).unwrap();
@@ -2016,7 +1807,7 @@ mod tests {
     fn a_selected_part_keeps_its_problem_badge() {
         let pal = palette::Palette::paper();
         let now = Instant::now();
-        let mut app = App::new(true, false, now);
+        let mut app = all_panels(App::new(true, false, now));
         for (time, event) in demo_events() {
             app.apply(event, now + Duration::from_millis(time));
         }
@@ -2044,7 +1835,7 @@ mod tests {
     #[test]
     fn a_terminal_without_pictures_says_so_in_place_of_the_eye() {
         let now = Instant::now();
-        let mut app = App::new(true, false, now);
+        let mut app = all_panels(App::new(true, false, now));
         for (time, event) in demo_events() {
             app.apply(event, now + Duration::from_millis(time));
         }
@@ -2057,8 +1848,8 @@ mod tests {
     #[test]
     fn a_later_start_moves_the_window_but_not_the_intro() {
         let now = Instant::now();
-        let mut app = App::new(false, false, now);
-        let start = |since: &str| source::Event::Start { last_upgrade: Some(since.into()), problems_since: since.into(), now: None, omarchy: false, last_upgraded: Vec::new() };
+        let mut app = all_panels(App::new(false, false, now));
+        let start = |since: &str| source::Event::Start { last_upgrade: Some(since.into()), problems_since: since.into(), now: None, last_upgraded: Vec::new() };
         app.apply(start("2026-10-01T10:00:00+02:00"), now);
         let first = app.start_at;
         app.apply(start("2026-10-19T12:00:00+02:00"), now + Duration::from_secs(90));
@@ -2136,13 +1927,14 @@ mod tests {
             .unwrap_or_default();
         let only: Option<Vec<u64>> = std::env::var("RUMB_ONLY").ok().map(|text| text.split(',').filter_map(|frame| frame.trim().parse().ok()).collect());
         let started = Instant::now();
-        let mut app = App::new(false, true, started);
+        let mut app = all_panels(App::new(false, true, started));
         app.theme.clone_from(&theme.name);
         app.pictures = std::env::var_os("RUMB_NO_PICTURES").is_none();
         if let Ok(panels) = std::env::var("RUMB_PANELS") {
-            for (index, on) in panels.chars().enumerate().take(app.visible.len()) {
-                app.visible[index] = on == '1';
+            for (index, on) in panels.chars().enumerate().take(app.wanted.len()) {
+                app.wanted[index] = on == '1';
             }
+            app.refit();
         }
         let mut motion = Motion::new(true, started);
         let (mut next, mut chosen, mut pressed, mut last) = (0usize, 0usize, 0usize, started);
@@ -2172,7 +1964,6 @@ mod tests {
                         filter_theme(&mut theme, &app.theme_filter);
                         app.theme.clone_from(&theme.name);
                     }
-                    Action::CopyCommand => app.status = Some((format!("copied {}", page::CACHE_COMMAND), true, now)),
                     _ if (app.focus, app.lists[app.focus.index()].selected, app.tile, app.part) != before => motion.select(&app, now),
                     _ => {}
                 }
@@ -2195,7 +1986,7 @@ mod tests {
 
     fn demo_at(millis: u64) -> App {
         let now = Instant::now();
-        let mut app = App::new(true, false, now);
+        let mut app = all_panels(App::new(true, false, now));
         for (time, event) in demo_events() {
             if time <= millis {
                 app.apply(event, now + Duration::from_millis(time));
@@ -2212,16 +2003,6 @@ mod tests {
         lines.iter().position(|line| line.contains(text)).unwrap_or_else(|| panic!("{text:?} missing in {lines:?}"))
     }
 
-    #[test]
-    fn the_owner_window_says_how_risky_the_update_is_that_may_fix_a_problem() {
-        let mut app = demo_at(30_000);
-        app.tile = Some(3);
-        app.overlay = true;
-        let lines = window(&app);
-        assert!(lines[line_at(&lines, "hyprland  0.55.2")].ends_with("hyprland  0.55.2 → 0.56.0 · high risk · critical package, minor version jump"));
-        assert!(lines[line_at(&lines, "linux  6.17.2")].ends_with("linux  6.17.2.arch1 → 6.17.4.arch1 · medium risk · critical package"));
-        assert!(!lines.iter().any(|line| line.contains("->")), "{lines:?}");
-    }
 
     #[test]
     fn since_upgrade_lists_the_upgraded_packages_with_problems_first() {
@@ -2229,24 +2010,13 @@ mod tests {
         app.tile = Some(2);
         app.overlay = true;
         let lines = window(&app);
-        let (hyprland, linux, chromium, mesa) = (line_at(&lines, "hyprland  0.55.1"), line_at(&lines, "linux  6.17.1"), line_at(&lines, "chromium  141.0.7390.37"), line_at(&lines, "mesa  1:25.2.3"));
-        assert!(lines[hyprland].starts_with("with problems") && lines[hyprland].ends_with("· 42 × crash"));
-        assert!(lines[linux].ends_with("· 31 × error") && lines[chromium].ends_with("· 7 × crash"));
-        assert!(hyprland < linux && linux < chromium && chromium < mesa && lines[mesa].starts_with("others"));
+        let (niri, linux, firefox, mesa) = (line_at(&lines, "niri  25.08"), line_at(&lines, "linux  6.17.1"), line_at(&lines, "firefox  143.0.4"), line_at(&lines, "mesa  25.2.3"));
+        assert!(lines[niri].starts_with("with problems") && lines[niri].ends_with("· 42 × crash"));
+        assert!(lines[linux].ends_with("· 31 × error") && lines[firefox].ends_with("· 7 × crash"));
+        assert!(niri < linux && linux < firefox && firefox < mesa && lines[mesa].starts_with("others"));
+        assert!(!lines.iter().any(|line| line.contains("rebuild")), "{lines:?}");
     }
 
-    #[test]
-    fn the_disk_window_offers_the_cache_command_and_enter_copies_it() {
-        let mut app = demo_at(30_000);
-        app.tile = Some(4);
-        app.overlay = true;
-        assert!(window(&app).contains(&format!("free cache    {} · frees 1.8 GiB", page::CACHE_COMMAND)));
-        assert!(screen(&app, 271, 60).last().unwrap().contains("Enter copy command"));
-        assert_eq!(press(&mut app, &[KeyCode::Enter]), Action::CopyCommand);
-        assert!(app.overlay);
-        app.tile = Some(3);
-        assert_eq!(press(&mut app, &[KeyCode::Enter]), Action::Nothing);
-    }
 
     #[test]
     fn the_pending_window_names_the_risky_updates_and_what_they_may_fix() {
@@ -2254,23 +2024,12 @@ mod tests {
         app.tile = Some(0);
         app.overlay = true;
         let lines = window(&app);
-        for line in ["high          hyprland  0.55.2 → 0.56.0 · critical package, minor version jump · may fix 42 × crash", "low           mesa  1:25.2.4 rebuild · critical package, rebuild · may fix 7 × crash", "              8 · ffmpeg, firefox, node, org.gimp.GIMP, org.gtk.Gtk3theme.adw-gtk3, python, spotify, yay", "AUR           2 · yay, spotify · built locally", "Flatpak       2 · org.gimp.GIMP, org.gtk.Gtk3theme.adw-gtk3", "mise          2 · node, python"] {
+        for line in ["high          nixpkgs  8a41c0e → d3b9f72 · critical input, locked 112 days ago", "              niri  9ee3e13 → c40a1b8 · critical input, locked 33 days ago · may fix 42 × crash", "low           4 · fenix, nixpkgs-r, noctalia, umbriel", "inputs        7 · nixpkgs, niri, home-manager, noctalia, umbriel, fenix, nixpkgs-r"] {
             assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
         }
         assert!(!lines.iter().any(|line| line.starts_with("largest")));
     }
 
-    #[test]
-    fn before_you_update_names_news_about_a_pending_update_and_the_snapshot_fix() {
-        let mut app = demo_at(30_000);
-        app.news.push(app::News { date: "2026-10-15".into(), title: "hyprland 0.56 needs a config change".into(), link: String::new(), manual_intervention: true });
-        app.tile = Some(5);
-        app.overlay = true;
-        let lines = window(&app);
-        assert!(lines[line_at(&lines, "10-15  hyprland 0.56")].ends_with("hyprland 0.56 needs a config change · affects pending hyprland"));
-        assert!(lines[line_at(&lines, "mkinitcpio 43")].ends_with("mkinitcpio 43 requires manual intervention (demo)"));
-        assert!(lines[line_at(&lines, "snapshot")].ends_with("snapper set up, no pacman hook · snap-pac adds one before each pacman transaction"));
-    }
 
     #[test]
     fn a_part_window_says_which_update_may_fix_which_problem() {
@@ -2278,9 +2037,9 @@ mod tests {
         app.part = Some(2);
         app.overlay = true;
         let lines = window(&app);
-        assert!(lines[line_at(&lines, "hyprland  0.55.2 → 0.56.0")].ends_with("· may fix 42 × crash"));
-        assert!(lines[line_at(&lines, "42 × crash · /usr/bin/Hyprland") + 1].ends_with("hyprland → 0.56.0"));
-        assert!(lines[line_at(&lines, "2 × config · Hyprland config errors") + 1].ends_with("fix in the Hyprland config"));
+        assert!(lines[line_at(&lines, "niri  9ee3e13 → c40a1b8")].ends_with("· may fix 42 × crash"));
+        assert!(lines[line_at(&lines, "42 × crash · niri-25.11/bin/niri") + 1].ends_with("niri → c40a1b8"));
+        assert!(lines[line_at(&lines, "2 × config · niri config errors") + 1].ends_with("fix in the niri config"));
     }
 
     #[test]
@@ -2292,22 +2051,19 @@ mod tests {
         app.select(Pane::Events, index);
         app.overlay = true;
         let lines = window(&app);
-        assert!(lines.contains(&"problem       7 × crash · /usr/lib/chromium/chromium since 10-03".to_string()), "{lines:?}");
-        assert!(lines[line_at(&lines, "problem ") + 1].ends_with("chromium → 142.0.7444.59"));
-        let index = pick(&app, "upgraded linux");
-        app.select(Pane::Events, index);
-        assert!(window(&app).contains(&"its problems  31 × error · kernel since 10-03".to_string()));
+        assert!(lines.contains(&"problem       7 × crash · firefox-144.0/lib/firefox/firefox since 10-03".to_string()), "{lines:?}");
+        assert!(lines[line_at(&lines, "problem ") + 1].ends_with("firefox · no update pending"));
     }
 
     #[test]
-    fn the_day_window_picks_a_day_and_shows_its_programs_and_pacman_changes() {
+    fn the_day_window_picks_a_day_and_shows_its_programs_and_package_changes() {
         let mut app = demo_at(30_000);
         app.tile = Some(1);
         app.overlay = true;
         let chosen = |app: &App| app.shown_days()[app.chosen_day()].date.clone();
         assert_eq!(app.shown_days().len(), 15);
         assert_eq!(chosen(&app), "2026-10-12");
-        assert!(window(&app).contains(&"on 10-12      11 × crash · Hyprland · hyprland → 0.56.0".to_string()), "{:?}", window(&app));
+        assert!(window(&app).contains(&"on 10-12      11 × crash · niri · niri → c40a1b8".to_string()), "{:?}", window(&app));
         assert!(screen(&app, 271, 60).last().unwrap().contains("↑↓ day"));
         press(&mut app, &[KeyCode::Down]);
         assert_eq!(chosen(&app), "2026-10-11");
@@ -2316,26 +2072,11 @@ mod tests {
         }
         assert_eq!(chosen(&app), "2026-10-03");
         let lines = window(&app);
-        assert_eq!(lines[line_at(&lines, "pacman ")], "pacman        upgraded linux  6.17.1.arch1 → 6.17.2.arch1");
+        assert_eq!(lines[line_at(&lines, "generation ")], "generation    upgraded linux  6.17.1 → 6.17.2");
         press(&mut app, &[KeyCode::Enter]);
         assert_eq!(chosen(&app), "2026-10-12");
     }
 
-    #[test]
-    fn a_day_names_the_owner_of_programs_that_are_no_problem_now() {
-        let mut app = demo_at(30_000);
-        app.tile = Some(1);
-        app.overlay = true;
-        let day = app.shown_days()[app.chosen_day()].date.clone();
-        let activity = app.activity.iter_mut().find(|activity| activity.date == day).unwrap();
-        for (subject, package) in [("/usr/bin/gone", "gone"), ("/usr/lib/libva-helper", "mesa"), ("/opt/tool/bin/tool", "")] {
-            activity.sources.push(crate::app::DaySource { kind: "error".into(), subject: subject.into(), count: 1, package: package.into(), first: String::new() });
-        }
-        let lines = window(&app);
-        for line in ["1 × error · gone · gone · no update pending", "1 × error · libva-helper · mesa → 1:25.2.4", "1 × error · tool"] {
-            assert!(lines.iter().any(|shown| shown.ends_with(line)), "{line:?} missing in {lines:?}");
-        }
-    }
 
     #[test]
     fn a_journal_line_without_a_problem_names_its_owner() {
@@ -2346,22 +2087,11 @@ mod tests {
         app.overlay = true;
         let lines = window(&app);
         assert!(lines.contains(&"owner         systemd · no update pending".to_string()), "{lines:?}");
-        app.select(Pane::Events, index(&app, "chromium"));
+        app.select(Pane::Events, index(&app, "firefox"));
         let lines = window(&app);
         assert!(!lines.iter().any(|line| line.starts_with("owner")), "a line with a problem names its owner under the problem: {lines:?}");
     }
 
-    #[test]
-    fn a_crash_names_the_package_of_the_library_it_happened_in() {
-        let mut app = demo_at(30_000);
-        app.focus = Pane::Problems;
-        let index = |app: &App, subject: &str| app.visible_problems().iter().position(|problem| problem.subject == subject).unwrap() as isize;
-        app.select(Pane::Problems, index(&app, "/usr/lib/chromium/chromium"));
-        app.overlay = true;
-        assert!(window(&app).contains(&"library       libgallium-25.2.4-arch1.1.so · mesa → 1:25.2.4".to_string()), "{:?}", window(&app));
-        app.select(Pane::Problems, index(&app, "/usr/bin/nautilus"));
-        assert!(window(&app).contains(&"library       libglib-2.0.so.0 · glib2 · no update pending".to_string()), "{:?}", window(&app));
-    }
 
     #[test]
     fn every_ring_has_a_free_row_above_it_as_below() {
@@ -2377,17 +2107,20 @@ mod tests {
     fn a_problem_window_says_when_it_first_showed_and_what_changed_before() {
         let mut app = demo_at(30_000);
         app.focus = Pane::Problems;
-        let index = app.visible_problems().iter().position(|problem| problem.subject == "/usr/bin/Hyprland").unwrap();
+        let index = app.visible_problems().iter().position(|problem| problem.subject == "niri-25.11/bin/niri").unwrap();
         app.select(Pane::Problems, index as isize);
         app.overlay = true;
         let lines = window(&app);
         assert!(lines.contains(&"first seen    10-04".to_string()), "{lines:?}");
-        assert!(lines.contains(&"owner changed 10-03 · upgraded hyprland  0.55.1 → 0.55.2".to_string()));
+        assert!(lines.contains(&"owner changed 10-03 · upgraded niri  25.08 → 25.11".to_string()), "{lines:?}");
     }
 
     #[test]
     fn the_paging_keys_show_only_where_a_list_has_more_than_one_page() {
         let mut app = demo_at(40_000);
+        for i in 0..80 {
+            app.apply(source::Event::Journal { time: "12:00:00".into(), day: String::new(), ident: format!("ident-{i}"), program: String::new(), message: "x".into(), priority: String::new(), unit: String::new(), package: String::new() }, app.started);
+        }
         let keys = |app: &App| screen(app, 271, 60).last().unwrap().clone();
         app.focus = Pane::Events;
         assert!(keys(&app).contains("PgUp/PgDn"), "{}", keys(&app));
@@ -2402,83 +2135,15 @@ mod tests {
         assert_eq!(app.lists[0].selected, 0);
     }
 
-    #[test]
-    fn an_old_dependency_with_a_problem_is_not_marked_as_a_risk_of_the_update() {
-        let mut app = demo_detail("quickshell");
-        app.anatomy.as_mut().unwrap().deps.get_mut("quickshell").unwrap().depends_on.insert(0, "dbus-broker".into());
-        let (buffer, scene) = render(&app, 170, 50, app.started + Duration::from_secs(60));
-        let window = scene.overlay.expect("a detail window");
-        let rows: Vec<String> = (window.y..window.bottom()).map(|y| (window.x..window.right()).map(|x| buffer[(x, y)].symbol()).collect()).collect();
-        let at = |text: &str| find(&rows, text).map(|(x, y)| (window.x + x, window.y + y)).unwrap_or_else(|| panic!("{text} missing in the window"));
-        assert_ne!(buffer[at("dbus-broker")].fg, palette::Palette::paper().teal);
-        assert_eq!(buffer[at("bluez ·")].fg, palette::Palette::paper().teal);
-    }
 
-    #[test]
-    fn an_update_nothing_requires_says_so() {
-        let lines = window(&demo_detail("spotify"));
-        assert!(lines.iter().any(|line| line == "required by   nothing"), "{lines:?}");
-        assert!(lines.iter().any(|line| line.starts_with("depends on    8 · alsa-lib, ")), "{lines:?}");
-    }
 
-    #[test]
-    fn a_crash_inside_a_library_names_the_update_of_its_package() {
-        let app = demo_detail("mesa");
-        let lines = window(&app);
-        assert!(lines.iter().any(|line| line == "may fix       7 × crash · /usr/lib/chromium/chromium · crashed in libgallium-25.2.4-arch1.1.so"), "{lines:?}");
-        let (_, _, spec) = demo_map(271, 60);
-        let mesa = app.visible_updates().iter().position(|update| update.name == "mesa").unwrap();
-        let ffmpeg = app.visible_updates().iter().position(|update| update.name == "ffmpeg").unwrap();
-        assert_eq!(spec.nodes.len(), app.visible_updates().len());
-        assert!(spec.nodes[mesa].fixes && !spec.nodes[ffmpeg].fixes);
-        let wayland = demo_detail("hyprland");
-        assert!(!window(&wayland).iter().any(|line| line.contains("crashed in")), "wayland has no update, so the Hyprland crash stays with hyprland");
-    }
 
-    #[test]
-    fn rollback_says_whether_the_installed_version_is_in_a_package_cache() {
-        let line = |name: &str| window(&demo_detail(name)).into_iter().find(|line| line.starts_with("rollback"));
-        assert_eq!(line("hyprland").as_deref(), Some("rollback      0.55.2-1 in the pacman cache"));
-        assert_eq!(line("yay").as_deref(), Some("rollback      12.5.2-1 in the yay cache"));
-        assert_eq!(line("spotify").as_deref(), Some("rollback      1:1.2.74-1 not in a package cache"));
-        let mut unchecked = demo_detail("hyprland");
-        unchecked.anatomy.as_mut().unwrap().cached = None;
-        assert!(!window(&unchecked).iter().any(|line| line.starts_with("rollback")), "an older scanner did not look, so the row stays empty");
-    }
 
-    #[test]
-    fn flatpak_and_mise_updates_name_the_command_that_installs_them() {
-        let node = window(&demo_detail("node"));
-        for line in ["version       24.10.0 → 24.11.1", "jump          minor", "source        mise", "update with   mise upgrade node"] {
-            assert!(node.iter().any(|shown| shown == line), "{line:?} missing in {node:?}");
-        }
-        let theme = window(&demo_detail("org.gtk.Gtk3theme.adw-gtk3"));
-        for line in ["commit        72df3f2c3bbb → 8c2aa97f8aa5", "source        flatpak", "update with   flatpak update org.gtk.Gtk3theme.adw-gtk3"] {
-            assert!(theme.iter().any(|shown| shown == line), "{line:?} missing in {theme:?}");
-        }
-        for lines in [&node, &theme] {
-            assert!(!lines.iter().any(|line| line.starts_with("rollback")), "{lines:?}");
-        }
-        assert!(!theme.iter().any(|line| line.starts_with("jump") || line.starts_with("version")), "{theme:?}");
-        assert!(!window(&demo_detail("hyprland")).iter().any(|line| line.starts_with("update with")));
-    }
 
-    #[test]
-    fn the_updates_title_counts_the_updates_without_a_download_size() {
-        let app = demo_at(30_000);
-        assert_eq!(app.checked_sources, ["repo", "aur", "flatpak", "mise"]);
-        assert!(screen(&app, 271, 60).iter().any(|row| row.contains("³UPDATES · 14 · 390 MiB download + 2 AUR + 2 Flatpak + 2 mise")));
-        let mut older = App::new(true, false, Instant::now());
-        older.apply(stage("updates", json!({"updates": [{"name": "yay", "old": "12.5.2-1", "new": "12.5.3-1", "source": "aur", "bump": "patch", "risk": "low"}]})), Instant::now());
-        assert!(older.checked_sources.is_empty(), "an older scanner sends no checked sources");
-        let narrow = screen(&app, 150, 44);
-        let title = narrow.iter().find(|row| row.contains("³UPDATES")).unwrap();
-        assert!(title.contains("³UPDATES · 14 · 390 MiB download + 2 AUR ") && !title.contains("AUR +"), "{title:?}");
-    }
 
     #[test]
     fn the_update_map_says_why_it_is_empty() {
-        let mut app = App::new(true, false, Instant::now());
+        let mut app = all_panels(App::new(true, false, Instant::now()));
         app.visible = [false, false, true, false, false];
         app.apply(stage("updates", json!({"updates": []})), Instant::now());
         assert!(screen(&app, 99, 35).iter().any(|row| row.contains("│ nothing pending ")));
@@ -2488,48 +2153,7 @@ mod tests {
         assert!(screen(&filtered, 99, 35).iter().any(|row| row.contains("│ no match ")));
     }
 
-    #[test]
-    fn the_eye_lists_the_flatpak_and_mise_checks_it_ran() {
-        let lines = |app: &App| page::eye_log(app).0.into_iter().map(|(head, tail, _)| format!("{head}  {tail}")).collect::<Vec<_>>();
-        let demo = lines(&demo_at(30_000));
-        for line in ["› checkupdates  8 updates", "› yay -Qua  2 aur", "› flatpak remote-ls --updates  2 updates", "› mise outdated  2 updates"] {
-            assert!(demo.iter().any(|shown| shown == line), "{line:?} missing in {demo:?}");
-        }
-        let mut older = App::new(true, false, Instant::now());
-        older.apply(stage("updates", json!({"updates": []})), Instant::now());
-        assert!(!lines(&older).iter().any(|line| line.contains("flatpak") || line.contains("mise")), "an older scanner did not check them");
-    }
 
-    #[test]
-    fn the_checks_name_programs_to_restart_and_config_files_that_wait() {
-        let mut app = demo_at(30_000);
-        let row = |app: &App, name: &str| screen(app, 271, 60).into_iter().find(|row| row.contains(name)).unwrap_or_default();
-        assert!(row(&app, " restart ").contains("3 programs") && row(&app, " configs ").contains("5 waiting"));
-        app.tile = Some(5);
-        app.overlay = true;
-        let lines = window(&app);
-        for line in [
-            "restart       3 programs still run replaced files · nautilus, pipewire, wireplumber",
-            "              libsystemd.so.0.41.0 · systemd-libs · in 3 programs",
-            "              10-15  /etc/pacman.conf.pacnew · pacman · 91 changed lines",
-            "              05-09  /etc/sddm.conf.d/10-wayland.conf.pacsave",
-        ] {
-            assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
-        }
-        assert!(lines.iter().any(|line| line.starts_with("configs       5 config files wait: new versions (.pacnew) and saved old ones (.pacsave)")), "{lines:?}");
-        let anatomy = app.anatomy.as_mut().unwrap();
-        anatomy.stale_programs = Some(Vec::new());
-        anatomy.config_files.as_mut().unwrap().retain(|file| file.path.ends_with(".pacnew"));
-        anatomy.config_files.as_mut().unwrap().truncate(1);
-        let lines = window(&app);
-        assert!(lines.iter().any(|line| line == "restart       no program runs replaced files"), "{lines:?}");
-        assert!(lines.iter().any(|line| line == "configs       1 config file waits: new versions (.pacnew) · merge with pacdiff"), "{lines:?}");
-        let anatomy = app.anatomy.as_mut().unwrap();
-        anatomy.stale_programs = None;
-        anatomy.config_files = None;
-        app.overlay = false;
-        assert!(row(&app, " restart ").is_empty() && row(&app, " configs ").is_empty(), "an older scanner sends neither, so the rows stay away");
-    }
 
     #[test]
     fn the_checks_legend_says_what_a_wedge_and_its_length_mean() {
@@ -2544,19 +2168,19 @@ mod tests {
         app.tile = Some(2);
         app.overlay = true;
         let lines = window(&app);
-        for line in ["started after 10-08 13:12 nautilus 49.0 → 49.1", "              from 10-09 09:41 · crashed: nautilus", "              back to 49.0-1 in the pacman cache"] {
+        for line in ["started after 10-08 13:12 nautilus 49.0 → 49.1", "              from 10-09 09:41 · crashed: nautilus", "              back to 49.0 in generation 489"] {
             assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
         }
         let day = |date: &str, sources: Value, changes: Value| json!({"date": date, "crashes": 0, "errors": 0, "sources": sources, "changes": changes});
         let history = |boots: Value| {
-            let mut app = App::new(true, false, Instant::now());
+            let mut app = all_panels(App::new(true, false, Instant::now()));
             app.apply(stage("problems", json!({
                 "problems": [{"kind": "failed-unit", "subject": "tpm2-setup.service", "count": 1, "package": "systemd", "status": "no-update", "first": "2026-10-21 14:38"}],
                 "activity": [
                     day("2026-10-18", json!([]), json!([])),
                     day("2026-10-19", json!([]), json!([])),
                     day("2026-10-21", json!([{"kind": "error", "subject": "/usr/lib/systemd/tpm2-setup", "count": 4, "package": "systemd", "first": "14:38"}]),
-                        json!([{"action": "upgraded", "name": "systemd", "version": "261.2-1 -> 262-1", "time": "14:21", "cached": "none"}])),
+                        json!([{"action": "upgraded", "name": "systemd", "version": "261.2 -> 262", "time": "14:21", "kept": "none"}])),
                 ],
                 "boots": boots,
             })), Instant::now());
@@ -2566,14 +2190,14 @@ mod tests {
         };
         assert!(!window(&history(json!(["2026-10-21 14:38"]))).iter().any(|line| line.starts_with("started after")), "without a boot before the upgrade every boot error would look new");
         let lines = window(&history(json!(["2026-10-19 08:00", "2026-10-21 14:38"])));
-        for line in ["started after 10-21 14:21 systemd 261.2 → 262", "              from 10-21 14:38 · failed: tpm2-setup · errors: tpm2-setup", "              back to 261.2-1 not in a package cache"] {
+        for line in ["started after 10-21 14:21 systemd 261.2 → 262", "              from 10-21 14:38 · failed: tpm2-setup · errors: tpm2-setup", "              back to 261.2 in no kept generation"] {
             assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
         }
         let mut unit = history(json!([]));
         unit.tile = None;
         unit.focus = Pane::Problems;
         let lines = window(&unit);
-        for line in ["first seen    10-21 14:38", "owner changed 10-21 · upgraded systemd  261.2 → 262", "go back       261.2-1 not in a package cache"] {
+        for line in ["first seen    10-21 14:38", "owner changed 10-21 · upgraded systemd  261.2 → 262", "go back       261.2 in no kept generation"] {
             assert!(lines.iter().any(|shown| shown == line), "{line:?} missing in {lines:?}");
         }
     }
@@ -2585,23 +2209,13 @@ mod tests {
         for text in ["│ 1 wedge = 1 update · length = risk ", "│ sorted by risk · ● = the package has a problem "] {
             assert!(rows.iter().any(|row| row.contains(text)), "{text:?} missing");
         }
-        let value = |key: &str| rows.iter().find_map(|row| row.split_once(key).map(|(_, rest)| rest.split('│').next().unwrap_or_default().trim().to_string()));
-        assert_eq!(value("● chromium").as_deref(), Some("7"));
-        assert_eq!(value("● others").as_deref(), Some(""), "the grey key has no number: the numbers above are records");
+        assert!(rows.iter().any(|row| row.contains("│ 1 wedge = 1 generation · newest first ")), "generations legend missing");
         let mut calm = demo_at(30_000);
-        calm.problems.retain(|problem| problem.status != "possibly-fixed");
         calm.problems.iter_mut().for_each(|problem| problem.package.clear());
         let rows = screen(&calm, 271, 60);
-        assert!(rows.iter().any(|row| row.contains("no owner has one")) && !rows.iter().any(|row| row.contains("● others")), "no grey key without a teal one to set it apart");
         assert!(rows.iter().any(|row| row.contains("│ sorted by risk ")) && !rows.iter().any(|row| row.contains("package has a problem")), "no marker, no legend for it");
     }
 
-    #[test]
-    fn the_kernel_update_says_a_reboot_follows() {
-        let lines = window(&demo_detail("linux"));
-        assert!(lines.iter().any(|line| line == "reboot        needed after this update"), "{lines:?}");
-        assert!(!window(&demo_detail("mesa")).iter().any(|line| line.starts_with("reboot")));
-    }
 
     #[test]
     fn the_demo_days_name_the_programs_behind_every_count() {

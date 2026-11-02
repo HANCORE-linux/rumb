@@ -22,8 +22,6 @@ pub enum Event {
         #[serde(default)]
         now: Option<String>,
         #[serde(default)]
-        omarchy: bool,
-        #[serde(default)]
         last_upgraded: Vec<String>,
     },
     Step {
@@ -40,8 +38,7 @@ pub enum Event {
         value: Value,
     },
     Result {},
-    /// A line from the package manager's log while it changes the system,
-    /// e.g. "upgraded hyprland (0.55.2-1 -> 0.56.0-1)".
+    /// A change of the system profile, e.g. "switched to generation 499".
     Activity {
         line: String,
     },

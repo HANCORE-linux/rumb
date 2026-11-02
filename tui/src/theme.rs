@@ -8,6 +8,9 @@ use crate::palette::{Palette, mix};
 
 const BUNDLED: &str = include_str!("../themes.json");
 
+/// The theme rumb uses when none was chosen with esc or --theme.
+pub const DEFAULT_THEME: &str = "shadesofjade";
+
 pub struct Theme {
     pub palette: Palette,
     pub generation: u64,
@@ -15,10 +18,10 @@ pub struct Theme {
     live: Option<Live>,
 }
 
+/// The colors Noctalia writes for the current shell theme.
 struct Live {
     colors: PathBuf,
-    name: PathBuf,
-    stamp: Option<(SystemTime, String, bool)>,
+    stamp: Option<SystemTime>,
     checked: Instant,
 }
 
@@ -82,9 +85,12 @@ pub fn matching(filter: &str) -> Vec<String> {
 
 pub fn pick(requested: Option<&str>) -> Result<Theme, String> {
     match requested {
-        Some("system" | "omarchy") => live().ok_or_else(|| "no Omarchy theme found".to_string()),
+        Some("system" | "noctalia") => live().ok_or_else(|| "no Noctalia colors found (~/.config/noctalia/colors.json)".to_string()),
         Some(name) => named(name).map(|palette| Theme::fixed(name, palette)).ok_or_else(|| format!("unknown theme: {name} (rumb --themes lists them)")),
-        None => Ok(saved().and_then(|name| pick(Some(&name)).ok()).or_else(live).unwrap_or_else(|| Theme::fixed("labra", Palette::labra()))),
+        None => Ok(saved()
+            .and_then(|name| pick(Some(&name)).ok())
+            .or_else(|| pick(Some(DEFAULT_THEME)).ok())
+            .unwrap_or_else(|| Theme::fixed("labra", Palette::labra()))),
     }
 }
 
@@ -119,51 +125,47 @@ fn named(name: &str) -> Option<Palette> {
 }
 
 fn current() -> Option<PathBuf> {
-    let home = home()?;
-    [".local/state/omarchy/current", ".config/omarchy/current"].into_iter().map(|dir| home.join(dir)).find(|dir| dir.join("theme/colors.toml").is_file())
+    let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|dir| dir.is_absolute()).or_else(|| home().map(|home| home.join(".config")))?;
+    Some(config.join("noctalia/colors.json")).filter(|file| file.is_file())
 }
 
 fn live() -> Option<Theme> {
-    let current = current()?;
-    let mut live = Live { colors: current.join("theme/colors.toml"), name: current.join("theme.name"), stamp: None, checked: Instant::now() };
+    let mut live = Live { colors: current()?, stamp: None, checked: Instant::now() };
     live.stamp = stamp(&live);
     let palette = read_live(&live)?;
     Some(Theme { palette, generation: 0, name: "system".to_string(), live: Some(live) })
 }
 
-fn stamp(live: &Live) -> Option<(SystemTime, String, bool)> {
-    let modified = std::fs::metadata(&live.colors).and_then(|meta| meta.modified()).ok()?;
-    let name = std::fs::read_to_string(&live.name).unwrap_or_default().trim().to_string();
-    Some((modified, name, live.colors.with_file_name("light.mode").is_file()))
+fn stamp(live: &Live) -> Option<SystemTime> {
+    std::fs::metadata(&live.colors).and_then(|meta| meta.modified()).ok()
 }
 
 fn read_live(live: &Live) -> Option<Palette> {
-    if std::fs::read_to_string(&live.name).is_ok_and(|name| name.trim().eq_ignore_ascii_case("labra")) {
-        return Some(readable_text(Palette::labra()));
-    }
     let text = std::fs::read_to_string(&live.colors).ok()?;
-    let light = live.colors.with_file_name("light.mode").is_file();
-    derive(&resolve(parse(&text), light)).map(readable_text)
+    derive(&resolve(noctalia(&text)?, false)).map(readable_text)
 }
 
-fn parse(text: &str) -> HashMap<String, String> {
+/// Maps Noctalia's Material roles onto the color names the palette uses.
+fn noctalia(text: &str) -> Option<HashMap<String, String>> {
+    let roles: HashMap<String, String> = serde_json::from_str(text).ok()?;
     let mut colors = HashMap::new();
-    for line in text.lines() {
-        let Some((key, value)) = line.split_once('=') else { continue };
-        let key: String = key.chars().filter(|c| !matches!(c, '"' | '\'' | ' ' | '\t')).collect();
-        if key.is_empty() || key.starts_with('#') {
-            continue;
+    for (key, role) in [
+        ("background", "mSurface"),
+        ("foreground", "mOnSurface"),
+        ("accent", "mPrimary"),
+        ("red", "mError"),
+        ("yellow", "mPrimary"),
+        ("green", "mTertiary"),
+        ("blue", "mSecondary"),
+        ("cyan", "mHover"),
+        ("muted", "mOnSurfaceVariant"),
+        ("selection", "mSurfaceVariant"),
+    ] {
+        if let Some(value) = roles.get(role) {
+            colors.insert(key.to_string(), value.clone());
         }
-        let value = match value.find(['"', '\'']) {
-            Some(start) => {
-                let rest = &value[start + 1..];
-                rest[..rest.find(['"', '\'']).unwrap_or(rest.len())].to_string()
-            }
-            None => value.trim().to_string(),
-        };
-        colors.insert(key, value);
     }
-    colors
+    Some(colors)
 }
 
 fn resolve(mut c: HashMap<String, String>, light_file: bool) -> HashMap<String, String> {
@@ -344,17 +346,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn light_mode_marker_counts_as_a_change() {
-        let dir = std::env::temp_dir().join(format!("rumb-theme-test-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("theme")).unwrap();
-        std::fs::write(dir.join("theme/colors.toml"), "background = \"#101010\"\nforeground = \"#e0e0e0\"\n").unwrap();
-        std::fs::write(dir.join("theme.name"), "test\n").unwrap();
-        let live = Live { colors: dir.join("theme/colors.toml"), name: dir.join("theme.name"), stamp: None, checked: Instant::now() };
-        let before = stamp(&live);
-        std::fs::write(dir.join("theme/light.mode"), "").unwrap();
-        let after = stamp(&live);
-        std::fs::remove_dir_all(&dir).unwrap();
-        assert_ne!(before, after);
+    fn the_default_theme_is_bundled() {
+        assert!(names().contains(&DEFAULT_THEME.to_string()));
+        assert!(named(DEFAULT_THEME).is_some());
+    }
+
+    #[test]
+    fn noctalia_colors_become_a_readable_palette() {
+        let text = r##"{"mError": "#fd4663", "mOnSurface": "#f3edf7", "mOnSurfaceVariant": "#7c80b4", "mPrimary": "#fff59b", "mSecondary": "#a9aefe", "mSurface": "#070722", "mSurfaceVariant": "#11112d", "mTertiary": "#9bfece", "mHover": "#9bfece"}"##;
+        let colors = resolve(noctalia(text).unwrap(), false);
+        assert_eq!(colors["background"], "#070722");
+        assert_eq!(colors["mode"], "dark");
+        let pal = readable_text(derive(&colors).unwrap());
+        assert_eq!(pal.page, Color::Rgb(0x07, 0x07, 0x22));
+        assert!(contrast(pal.alert, pal.panel) >= TEXT_CONTRAST);
+        assert!(noctalia("not json").is_none());
     }
 
     #[test]
@@ -435,17 +441,15 @@ mod tests {
     }
 
     #[test]
-    fn resolves_like_omarchy() {
-        let ansi = resolve(parse("background = \"#101010\"\ncolor1 = '#aa0000'\ncolor8 = \"#555555\" # muted\n"), false);
+    fn resolve_fills_missing_names() {
+        let colors = |pairs: &[(&str, &str)]| -> HashMap<String, String> { pairs.iter().map(|(key, value)| (key.to_string(), value.to_string())).collect() };
+        let ansi = resolve(colors(&[("background", "#101010"), ("color1", "#aa0000"), ("color8", "#555555")]), false);
         assert_eq!(ansi["red"], "#aa0000");
         assert!(!ansi.contains_key("bright_red"));
-        assert_eq!(resolve(parse("color9 = \"#ff5555\"\n"), false)["bright_red"], "#ff5555");
         assert_eq!(ansi["muted"], "#555555");
-        assert_eq!(ansi["dark_foreground"], "#555555");
         assert_eq!(ansi["mode"], "dark");
-        let named = resolve(parse("background = \"#f0f0f0\"\nforeground = \"#202020\"\naccent = \"#3366cc\"\n"), false);
-        assert_eq!(named["mode"], "light");
-        assert_eq!(named["light_foreground"], "#202020");
-        assert_eq!(named["lighter_background"], "#f0f0f0");
+        let light = resolve(colors(&[("background", "#f0f0f0"), ("foreground", "#202020")]), false);
+        assert_eq!(light["mode"], "light");
+        assert_eq!(light["lighter_background"], "#f0f0f0");
     }
 }

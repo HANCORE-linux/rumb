@@ -63,10 +63,6 @@ fn pipe(program: &str, args: &[&str], text: String, wait: Duration) -> io::Resul
     if status.success() { Ok(()) } else { Err(io::Error::other(format!("{program} {status}"))) }
 }
 
-fn signed(value: i64) -> String {
-    format!("{}{}", if value < 0 { "-" } else { "+" }, bytes(value.unsigned_abs()))
-}
-
 fn clean(text: &str) -> String {
     text.chars().map(|ch| if ch.is_control() { ' ' } else { ch }).collect()
 }
@@ -107,56 +103,47 @@ pub fn report(app: &App) -> String {
         let _ = writeln!(out, "- high risk updates: {}", app.high());
     }
     if let Some(anatomy) = &app.anatomy {
-        let after: Vec<String> = app.reboot_after().iter().map(|(what, update)| format!("{what} {} -> {}", clean(&update.old), clean(&update.new))).collect();
         let reboot = if anatomy.reboot_pending {
             format!("pending, kernel {} is installed", clean(&anatomy.kernel_installed))
-        } else if !after.is_empty() {
-            format!("after this update ({})", after.join(", "))
         } else {
             "not needed".into()
         };
         let _ = writeln!(out, "- reboot: {reboot}");
     }
     if let Some(preflight) = &app.preflight {
-        let snapshot = match preflight.snapshot_by.as_str() {
-            "snap-pac" => "snap-pac takes one before each pacman transaction",
-            "omarchy-update" => "omarchy-update takes one first, pacman -Syu takes none",
-            _ if preflight.snapper_configured => "snapper is set up, but nothing takes one before an update",
-            _ => "none set up",
-        };
-        let _ = writeln!(out, "- snapshot: {snapshot}");
-        let need = app.space_needed();
-        let needed = if need > 0 { format!(", about {} needed", bytes(need)) } else { String::new() };
-        let _ = writeln!(out, "- available on /: {}{needed}{}", bytes(preflight.free_bytes), if preflight.free_ok { "" } else { ", under 10 GiB" });
+        match preflight.rollback_generation {
+            Some(generation) => {
+                let _ = writeln!(out, "- rollback: generation {generation}");
+            }
+            None => out.push_str("- rollback: no older generation\n"),
+        }
+        if preflight.boot_total_bytes > 0 {
+            let _ = writeln!(out, "- /boot: {} free of {}", bytes(preflight.boot_free_bytes), bytes(preflight.boot_total_bytes));
+        }
+        let _ = writeln!(out, "- available on /nix: {}{}", bytes(preflight.free_bytes), if preflight.free_ok { "" } else { ", under 10 GiB" });
     }
     for error in app.update_errors.iter().chain(&app.problem_errors) {
         let _ = writeln!(out, "- could not run: {}", clean(error));
     }
     if app.news_failed {
-        out.push_str("- could not fetch the Arch news\n");
-    }
-    if app.aur_unavailable {
-        out.push_str("- AUR updates not checked\n");
+        out.push_str("- could not fetch the NixOS news\n");
     }
 
     let _ = writeln!(out, "\n## Updates ({})\n", app.updates.len());
     if app.updates.is_empty() {
         out.push_str(if app.stage_done_at[0].is_some() { "Nothing pending.\n" } else { "Not checked yet.\n" });
     } else {
-        let _ = writeln!(out, "Download {}, installed size change {}.\n", bytes(app.download_bytes()), signed(app.installed_delta()));
-        out.push_str("| risk | package | old | new | jump | part | source | download | reason |\n|---|---|---|---|---|---|---|---|---|\n");
+        out.push_str("| risk | input | old | new | part | source | reason |\n|---|---|---|---|---|---|---|\n");
         for update in app.sorted_updates() {
             let _ = writeln!(
                 out,
-                "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} | {} |",
                 cell(&update.risk),
                 cell(&update.name),
                 cell(&update.old),
                 cell(&update.new),
-                cell(&update.bump),
                 Subsystem::of(&update.name).label(),
                 cell(&update.source),
-                update.download_bytes.map(bytes).unwrap_or_default(),
                 cell(&update.reason)
             );
         }
@@ -180,18 +167,17 @@ pub fn report(app: &App) -> String {
     }
 
     if let Some(anatomy) = &app.anatomy {
-        out.push_str("\n## Disk and packages\n\n");
+        out.push_str("\n## Disk and store\n\n");
         if let Some(preflight) = &app.preflight
             && preflight.disk_total_bytes > 0
         {
-            let _ = writeln!(out, "- disk /: {:.0}% used, {} available", preflight.disk_used_bytes as f64 * 100.0 / preflight.disk_total_bytes as f64, bytes(preflight.free_bytes));
+            let _ = writeln!(out, "- disk /nix: {:.0}% used, {} available", preflight.disk_used_bytes as f64 * 100.0 / preflight.disk_total_bytes as f64, bytes(preflight.free_bytes));
         }
-        let _ = writeln!(out, "- installed: {}", thousands(anatomy.packages));
-        let _ = writeln!(out, "- explicit: {}", thousands(anatomy.explicit));
-        let _ = writeln!(out, "- foreign: {}", thousands(anatomy.repos.get("aur").copied().unwrap_or(0)));
-        let _ = writeln!(out, "- orphans: {}", thousands(anatomy.orphans));
-        let freeable = anatomy.cache_freeable_bytes.map(|freeable| format!(", {} freeable with {}", bytes(freeable), crate::page::CACHE_COMMAND)).unwrap_or_default();
-        let _ = writeln!(out, "- pacman cache: {}{freeable}", bytes(anatomy.cache_bytes));
+        let _ = writeln!(out, "- store paths: {}", thousands(anatomy.store_paths));
+        let _ = writeln!(out, "- system: {}", thousands(anatomy.system_packages));
+        let _ = writeln!(out, "- user: {}", thousands(anatomy.user_packages));
+        let _ = writeln!(out, "- old generations: {}", thousands(anatomy.old_generations));
+        let _ = writeln!(out, "- system closure: {}", bytes(anatomy.closure_bytes));
     }
 
     if !app.news.is_empty() {
@@ -207,7 +193,7 @@ pub fn report(app: &App) -> String {
         out.push_str("None.\n");
     }
     for event in app.events.iter().rev() {
-        let tag = if event.source == Source::Pacman { "P" } else { "J" };
+        let tag = if event.source == Source::Switch { "S" } else { "J" };
         let when = if event.day.is_empty() { clean(&event.clock) } else { format!("{} {}", clean(&event.day), clean(&event.clock)) };
         let _ = writeln!(out, "    {when} {tag} {}: {}", clean(&event.ident), clean(&event.message));
     }

@@ -1,6 +1,6 @@
-.TH RUMB 1 2026-11-01 rumb "User Commands"
+.TH RUMB 1 "2026-11-02" "rumb 0.1.9" "User Commands"
 .SH NAME
-rumb, rumb\-scan \- track software health and spot trouble early
+rumb \- terminal dashboard for the health of a NixOS system
 .SH SYNOPSIS
 .B rumb
 .RB [ \-\-demo ]
@@ -9,63 +9,46 @@ rumb, rumb\-scan \- track software health and spot trouble early
 .IR name ]
 .RB [ \-\-since
 .IR time ]
-.RB [ \-\-no\-aur ]
+.RB [ \-\-offline ]
 .br
-.B rumb
-.BR \-\-themes " | " \-\-version " | " \-\-help
-.br
-.B rumb\-scan
-.RB [ \-\-json " | " \-\-stream ]
+.B rumb\-scan \-\-stream
 .RB [ \-\-since
 .IR time ]
-.RB [ \-\-no\-aur ]
+.RB [ \-\-offline ]
 .SH DESCRIPTION
 .B rumb
-is a terminal dashboard for Arch Linux and Omarchy.
-It shows what the next update brings and what is already failing:
-pending repository, AUR, Flatpak and mise updates ranked by risk,
-and the crashes, failed units, journal errors and Hyprland config errors
-since the last completed full system upgrade,
-each tied to the package that owns it,
-together with the Arch news published since then.
-It also lists your programs that still run files an update replaced,
-and the .pacnew and .pacsave files waiting in
-.IR /etc .
-On Omarchy, a pending Omarchy update also shows what its release notes fix.
+is a terminal dashboard for NixOS.
+It shows the flake inputs that are behind their remotes, ranked by risk;
+the crashes, failed units, journal errors and niri config errors since the
+current system generation was built;
+the system generations kept for a rollback;
+the space left on
+.IR /nix " and " /boot ;
+whether the running kernel differs from the one the current generation boots;
+the programs that still run files of an older generation;
+and the NixOS announcements published since the last switch.
 .PP
 rumb only reads.
-It never runs
-.B sudo
-or asks for root.
-Pending repository updates come from
-.BR checkupdates (8),
-which syncs a temporary copy of the package databases
-and never touches the system's own.
+It never builds, switches, updates the flake lock or collects garbage,
+and it never asks for root.
+The commands it names, such as
+.B nix flake update
+or
+.BR "nixos\-rebuild switch \-\-rollback" ,
+are hints to run yourself.
 .PP
-In the middle an eye reads the scan.
-Its pupil types each command that
-.B rumb\-scan
-runs and the answer it gets,
-the raw data runs through the white of the eye,
-and signals carry each result to its tile.
-The eye looks at the tile it is reading.
-When nothing happens for a while,
-the code keeps running, the pupil shows it too,
-and the eye glances around the page now and then.
-.PP
-After the scan rumb keeps following the pacman log and the journal,
-and checks again when a package transaction completes.
-.PP
-The dashboard needs a terminal of at least 150x44.
-A smaller terminal shows the size it needs until the window is large enough.
-A terminal that cannot show pictures, such as Alacritty,
-shows a note in place of the eye.
-When output is not a terminal or
-.B NO_COLOR
-is set,
-rumb prints the plain text report of
-.B rumb\-scan
-instead.
+After the scan rumb keeps following the journal and the system profile:
+a switch to a new generation shows as a live event and starts a new scan.
+.SH LAYOUT
+rumb starts with the instruments and the eye with the subsystems;
+keys 3, 4 and 5 add the lists of updates, problems and live events.
+The default layout fits a terminal of 120 columns and 34 rows,
+and every panel together fits 150 columns and 47 rows.
+A smaller terminal hides the eye with the subsystems first,
+then the lists that do not fit side by side,
+then the instruments, whose checks then show on one line under the header.
+When none of the chosen panels fits, the updates and problems lists stand in.
+Hidden panels show their key in yellow.
 .SH OPTIONS
 .TP
 .B \-\-demo
@@ -76,31 +59,25 @@ Show the results without animation.
 .TP
 .BI \-\-theme " name"
 Colors to use.
-By default rumb uses the theme chosen in the options (see
-.BR esc );
-otherwise it uses the current Omarchy theme and follows it when it changes,
-and labra without Omarchy.
+By default rumb uses the theme chosen with
+.BR esc ,
+else
+.BR shadesofjade .
 .B system
-selects the current Omarchy theme explicitly.
+follows the current Noctalia colors live as they change.
 .TP
 .B \-\-themes
-List the theme names: the official Omarchy themes and the HANCORE themes,
-with
-.B system
-first when Omarchy is in use.
-Any other Omarchy theme shows through
-.B system
-while it is the current one.
+List the theme names.
 .TP
 .BI \-\-since " time"
 Look for problems since
 .IR time ,
 for example
-.RB \(dq "7 days ago" \(dq.
-The default is the last completed full system upgrade.
+.BR "7 days ago" .
+The default is when the current system generation was created.
 .TP
-.B \-\-no\-aur
-Skip the AUR update check.
+.B \-\-offline
+Do not ask the flake input remotes and do not fetch the NixOS news.
 .TP
 .BR \-V ", " \-\-version
 Print the version.
@@ -112,12 +89,9 @@ Print a short help.
 .B 1\(en5
 Show or hide the instruments, the subsystems with the eye, the updates, the problems and the live events.
 When the updates panel is large enough, 3 switches it between the map, the rows and hidden.
-The map shows every pending update by risk and subsystem,
-with the dependencies of the selected update.
 .TP
 .BR tab ", " shift+tab
 Move the focus to the next or previous of the instruments, the subsystems and the lists.
-The arrow keys never leave the focused panel.
 .TP
 .BR left ", " right
 Select an instrument or a part of the subsystems.
@@ -143,13 +117,9 @@ Export a Markdown report to
 .TP
 .B esc
 Close or clear.
-With nothing open, show the options in the eye:
+With nothing open, show the options in the eye, where
 .BR left " and " right
-change the theme at once, and rumb remembers it for the next start.
-Typing keeps the themes whose names contain the text and takes the first of
-them;
-.B esc
-clears the text before it closes the options.
+change the theme and typing filters the themes.
 .TP
 .B r
 Scan again.
@@ -157,33 +127,28 @@ Scan again.
 .B q
 Quit.
 .SH RUMB\-SCAN
-.B rumb\-scan
-runs the checks that rumb shows and prints them as a text report.
-rumb starts it on its own; it can also be run directly, for example from a script.
-.TP
-.B \-\-json
-Print the forecast as JSON.
-.TP
-.B \-\-stream
-Print one JSON event per line while the checks run,
-then keep following the package manager log and the journal.
-.PP
-.BR \-\-since " and " \-\-no\-aur
-work as for rumb.
-AUR updates are checked with
-.B yay
-or
-.B paru
-when one of them is installed,
-and reported as not checked otherwise.
-Flatpak updates are checked when Flatpak has something installed,
-and mise updates for the tools in the global mise configuration
-when mise is installed.
-The Arch news needs
+.B rumb\-scan \-\-stream
+runs the checks and prints one JSON event per line,
+then keeps following the journal and the system profile.
+It reads
+.IR /nix/var/nix/profiles ,
+.IR /run/current\-system ,
+.IR /run/booted\-system ,
+the flake lock, the journal, the core dumps and
+.IR /proc .
+The flake inputs are compared with
+.B git ls\-remote
+when git is installed, else through the git smart HTTP endpoint with
+.BR curl .
+The NixOS news needs
 .BR xmllint .
-The Omarchy release notes are read from the GitHub API,
-only when an Omarchy update is pending.
 .SH ENVIRONMENT
+.TP
+.B RUMB_FLAKE
+Directory of the system flake whose
+.I flake.lock
+is checked (default
+.IR /etc/nixos ).
 .TP
 .B RUMB_THEME
 Theme to use when
@@ -196,7 +161,7 @@ Path of the
 to run.
 .TP
 .B NO_COLOR
-When set and not empty, print the plain text report.
+When set and not empty, or without a terminal, print the Markdown report of one scan.
 .SH FILES
 .TP
 .I ~/.config/rumb/theme
@@ -204,20 +169,13 @@ The theme chosen in the options
 .RI ( $XDG_CONFIG_HOME/rumb/theme
 when that is set).
 .TP
-.I ~/.local/state/omarchy/current/theme/colors.toml
-The current Omarchy theme
-.RI ( ~/.config/omarchy/current/theme/colors.toml
-on older Omarchy).
-.TP
-.I /var/log/pacman.log
-The package manager log, or the
-.B LogFile
-that
-.BR pacman.conf (5)
-names.
+.I ~/.config/noctalia/colors.json
+The current Noctalia colors, used by the
+.B system
+theme.
 .SH SEE ALSO
-.BR pacman (8),
-.BR checkupdates (8),
+.BR nix3\-store\-diff\-closures (1),
+.BR nixos\-rebuild (8),
 .BR journalctl (1),
 .BR coredumpctl (1),
 .BR systemctl (1)

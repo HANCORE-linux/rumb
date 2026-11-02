@@ -1,4 +1,3 @@
-use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -18,10 +17,6 @@ pub struct Update {
     pub risk: String,
     #[serde(default)]
     pub reason: String,
-    #[serde(default)]
-    pub download_bytes: Option<u64>,
-    #[serde(default)]
-    pub installed_delta_bytes: Option<i64>,
 }
 
 impl Update {
@@ -61,16 +56,16 @@ impl Subsystem {
         let starts = |prefix: &str| name.starts_with(prefix);
         if name == "linux" || starts("linux-") || name == "kernel" {
             Subsystem::Kernel
-        } else if ["mesa", "lib32-mesa", "nvidia", "lib32-nvidia", "vulkan", "lib32-vulkan", "libva", "intel-media"].iter().any(|p| starts(p)) {
+        } else if ["mesa", "nvidia", "vulkan", "libva", "intel-media"].iter().any(|p| starts(p)) {
             Subsystem::Graphics
-        } else if starts("hypr") || matches!(name, "aquamarine" | "xdg-desktop-portal-hyprland" | "uwsm" | "sddm" | "Hyprland") {
+        } else if starts("niri") || starts("xdg-desktop-portal") || starts("xwayland") || matches!(name, "sddm" | "greetd" | "wayland" | "wlroots") {
             Subsystem::Compositor
         } else if ["qt5-", "qt6-", "gtk", "libadwaita"].iter().any(|p| starts(p)) {
             Subsystem::Toolkit
-        } else if starts("omarchy") || starts("walker") || starts("elephant") || matches!(name, "quickshell" | "waybar" | "mako" | "swayosd") {
+        } else if starts("noctalia") || starts("umbriel") || matches!(name, "quickshell" | "waybar" | "mako" | "swayosd") {
             Subsystem::Shell
-        } else if starts("limine")
-            || matches!(name, "systemd" | "systemd-libs" | "glibc" | "lib32-glibc" | "pacman" | "mkinitcpio" | "bash" | "coreutils" | "openssl" | "util-linux" | "filesystem" | "dbus-broker" | "bluez")
+        } else if starts("nixos") || starts("systemd")
+            || matches!(name, "glibc" | "nix" | "bash" | "coreutils" | "openssl" | "util-linux" | "dbus" | "dbus-broker" | "bluez" | "pipewire" | "wireplumber" | "grub" | "initrd")
         {
             Subsystem::Base
         } else {
@@ -110,33 +105,6 @@ pub struct StaleProgram {
     pub files: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct ConfigFile {
-    pub path: String,
-    #[serde(default)]
-    pub package: String,
-    #[serde(default)]
-    pub date: String,
-    #[serde(default)]
-    pub changed_lines: Option<u64>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Deps {
-    pub depends: u64,
-    pub required_by: u64,
-    #[serde(default)]
-    pub depends_on: Vec<String>,
-    #[serde(default)]
-    pub required_names: Vec<String>,
-    #[serde(default)]
-    pub version: String,
-    #[serde(default)]
-    pub added: Vec<String>,
-    #[serde(default)]
-    pub dropped: Vec<String>,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct JournalLine {
     pub time: String,
@@ -157,27 +125,19 @@ pub struct JournalLine {
 /// Facts about the installed software as a whole.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Anatomy {
-    pub packages: u64,
-    pub explicit: u64,
-    pub orphans: u64,
-    pub cache_bytes: u64,
+    pub store_paths: u64,
+    pub system_packages: u64,
+    #[serde(default)]
+    pub user_packages: u64,
+    pub old_generations: u64,
+    pub closure_bytes: u64,
     pub kernel_running: String,
     #[serde(default)]
     pub kernel_installed: String,
     #[serde(default)]
     pub kernel_package: String,
     #[serde(default)]
-    pub cache_freeable_bytes: Option<u64>,
-    #[serde(default)]
     pub reboot_pending: bool,
-    #[serde(default)]
-    pub upgrades_per_day: Vec<u64>,
-    #[serde(default)]
-    pub repos: BTreeMap<String, u64>,
-    #[serde(default)]
-    pub deps: HashMap<String, Deps>,
-    #[serde(default)]
-    pub cached: Option<HashMap<String, String>>,
     #[serde(default)]
     pub journal: Vec<JournalLine>,
     #[serde(default)]
@@ -187,9 +147,9 @@ pub struct Anatomy {
     #[serde(default)]
     pub desktop: String,
     #[serde(default)]
-    pub omarchy: String,
+    pub generation: Option<u64>,
     #[serde(default)]
-    pub orphan_names: Vec<String>,
+    pub old_generation_names: Vec<String>,
     #[serde(default)]
     pub uptime_seconds: Option<u64>,
     #[serde(default)]
@@ -197,20 +157,18 @@ pub struct Anatomy {
     #[serde(default)]
     pub nvidia_installed: String,
     #[serde(default)]
-    pub hyprland_running: String,
+    pub compositor_running: String,
     #[serde(default)]
-    pub hyprland_installed: String,
+    pub compositor_installed: String,
     #[serde(default)]
     pub stale_programs: Option<Vec<StaleProgram>>,
-    #[serde(default)]
-    pub config_files: Option<Vec<ConfigFile>>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Health {
     pub kernel: Option<KernelHealth>,
     pub nvidia: Option<(String, String)>,
-    pub hyprland: Option<(String, String)>,
+    pub compositor: Option<(String, String)>,
     pub config_errors: Option<u64>,
 }
 
@@ -257,7 +215,7 @@ impl Problem {
             return "kernel";
         }
         if self.kind == "config" {
-            return "Hyprland";
+            return "niri";
         }
         self.subject.rsplit('/').next().unwrap_or(&self.subject)
     }
@@ -266,28 +224,6 @@ impl Problem {
     pub fn fix_version(&self) -> &str {
         self.update.rsplit("-> ").next().unwrap_or("")
     }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct OmarchyNotes {
-    pub releases: u64,
-    pub fixes: u64,
-    pub improvements: u64,
-    pub security: u64,
-    #[serde(default)]
-    pub per_release: Vec<OmarchyRelease>,
-    #[serde(default)]
-    pub titles: Vec<String>,
-    #[serde(default)]
-    pub security_titles: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct OmarchyRelease {
-    pub tag: String,
-    pub fixes: u64,
-    pub improvements: u64,
-    pub security: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -329,20 +265,23 @@ pub struct DayChange {
     #[serde(default)]
     pub time: String,
     #[serde(default)]
-    pub cached: String,
+    pub kept: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Preflight {
     pub free_bytes: u64,
     pub free_ok: bool,
-    pub snapper_configured: bool,
-    #[serde(default)]
-    pub snapshot_by: String,
     #[serde(default)]
     pub disk_total_bytes: u64,
     #[serde(default)]
     pub disk_used_bytes: u64,
+    #[serde(default)]
+    pub rollback_generation: Option<u64>,
+    #[serde(default)]
+    pub boot_total_bytes: u64,
+    #[serde(default)]
+    pub boot_free_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,7 +333,8 @@ impl Pane {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     Journal,
-    Pacman,
+    /// A switch to another system generation.
+    Switch,
 }
 
 pub struct EventLine {
@@ -417,6 +357,8 @@ pub struct ListState {
 }
 
 pub const MAX_EVENTS: usize = 10_000;
+/// The panels on screen at start: the instruments and the eye; keys 3-5 add the lists.
+pub const DEFAULT_PANELS: [bool; 5] = [true, true, false, false, false];
 pub const DILATE: Duration = Duration::from_millis(360);
 
 pub fn ease_out_cubic(t: f64) -> f64 {
@@ -433,11 +375,9 @@ pub struct App {
     pub scan_time: Option<String>,
     pub last_upgrade: Option<String>,
     pub last_upgraded: Vec<String>,
-    pub omarchy: bool,
     pub since: Option<String>,
     pub updates: Vec<Update>,
     pub update_errors: Vec<String>,
-    pub aur_unavailable: bool,
     pub checked_sources: Vec<String>,
     pub problems: Vec<Problem>,
     pub problem_errors: Vec<String>,
@@ -445,7 +385,6 @@ pub struct App {
     pub boots: Vec<String>,
     pub news: Vec<News>,
     pub news_failed: bool,
-    pub omarchy_notes: Option<OmarchyNotes>,
     pub preflight: Option<Preflight>,
     pub anatomy: Option<Anatomy>,
     pub anatomy_at: Option<Instant>,
@@ -453,12 +392,11 @@ pub struct App {
     pub events: Vec<EventLine>,
     pub event_at: Option<Instant>,
     pub start_at: Option<Instant>,
-    pub transaction: Option<(Instant, Option<Instant>)>,
-    pub applied: Vec<(Update, Instant)>,
-    pub applied_total: usize,
-    pub full_upgrade: bool,
-    pub full_upgrade_at: Option<Instant>,
+    /// The panels on screen: the wanted ones that fit the terminal.
     pub visible: [bool; 5],
+    /// The panels chosen with keys 1-5.
+    pub wanted: [bool; 5],
+    pub size: Option<(u16, u16)>,
     pub focus: Pane,
     pub lists: [ListState; 3],
     pub editing: bool,
@@ -496,11 +434,9 @@ impl App {
             scan_time: None,
             last_upgrade: None,
             last_upgraded: Vec::new(),
-            omarchy: false,
             since: None,
             updates: Vec::new(),
             update_errors: Vec::new(),
-            aur_unavailable: false,
             checked_sources: Vec::new(),
             problem_errors: Vec::new(),
             problems: Vec::new(),
@@ -508,7 +444,6 @@ impl App {
             boots: Vec::new(),
             news: Vec::new(),
             news_failed: false,
-            omarchy_notes: None,
             preflight: None,
             anatomy: None,
             anatomy_at: None,
@@ -516,12 +451,9 @@ impl App {
             events: Vec::new(),
             event_at: None,
             start_at: None,
-            transaction: None,
-            applied: Vec::new(),
-            applied_total: 0,
-            full_upgrade: false,
-            full_upgrade_at: None,
-            visible: [true; 5],
+            visible: DEFAULT_PANELS,
+            wanted: DEFAULT_PANELS,
+            size: None,
             focus: Pane::Updates,
             lists: Default::default(),
             editing: false,
@@ -551,9 +483,8 @@ impl App {
 
     pub fn apply(&mut self, event: Event, now: Instant) {
         match event {
-            Event::Start { last_upgrade, problems_since, now: scan_time, omarchy, last_upgraded } => {
+            Event::Start { last_upgrade, problems_since, now: scan_time, last_upgraded } => {
                 self.start_at.get_or_insert(now);
-                self.omarchy = omarchy;
                 self.last_upgraded = last_upgraded;
                 self.scan_time = scan_time;
                 self.last_upgrade = last_upgrade;
@@ -588,8 +519,8 @@ impl App {
                 self.health.kernel = Some(KernelHealth { running: text("running"), installed: text("installed"), package: text("package"), uptime_seconds: value["uptime_seconds"].as_u64(), reboot_pending: value["reboot_pending"].as_bool().unwrap_or(false) });
             }
             "reading the loaded nvidia module" => self.health.nvidia = Some((text("loaded"), text("installed"))),
-            "reading the running Hyprland" => self.health.hyprland = Some((text("running"), text("installed"))),
-            "checking Hyprland config" => self.health.config_errors = value.as_u64(),
+            "reading the running niri" => self.health.compositor = Some((text("running"), text("installed"))),
+            "checking niri config" => self.health.config_errors = value.as_u64(),
             _ => {}
         }
     }
@@ -603,8 +534,8 @@ impl App {
             if self.health.nvidia.is_none() && !anatomy.nvidia_loaded.is_empty() {
                 self.health.nvidia = Some((anatomy.nvidia_loaded.clone(), anatomy.nvidia_installed.clone()));
             }
-            if self.health.hyprland.is_none() && !anatomy.hyprland_running.is_empty() {
-                self.health.hyprland = Some((anatomy.hyprland_running.clone(), anatomy.hyprland_installed.clone()));
+            if self.health.compositor.is_none() && !anatomy.compositor_running.is_empty() {
+                self.health.compositor = Some((anatomy.compositor_running.clone(), anatomy.compositor_installed.clone()));
             }
             if self.events.is_empty() {
                 for line in &anatomy.journal {
@@ -620,7 +551,6 @@ impl App {
             0 => {
                 self.updates = field(&data, "updates")?;
                 self.update_errors = field(&data, "update_check_errors")?;
-                self.aur_unavailable = field(&data, "aur_unavailable")?;
                 self.checked_sources = field(&data, "checked")?;
             }
             1 => {
@@ -636,7 +566,6 @@ impl App {
             2 => {
                 self.news = field(&data, "news")?;
                 self.news_failed = field(&data, "news_check_failed")?;
-                self.omarchy_notes = data.get("omarchy_notes").cloned().and_then(|notes| serde_json::from_value(notes).ok());
             }
             _ => {
                 self.preflight = Some(serde_json::from_value(data)?);
@@ -670,49 +599,8 @@ impl App {
     }
 
     fn activity(&mut self, line: &str, now: Instant) {
-        let line = line.trim();
-        let mut words = line.splitn(3, ' ');
-        let (action, name, rest) = (words.next().unwrap_or(""), words.next().unwrap_or(""), words.next().unwrap_or(""));
-        let versions = rest.trim_matches(|c| c == '(' || c == ')');
-        match (action, name) {
-            ("transaction", "started") => {
-                self.transaction = Some((now, None));
-                self.applied.clear();
-                self.applied_total = self.updates.len();
-            }
-            ("starting", "full") => self.full_upgrade = true,
-            ("transaction", "completed") => {
-                if let Some((_, end)) = &mut self.transaction {
-                    *end = Some(now);
-                }
-                if std::mem::take(&mut self.full_upgrade) {
-                    self.full_upgrade_at = Some(now);
-                }
-            }
-            ("upgraded" | "downgraded" | "installed" | "removed" | "reinstalled", _) => {
-                if let Some(position) = self.updates.iter().position(|update| update.name == name) {
-                    let installed = versions.split_once(" -> ").map_or(versions, |(_, new)| new);
-                    match action {
-                        "upgraded" | "installed" => {
-                            let mut update = self.updates.remove(position);
-                            update.new = installed.to_string();
-                            self.applied.push((update, now));
-                        }
-                        "removed" => {
-                            self.updates.remove(position);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
         let clock = clock_now();
-        self.push_event(EventLine { at: now, clock, day: today(), source: Source::Pacman, ident: "pacman".into(), program: String::new(), message: line.to_string(), priority: String::new(), unit: String::new(), package: String::new() }, now);
-    }
-
-    pub fn transacting(&self) -> bool {
-        self.transaction.is_some_and(|(_, end)| end.is_none())
+        self.push_event(EventLine { at: now, clock, day: today(), source: Source::Switch, ident: "nixos".into(), program: String::new(), message: line.trim().to_string(), priority: String::new(), unit: String::new(), package: String::new() }, now);
     }
 
     fn end_step(&mut self, now: Instant) {
@@ -750,45 +638,17 @@ impl App {
         self.news.iter().filter(|news| news.manual_intervention).count()
     }
 
-    pub fn download_bytes(&self) -> u64 {
-        self.updates.iter().filter_map(|update| update.download_bytes).sum()
-    }
-
-    pub fn installed_delta(&self) -> i64 {
-        self.updates.iter().filter_map(|update| update.installed_delta_bytes).sum()
-    }
-
     pub fn source_updates(&self, source: &str) -> usize {
         self.updates.iter().filter(|update| update.source == source).count()
     }
 
-    pub fn space_needed(&self) -> u64 {
-        self.download_bytes() + self.installed_delta().max(0).unsigned_abs()
-    }
-
     pub fn space_severity(&self) -> Option<Severity> {
         let preflight = self.preflight.as_ref()?;
-        Some(if preflight.free_bytes < self.space_needed() {
-            Severity::Bad
-        } else if !preflight.free_ok {
+        Some(if !preflight.free_ok {
             Severity::Warn
         } else {
             Severity::Ok
         })
-    }
-
-    pub fn reboot_after(&self) -> Vec<(&'static str, &Update)> {
-        let mut parts = Vec::new();
-        let kernel = self.health.kernel.as_ref().map(|kernel| kernel.package.as_str()).filter(|name| !name.is_empty());
-        if let Some(update) = kernel.and_then(|name| self.updates.iter().find(|update| update.name == name)) {
-            parts.push(("kernel", update));
-        }
-        if self.health.nvidia.is_some()
-            && let Some(update) = self.updates.iter().find(|update| update.name == "nvidia-utils")
-        {
-            parts.push(("nvidia", update));
-        }
-        parts
     }
 
     pub fn live_feed(&self) -> bool {
@@ -869,11 +729,20 @@ impl App {
     }
 
     pub fn toggle(&mut self, panel: usize) {
-        self.visible[panel] = !self.visible[panel];
-        if panel == 0 && !self.visible[0] {
+        self.wanted[panel] = !self.wanted[panel];
+        self.refit();
+    }
+
+    /// Recomputes the visible panels from the wanted ones and the terminal size.
+    pub fn refit(&mut self) {
+        self.visible = match self.size {
+            Some((width, height)) => crate::page::fitted(self.wanted, width, height),
+            None => self.wanted,
+        };
+        if !self.visible[0] {
             self.leave_tiles();
         }
-        if panel == 1 && !self.visible[1] {
+        if !self.visible[1] {
             self.leave_band();
         }
         if !self.visible[self.focus.panel()]
@@ -912,10 +781,6 @@ impl App {
             .then(|| self.activity.iter().filter(|day| day.date.as_str() <= first).flat_map(|day| day.changes.iter().filter(|change| change.name == problem.package).map(move |change| (day.date.as_str(), change))).last())
             .flatten();
         Some((first, change))
-    }
-
-    pub fn cache_command(&self) -> bool {
-        self.anatomy.as_ref().and_then(|anatomy| anatomy.cache_freeable_bytes).is_some_and(|freeable| freeable > 0)
     }
 
     pub fn list_focused(&self, pane: Pane) -> bool {
@@ -972,7 +837,7 @@ impl App {
             self.updates_map = false;
             return;
         }
-        let hiding = self.visible[panel];
+        let hiding = self.wanted[panel];
         self.toggle(panel);
         if panel == updates && hiding {
             self.updates_map = true;
@@ -1019,8 +884,12 @@ impl App {
         self.visible[1] && self.pictures && self.page_fits
     }
 
-    pub fn fit_page(&mut self, fits: bool) {
-        self.page_fits = fits;
+    pub fn fit_to(&mut self, width: u16, height: u16) {
+        if self.size != Some((width, height)) {
+            self.size = Some((width, height));
+            self.refit();
+        }
+        self.page_fits = crate::page::fits(self, width, height);
         if self.options && !self.eye_shown() {
             (self.options, self.options_from) = (false, (0.0, None));
             self.theme_filter.clear();

@@ -117,7 +117,6 @@ pub struct Motion {
     glows: Vec<(u8, Instant, u8)>,
     flashes: Vec<(u8, Instant, u8)>,
     last_activity: Instant,
-    omarchy: bool,
     attention: Option<(Instant, Target)>,
     next_look: Option<Instant>,
     looks: u32,
@@ -165,22 +164,18 @@ fn ms(value: u64) -> Duration {
 
 pub fn command_of(label: &str) -> &str {
     match label {
-        "checking repository updates" => "checkupdates",
-        "checking AUR updates" => "yay -Qua",
-        "checking Flatpak updates" => "flatpak remote-ls --updates",
-        "checking mise updates" => "mise outdated",
+        "checking flake inputs" => "git ls-remote",
         "reading crash reports" => "coredumpctl list",
         "reading journal errors" => "journalctl -p err",
         "checking failed units" => "systemctl --failed",
-        "checking Hyprland config" => "hyprctl configerrors",
+        "checking niri config" => "niri validate",
         "reading the running kernel" => "uname -r",
         "reading the loaded nvidia module" => "/sys/module/nvidia/version",
-        "reading the running Hyprland" => "hyprctl version",
-        "listing installed packages" => "pacman -Q",
-        "measuring the package cache" => "paccache -dk1",
-        "fetching Arch news" => "curl archlinux.org/feeds/news",
-        "fetching Omarchy release notes" => "curl omacom/omarchy/releases",
-        "checking disk space and snapshots" => "df /",
+        "reading the running niri" => "niri msg version",
+        "listing the system closure" => "nix-store -qR /run/current-system",
+        "measuring the system closure" => "nix path-info -S",
+        "fetching NixOS news" => "curl nixos.org/blog",
+        "checking /nix and /boot space" => "df /nix /boot",
         other => other,
     }
 }
@@ -189,28 +184,25 @@ pub fn result_of(label: &str, value: &Value) -> String {
     let number = value.as_u64();
     let count = |one: &str, many: &str| number.map_or_else(|| "failed".to_string(), |n| format!("{} {}", crate::page::thousands(n), if n == 1 { one } else { many }));
     match label {
-        "checking repository updates" => count("update", "updates"),
-        "checking AUR updates" => count("aur", "aur"),
-        "checking Flatpak updates" | "checking mise updates" => count("update", "updates"),
+        "checking flake inputs" => count("input behind", "inputs behind"),
         "reading crash reports" => number.map_or_else(|| "failed".to_string(), |n| format!("{} {}", crate::page::thousands(n), if n == 1 { "crash" } else { "crashes" })),
         "reading journal errors" => count("error", "errors"),
         "checking failed units" => count("unit", "units"),
-        "checking Hyprland config" => number.map_or_else(|| "failed".to_string(), |n| n.to_string()),
+        "checking niri config" => number.map_or_else(|| "failed".to_string(), |n| n.to_string()),
         "reading the running kernel" => value["running"].as_str().unwrap_or_default().to_string(),
         "reading the loaded nvidia module" => value["loaded"].as_str().unwrap_or_default().to_string(),
-        "reading the running Hyprland" => value["running"].as_str().map(|version| format!("v{version}")).unwrap_or_default(),
-        "listing installed packages" => {
-            let orphans = value["orphans"].as_u64().unwrap_or(0);
-            format!("{} · {orphans} {}", crate::page::thousands(value["packages"].as_u64().unwrap_or(0)), if orphans == 1 { "orphan" } else { "orphans" })
+        "reading the running niri" => value["running"].as_str().map(|version| format!("v{version}")).unwrap_or_default(),
+        "listing the system closure" => {
+            let old = value["old_generations"].as_u64().unwrap_or(0);
+            format!("{} paths · {old} old {}", crate::page::thousands(value["store_paths"].as_u64().unwrap_or(0)), if old == 1 { "generation" } else { "generations" })
         }
-        "measuring the package cache" => number.map_or_else(|| "no paccache".to_string(), |bytes| format!("{} freeable", crate::page::bytes(bytes))),
-        "fetching Arch news" => match number {
+        "measuring the system closure" => number.map_or_else(String::new, crate::page::bytes),
+        "fetching NixOS news" => match number {
             None => "failed".to_string(),
             Some(0) => "none new".to_string(),
             Some(n) => format!("{n} new"),
         },
-        "fetching Omarchy release notes" => number.map_or_else(|| "failed".to_string(), |n| format!("{n} {}", if n == 1 { "release" } else { "releases" })),
-        "checking disk space and snapshots" => number.map_or_else(String::new, |bytes| format!("{} available", crate::page::bytes(bytes))),
+        "checking /nix and /boot space" => number.map_or_else(String::new, |bytes| format!("{} available", crate::page::bytes(bytes))),
         _ => match value {
             Value::String(text) => text.clone(),
             Value::Null => String::new(),
@@ -245,7 +237,6 @@ impl Motion {
             glows: Vec::new(),
             flashes: Vec::new(),
             last_activity: now,
-            omarchy: false,
             attention: None,
             next_look: None,
             looks: 0,
@@ -338,11 +329,10 @@ impl Motion {
         }
         self.last_activity = now;
         match event {
-            Event::Start { ref last_upgrade, omarchy, .. } => {
-                self.omarchy = omarchy;
+            Event::Start { ref last_upgrade, .. } => {
                 let tail = upgrade_tail(last_upgrade.as_deref());
                 let start = self.free(now);
-                let head = "› pacman.log".to_string();
+                let head = "› /nix/var/nix/profiles".to_string();
                 let result = start + TYPE * head.chars().count() as u32 + ms(280);
                 self.line(start, head, tail, Some(result), TYPE);
                 self.cursor = result + GAP;
@@ -378,7 +368,7 @@ impl Motion {
                         self.receive(base + ms(1200), Target::Part(0), 0, 360);
                         base + ms(1600)
                     }
-                    "reading the loaded nvidia module" | "reading the running Hyprland" => {
+                    "reading the loaded nvidia module" | "reading the running niri" => {
                         let part = if label == "reading the loaded nvidia module" { 1 } else { 2 };
                         self.receive(base, Target::Edge(part), 0, 420);
                         self.flashes.push((part, base + ms(210), 0));
@@ -425,7 +415,7 @@ impl Motion {
                 let name = line.split_whitespace().nth(1).unwrap_or("");
                 let part = Subsystem::ALL.iter().position(|part| *part == Subsystem::of(name)).unwrap_or(6) as u8;
                 let tail = line.trim().to_string();
-                self.live(event_box(event), raw, part, 0, "pacman".into(), tail, now, app);
+                self.live(event_box(event), raw, part, 0, "nixos".into(), tail, now, app);
             }
         }
     }
@@ -470,9 +460,6 @@ impl Motion {
             }
             "problems" => {
                 let arrival = self.send(at, Target::Tile(1), 1, 720, true);
-                if !self.omarchy {
-                    self.send(at, Target::Tile(3), 0, 760, true);
-                }
                 self.send(at, Target::List(1), 2, 700, true);
                 let mut hit = [false; 7];
                 for problem in data["problems"].as_array().into_iter().flatten() {
@@ -488,14 +475,12 @@ impl Motion {
                 Some((1, arrival))
             }
             "anatomy" => {
+                self.send(at, Target::Tile(3), 0, 760, true);
                 self.send(at, Target::Tile(4), 0, 760, true);
                 self.send(at, Target::List(2), 1, 700, true);
                 None
             }
             "news" => {
-                if self.omarchy {
-                    self.send(at, Target::Tile(3), 0, 760, true);
-                }
                 Some((2, self.send(at, Target::Tile(5), 0, 760, true)))
             }
             "preflight" => {
@@ -546,7 +531,7 @@ impl Motion {
         self.shown_select[pane.index()] = Some(row);
         let (head, tail) = match pane {
             Pane::Updates => match app.visible_updates().get(row) {
-                Some(update) => (format!("▸ {}", update.name), format!("{} → {} · {}", crate::page::short_version(&update.old), crate::page::short_version(&update.new), update.risk)),
+                Some(update) => (format!("▸ {}", update.name), format!("{} → {} · {}", update.old, update.new, update.risk)),
                 None => return,
             },
             Pane::Problems => match app.visible_problems().get(row) {
