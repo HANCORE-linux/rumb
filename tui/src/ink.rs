@@ -782,12 +782,14 @@ pub struct Rain {
     pub previous: u64,
     pub switch: f32,
     pub tint: Option<(Color, f32)>,
+    /// A pending reboot or a high-risk update: the lambdas blink in this color.
+    pub alert: Option<Color>,
     pub pupil: f32,
 }
 
 impl std::fmt::Debug for Rain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Rain({}, {}, {}, {}, {}, {:?}, {})", self.clock.to_bits(), self.level.to_bits(), self.feed, self.previous, self.switch.to_bits(), self.tint.map(|(color, strength)| (color, strength.to_bits())), self.pupil.to_bits())
+        write!(f, "Rain({}, {}, {}, {}, {}, {:?}, {:?}, {})", self.clock.to_bits(), self.level.to_bits(), self.feed, self.previous, self.switch.to_bits(), self.alert, self.tint.map(|(color, strength)| (color, strength.to_bits())), self.pupil.to_bits())
     }
 }
 
@@ -838,6 +840,10 @@ fn sized_atlas(target: f32) -> Option<&'static Atlas> {
 }
 
 type Glyphs = Vec<(char, SkColor)>;
+
+/// The two blues of the Nix logo, on the first glyph of each drop.
+const NIX_BLUE_LIGHT: Color = Color::Rgb(0x7e, 0xba, 0xe4);
+const NIX_BLUE_DARK: Color = Color::Rgb(0x52, 0x77, 0xc3);
 
 /// What falls in the eye: mostly the lambda of Nix, with the arrow, the
 /// composition and the equivalence of the language it comes from. The text of
@@ -1121,10 +1127,15 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
                     continue;
                 }
                 let ch = NIX_RAIN[(noise(seed ^ 0x9e37) * NIX_RAIN.len() as f32) as usize % NIX_RAIN.len()];
-                let tone = match rain.tint {
-                    Some((tint, strength)) => mix(pal.ink, tint, f64::from((strength * spark).clamp(0.0, 1.0))),
-                    None => pal.ink,
-                };
+                let blue = if column % 2 == 0 { NIX_BLUE_LIGHT } else { NIX_BLUE_DARK };
+                let mut tone = mix(pal.ink, blue, f64::from(spark.clamp(0.0, 1.0)));
+                if let Some((tint, strength)) = rain.tint {
+                    tone = mix(tone, tint, f64::from((strength * spark).clamp(0.0, 1.0)));
+                }
+                if let Some(alert) = rain.alert {
+                    let pulse = 0.5 + 0.5 * (rain.clock * 2.4 + column as f32 * 0.7).sin();
+                    tone = mix(tone, alert, f64::from((pulse * (0.3 + 0.7 * spark)).clamp(0.0, 1.0)));
+                }
                 if inner {
                     pupil_drops.push((x, baseline, ch, tone, alpha * rain.pupil));
                     continue;

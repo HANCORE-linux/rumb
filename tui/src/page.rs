@@ -849,6 +849,18 @@ fn tile_checks(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette) {
     );
 }
 
+/// What makes the lambdas blink: a high-risk update (red), else a pending reboot (yellow).
+fn eye_alert(app: &App, pal: &Palette) -> Option<Color> {
+    app.finished_at?;
+    if app.high() > 0 {
+        Some(pal.alert)
+    } else if app.anatomy.as_ref().is_some_and(|anatomy| anatomy.reboot_pending) {
+        Some(pal.warn)
+    } else {
+        None
+    }
+}
+
 /// One line with the checks of the instruments, for terminals too small for them.
 fn draw_summary(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette) {
     let tone = |severity: Severity| match severity {
@@ -3196,6 +3208,7 @@ fn draw_nerve(buf: &mut Buffer, area: Rect, app: &App, motion: &Motion, pal: &Pa
         previous: rain.previous,
         switch: rain.switch,
         tint: rain.tint.map(|(kind, strength)| (if kind == 2 { pal.alert } else { pal.teal }, strength)),
+        alert: eye_alert(app, pal),
         pupil: rain.pupil,
     });
     scene.placements.push(Placement { rect: eye, picture: Picture::Eye(Box::new(spec)) });
