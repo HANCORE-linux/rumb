@@ -18,7 +18,7 @@
       static = pkgs.pkgsStatic;
       version = "0.1.9";
 
-      scanTools = with pkgs; [ jq coreutils findutils gawk gnused gnugrep curl git nix systemd libxml2.bin ];
+      rumb = pkgs.callPackage ./nix/package.nix { };
 
       common = {
         pname = "rumb";
@@ -27,27 +27,8 @@
         cargoRoot = "tui";
         buildAndTestSubdir = "tui";
         cargoLock.lockFile = ./tui/Cargo.lock;
-        meta = {
-          description = "Terminal dashboard for NixOS system health";
-          homepage = "https://github.com/HANCORE-linux/rumb";
-          license = pkgs.lib.licenses.mit;
-          mainProgram = "rumb";
-        };
+        meta = rumb.meta;
       };
-
-      rumb = pkgs.rustPlatform.buildRustPackage (common // {
-        nativeBuildInputs = [ pkgs.makeWrapper ];
-        # Os testes rodam no checkPhase (cargo test) e precisam do scanner ao lado.
-        postInstall = ''
-          install -Dm755 bin/rumb-scan $out/libexec/rumb/rumb-scan
-          substituteInPlace $out/libexec/rumb/rumb-scan \
-            --replace-fail '#!/usr/bin/env bash' '#!${pkgs.bash}/bin/bash'
-          install -Dm644 man/rumb.1 $out/share/man/man1/rumb.1
-          wrapProgram $out/bin/rumb \
-            --set RUMB_SCAN $out/libexec/rumb/rumb-scan \
-            --suffix PATH : ${pkgs.lib.makeBinPath scanTools}
-        '';
-      });
 
       # Binário musl estático: roda em qualquer Linux sem /nix/store próprio.
       rumbStatic = static.rustPlatform.buildRustPackage (common // { doCheck = false; });
@@ -97,5 +78,11 @@
         default = rumb;
       };
       apps.${system}.default = { type = "app"; program = "${rumb}/bin/rumb"; };
+
+      # nixpkgs.overlays = [ inputs.rumb.overlays.default ];  →  pkgs.rumb
+      overlays.default = final: _prev: { rumb = final.callPackage ./nix/package.nix { }; };
+
+      # imports = [ inputs.rumb.nixosModules.default ];  →  programs.rumb.enable = true;
+      nixosModules.default = import ./nix/module.nix { rumbPackages = self.packages; };
     };
 }

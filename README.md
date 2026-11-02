@@ -11,17 +11,46 @@
 
 This is a NixOS fork of [HANCORE-linux/rumb](https://github.com/HANCORE-linux/rumb). The look, the eye and the dashboard come from upstream; the scanner and the instruments were rewritten for NixOS.
 
-## Run
+## Install
 
-From this repository:
+**Try it, nothing installed**
 
 ```sh
-nix run github:jardel20/rumb/nixos            # the dashboard
-nix run github:jardel20/rumb/nixos -- --demo  # bundled demo data
-nix build .#appimage                          # an AppImage (inside a clone)
+nix run github:jardel20/rumb              # the dashboard
+nix run github:jardel20/rumb -- --demo    # bundled demo data
 ```
 
-Or add this flake as an input and put `packages.x86_64-linux.default` in `environment.systemPackages`.
+**In your NixOS flake**
+
+```nix
+{
+  inputs.rumb = {
+    url = "github:jardel20/rumb";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { nixpkgs, rumb, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      modules = [
+        rumb.nixosModules.default
+        { programs.rumb.enable = true; }
+      ];
+    };
+  };
+}
+```
+
+Or without the module, as a package from the overlay (`nixpkgs.overlays = [ rumb.overlays.default ];`, then `environment.systemPackages = [ pkgs.rumb ];`), or straight from the flake (`rumb.packages.${system}.default`). With `inputs.nixpkgs.follows` the package is built with your own nixpkgs.
+
+**AppImage**
+
+Every push builds an AppImage in GitHub Actions (Actions → AppImage → Artifacts), and every `v*` tag publishes it on the [Releases](https://github.com/jardel20/rumb/releases) page together with its `sha256`:
+
+```sh
+chmod +x rumb-x86_64.AppImage && ./rumb-x86_64.AppImage
+```
+
+It carries a static `rumb`; the scanner uses the `nix`, `systemctl`, `journalctl` and `curl` of the system it runs on. On NixOS it runs through `appimage-run` (`programs.appimage.binfmt = true;`). To build it yourself: `nix build .#appimage`.
 
 ## What it shows
 

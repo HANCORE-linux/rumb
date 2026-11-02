@@ -1,0 +1,58 @@
+name: AppImage
+
+on:
+  push:
+    branches: [nixos]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Build the package (runs the tests)
+        run: nix build .#rumb -L
+      - name: Build the AppImage
+        run: |
+          nix build .#appimage -L
+          install -m755 "$(readlink -f result)" rumb-x86_64.AppImage
+          sha256sum rumb-x86_64.AppImage | tee rumb-x86_64.AppImage.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rumb-x86_64.AppImage
+          path: |
+            rumb-x86_64.AppImage
+            rumb-x86_64.AppImage.sha256
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rumb-x86_64.AppImage
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          chmod +x rumb-x86_64.AppImage
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "rumb $TAG" \
+            --notes "NixOS build of rumb. Download \`rumb-x86_64.AppImage\`, \`chmod +x\` it and run it, or install it with the flake: see the README." \
+            rumb-x86_64.AppImage rumb-x86_64.AppImage.sha256 \
+            || gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber rumb-x86_64.AppImage rumb-x86_64.AppImage.sha256
