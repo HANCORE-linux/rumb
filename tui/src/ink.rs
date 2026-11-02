@@ -841,14 +841,13 @@ fn sized_atlas(target: f32) -> Option<&'static Atlas> {
 
 type Glyphs = Vec<(char, SkColor)>;
 
-/// The two blues of the Nix logo, on the first glyph of each drop.
+/// The two blues of the Nix logo, on the lambda of each drop.
 const NIX_BLUE_LIGHT: Color = Color::Rgb(0x7e, 0xba, 0xe4);
 const NIX_BLUE_DARK: Color = Color::Rgb(0x52, 0x77, 0xc3);
 
-/// What falls in the eye: mostly the lambda of Nix, with the arrow, the
-/// composition and the equivalence of the language it comes from. The text of
-/// the feed only decides where the gaps are.
-const NIX_RAIN: [char; 10] = ['λ', 'λ', 'λ', 'λ', 'λ', 'λ', 'λ', '→', '∘', '≡'];
+/// The first glyph of each falling drop, the spark, is the lambda of Nix; the
+/// rest of the drop is the text of the feed.
+const NIX_HEAD: char = 'λ';
 
 struct Break {
     end: usize,
@@ -1126,15 +1125,16 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
                 if ch.is_whitespace() {
                     continue;
                 }
-                let ch = NIX_RAIN[(noise(seed ^ 0x9e37) * NIX_RAIN.len() as f32) as usize % NIX_RAIN.len()];
+                let head = distance < 1.0;
+                let ch = if head { NIX_HEAD } else { ch };
                 let blue = if column % 2 == 0 { NIX_BLUE_LIGHT } else { NIX_BLUE_DARK };
-                let mut tone = mix(pal.ink, blue, f64::from(spark.clamp(0.0, 1.0)));
+                let mut tone = if head { mix(pal.ink, blue, f64::from(spark.clamp(0.0, 1.0))) } else { pal.ink };
                 if let Some((tint, strength)) = rain.tint {
                     tone = mix(tone, tint, f64::from((strength * spark).clamp(0.0, 1.0)));
                 }
                 if let Some(alert) = rain.alert {
                     let pulse = 0.5 + 0.5 * (rain.clock * 2.4 + column as f32 * 0.7).sin();
-                    tone = mix(tone, alert, f64::from((pulse * (0.3 + 0.7 * spark)).clamp(0.0, 1.0)));
+                    tone = mix(tone, alert, f64::from((pulse * (0.55 + 0.7 * spark)).clamp(0.0, 1.0)));
                 }
                 if inner {
                     pupil_drops.push((x, baseline, ch, tone, alpha * rain.pupil));

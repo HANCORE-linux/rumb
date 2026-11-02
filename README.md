@@ -19,7 +19,7 @@ This is a NixOS fork of [HANCORE-linux/rumb](https://github.com/HANCORE-linux/ru
   <img src="docs/screenshot-text.png" alt="rumb in a narrower terminal: the instruments as text" width="100%">
 </p>
 
-The first picture is a terminal of 220 columns, where the instruments are rings; below about 185 columns they turn into the text tiles of the second. Both come from the demo data (`rumb --demo`), made with `docs/screenshot.py`. The code that rains in the eye is the lambda of Nix; its first glyphs take the blues of the Nix logo, and the lambdas blink red or yellow while a high-risk update or a reboot is pending.
+The first picture is a terminal of 220 columns, where the instruments are rings; below about 185 columns they turn into the text tiles of the second. Both come from the demo data (`rumb --demo`), made with `docs/screenshot.py`. The code that rains in the eye is the text of the feed; the first glyph of each drop is the lambda of Nix, in the blues of its logo, and it blinks red or yellow while a high-risk update or a reboot is pending.
 
 ## Install
 
