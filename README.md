@@ -11,6 +11,16 @@
 
 This is a NixOS fork of [HANCORE-linux/rumb](https://github.com/HANCORE-linux/rumb). The look, the eye and the dashboard come from upstream; the scanner and the instruments were rewritten for NixOS.
 
+<p align="center">
+  <img src="docs/screenshot-rings.png" alt="rumb in a wide terminal: the instruments as rings, and the eye" width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/screenshot-text.png" alt="rumb in a narrower terminal: the instruments as text" width="100%">
+</p>
+
+The first picture is a terminal of 220 columns, where the instruments are rings; below about 185 columns they turn into the text tiles of the second. Both come from the demo data (`rumb --demo`), made with `docs/screenshot.py`. The code that rains in the eye is the lambda of Nix.
+
 ## Install
 
 **Try it, nothing installed**

@@ -839,6 +839,11 @@ fn sized_atlas(target: f32) -> Option<&'static Atlas> {
 
 type Glyphs = Vec<(char, SkColor)>;
 
+/// What falls in the eye: mostly the lambda of Nix, with the arrow, the
+/// composition and the equivalence of the language it comes from. The text of
+/// the feed only decides where the gaps are.
+const NIX_RAIN: [char; 10] = ['λ', 'λ', 'λ', 'λ', 'λ', 'λ', 'λ', '→', '∘', '≡'];
+
 struct Break {
     end: usize,
     next: usize,
@@ -1115,6 +1120,7 @@ pub fn eye(spec: &EyeSpec, pal: &Palette, width: u32, height: u32, cell_height: 
                 if ch.is_whitespace() {
                     continue;
                 }
+                let ch = NIX_RAIN[(noise(seed ^ 0x9e37) * NIX_RAIN.len() as f32) as usize % NIX_RAIN.len()];
                 let tone = match rain.tint {
                     Some((tint, strength)) => mix(pal.ink, tint, f64::from((strength * spark).clamp(0.0, 1.0))),
                     None => pal.ink,
