@@ -12,5 +12,6 @@ install:
 uninstall:
 	rm -f "$(DESTDIR)$(PREFIX)/bin/rumb" "$(DESTDIR)$(PREFIX)/bin/rumb-scan" "$(DESTDIR)$(PREFIX)/share/man/man1/rumb.1"
 	rm -f "$(DESTDIR)$(PREFIX)/share/licenses/rumb/OFL-JetBrainsMono.txt"
+	rmdir "$(DESTDIR)$(PREFIX)/share/licenses/rumb" 2>/dev/null || true
 
 .PHONY: all install uninstall

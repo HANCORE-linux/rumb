@@ -86,6 +86,11 @@ struct Options {
     args: Vec<String>,
 }
 
+fn print_and_exit(text: &str) -> ! {
+    let _ = writeln!(io::stdout(), "{text}");
+    std::process::exit(0);
+}
+
 fn parse_args() -> Result<Options, String> {
     let mut options = Options { demo: false, no_anim: false, theme: None, args: Vec::new() };
     let mut args = std::env::args().skip(1);
@@ -95,23 +100,14 @@ fn parse_args() -> Result<Options, String> {
             "--no-anim" => options.no_anim = true,
             "--no-aur" => options.args.push(arg),
             "--theme" => options.theme = Some(args.next().ok_or("--theme needs a name")?),
-            "--themes" => {
-                println!("{}", theme::choices().join("\n"));
-                std::process::exit(0);
-            }
-            "-V" | "--version" => {
-                println!("rumb {}", env!("CARGO_PKG_VERSION"));
-                std::process::exit(0);
-            }
+            "--themes" => print_and_exit(&theme::choices().join("\n")),
+            "-V" | "--version" => print_and_exit(&format!("rumb {}", env!("CARGO_PKG_VERSION"))),
             "--since" => {
                 let value = args.next().ok_or("--since needs a value")?;
                 options.args.push(arg);
                 options.args.push(value);
             }
-            "-h" | "--help" => {
-                println!("{USAGE}");
-                std::process::exit(0);
-            }
+            "-h" | "--help" => print_and_exit(USAGE),
             other => return Err(format!("Unknown option: {other}")),
         }
     }
@@ -1817,6 +1813,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_tile_that_waits_for_its_data_shows_no_dial() {
+        let start = Instant::now();
+        let mut app = App::new(false, true, start);
+        app.pictures = true;
+        let mut motion = Motion::new(true, start);
+        let lines: Vec<(u64, &str)> = include_str!("../demo.ndjson")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .scan(0, |at, line| {
+                *at += serde_json::from_str::<Value>(line).unwrap()["_delay"].as_u64().unwrap_or(0);
+                Some((*at, line))
+            })
+            .collect();
+        let (mut next, mut waiting) = (0, 0);
+        for millis in (0..12_000).step_by(100) {
+            let now = start + Duration::from_millis(millis);
+            while next < lines.len() && lines[next].0 <= millis {
+                motion.push(serde_json::from_str(lines[next].1).unwrap(), lines[next].1, &mut app, now);
+                next += 1;
+            }
+            motion.step(&mut app, now, 0.1);
+            let mut terminal = Terminal::new(TestBackend::new(271, 60)).unwrap();
+            let mut scene = None;
+            terminal.draw(|frame| scene = Some(page::draw(frame, &app, &motion, &palette::Palette::labra(), now, (7, 17)))).unwrap();
+            let (buffer, scene) = (terminal.backend().buffer().clone(), scene.unwrap());
+            for y in 1..14 {
+                let line: String = (0..271).map(|x| buffer[(x, y)].symbol()).collect();
+                for (byte, _) in line.match_indices("checking…") {
+                    let x = line[..byte].chars().count() as u16;
+                    waiting += 1;
+                    assert!(!scene.placements.iter().any(|placement| placement.rect.contains((x, y).into())), "a dial under \"checking…\" at {x},{y} after {millis} ms");
+                }
+            }
+        }
+        assert!(waiting > 0, "no tile waited in the first 12 s of the demo");
     }
 
     #[test]
