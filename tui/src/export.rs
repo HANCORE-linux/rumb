@@ -2,12 +2,13 @@ use std::fmt::Write as _;
 use std::fs::{DirBuilder, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::app::{App, Source, Subsystem};
-use crate::page::{bytes, thousands};
+use crate::app::{App, Problem, Source, Subsystem};
+use crate::page::{bytes, frame_text, signal_meaning, thousands};
 
 const COPY_WAIT: Duration = Duration::from_secs(2);
 
@@ -44,7 +45,12 @@ pub fn copy(text: String) -> io::Result<()> {
 }
 
 fn pipe(program: &str, args: &[&str], text: String, wait: Duration) -> io::Result<()> {
-    let mut child = Command::new(program).args(args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+    let mut command = Command::new(program);
+    command.args(args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(|| if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == 0 { Ok(()) } else { Err(io::Error::last_os_error()) });
+    }
+    let mut child = command.spawn()?;
     let mut input = child.stdin.take().ok_or_else(|| io::Error::other("no input pipe"))?;
     let writer = std::thread::spawn(move || input.write_all(text.as_bytes()));
     let deadline = Instant::now() + wait;
@@ -61,6 +67,21 @@ fn pipe(program: &str, args: &[&str], text: String, wait: Duration) -> io::Resul
     };
     writer.join().map_err(|_| io::Error::other("input not written"))??;
     if status.success() { Ok(()) } else { Err(io::Error::other(format!("{program} {status}"))) }
+}
+
+fn problem_message(problem: &Problem) -> String {
+    if !problem.message.is_empty() {
+        return problem.message.clone();
+    }
+    let mut parts = Vec::new();
+    if !problem.signal.is_empty() {
+        let meaning = signal_meaning(&problem.signal);
+        parts.push(if meaning.is_empty() { problem.signal.clone() } else { format!("{} ({meaning})", problem.signal) });
+    }
+    if let Some(frame) = problem.frames.split('|').find(|frame| !frame.is_empty()) {
+        parts.push(format!("in {}", frame_text(frame)));
+    }
+    parts.join(" ")
 }
 
 fn signed(value: i64) -> String {
@@ -166,13 +187,13 @@ pub fn report(app: &App) -> String {
     if app.problems.is_empty() {
         out.push_str(if app.stage_done_at[1].is_some() { "None found.\n" } else { "Not checked yet.\n" });
     } else {
-        out.push_str("| count | kind | subject | owner | status |\n|---|---|---|---|---|\n");
+        out.push_str("| count | kind | subject | owner | status | message |\n|---|---|---|---|---|---|\n");
         for problem in app.problems_by_count() {
             let status = match problem.status.as_str() {
                 "possibly-fixed" => format!("owner has an update: {}", problem.update),
                 other => other.to_string(),
             };
-            let _ = writeln!(out, "| {} | {} | {} | {} | {} |", problem.count, cell(&problem.kind), cell(&problem.subject), cell(&problem.package), cell(&status));
+            let _ = writeln!(out, "| {} | {} | {} | {} | {} | {} |", problem.count, cell(&problem.kind), cell(&problem.subject), cell(&problem.package), cell(&status), cell(&problem_message(problem)));
         }
         if app.problems.iter().any(|problem| problem.status == "possibly-fixed") {
             out.push_str("\nAn update to the owner is a hint, not a verified fix.\n");
@@ -231,5 +252,25 @@ mod tests {
         let took = start.elapsed();
         assert_eq!(error.to_string(), "sh did not finish in 2 s");
         assert!(took >= COPY_WAIT && took < COPY_WAIT + Duration::from_secs(1), "{took:?}");
+    }
+
+    #[test]
+    fn the_report_names_the_message_of_each_problem() {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        let problems = serde_json::json!([
+            {"kind": "journal", "subject": "/usr/bin/tool", "count": 5, "package": "tool", "status": "no-update", "message": "read | failed"},
+            {"kind": "crash", "subject": "/usr/bin/app", "count": 2, "package": "app", "status": "no-update", "signal": "SIGSEGV", "frames": "draw (libapp.so.1)|app + 0x10"},
+            {"kind": "config", "subject": "Hyprland config errors", "count": 1, "status": "config"}
+        ]);
+        app.apply(crate::source::Event::Stage { stage: "problems".into(), data: serde_json::json!({"problems": problems, "activity": []}) }, now);
+        let text = report(&app);
+        for row in [
+            "| 5 | journal | /usr/bin/tool | tool | no-update | read \\| failed |",
+            "| 2 | crash | /usr/bin/app | app | no-update | SIGSEGV (invalid memory access) in draw (libapp.so.1) |",
+            "| 1 | config | Hyprland config errors |  | config |  |",
+        ] {
+            assert!(text.lines().any(|line| line == row), "missing {row}\n{text}");
+        }
     }
 }

@@ -1550,14 +1550,14 @@ pub fn demangle(symbol: &str) -> String {
     if parts.is_empty() { symbol.to_string() } else { parts.join("::") }
 }
 
-fn frame_text(frame: &str) -> String {
+pub fn frame_text(frame: &str) -> String {
     match frame.split_once(" (") {
         Some((name, module)) => format!("{} ({module}", demangle(name)),
         None => frame.to_string(),
     }
 }
 
-fn signal_meaning(signal: &str) -> &'static str {
+pub fn signal_meaning(signal: &str) -> &'static str {
     match signal {
         "SIGSEGV" => "invalid memory access",
         "SIGABRT" => "the program stopped itself",
