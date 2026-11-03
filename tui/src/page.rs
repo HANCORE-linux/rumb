@@ -839,6 +839,16 @@ fn tile_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
     legend(buf, area, "from the release notes", pal);
 }
 
+const RC_PACKAGES: usize = 8;
+
+fn indented(lines: &mut Vec<(String, String, Color)>, name: &str, text: &str, room: usize, color: Color) {
+    let mut item = Vec::new();
+    wrapped(&mut item, name, text, room.saturating_sub(2), color);
+    for (k, (name, value, color)) in item.into_iter().enumerate() {
+        lines.push((name, if k == 0 { value } else { format!("  {value}") }, color));
+    }
+}
+
 fn rc_tone(severity: Severity, pal: &Palette) -> Color {
     match severity {
         Severity::Ok => pal.ok,
@@ -2016,7 +2026,8 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
                 lines.push(("omarchy".into(), "up to date".to_string(), pal.label));
                 if let Some(rc) = &app.omarchy_rc {
                     lines.push((format!("rc {}", rc.version), "release candidate · switch with omarchy-channel-set rc".to_string(), pal.label));
-                    for (index, package) in rc.packages.iter().enumerate() {
+                    let listed = if rc.packages.len() > RC_PACKAGES + 1 { RC_PACKAGES } else { rc.packages.len() };
+                    for (index, package) in rc.packages.iter().take(listed).enumerate() {
                         let value = if package.old.is_empty() {
                             format!("{} {} · new", package.name, package.new.rsplit_once('-').map_or(package.new.as_str(), |(version, _)| version))
                         } else {
@@ -2024,24 +2035,25 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
                         };
                         lines.push((if index == 0 { "packages" } else { "" }.into(), value, pal.ink));
                     }
+                    if rc.packages.len() > listed {
+                        lines.push((String::new(), format!("+ {} more packages", thousands((rc.packages.len() - listed) as u64)), pal.faint));
+                    }
                     match &rc.breaking {
                         Some(changes) => {
                             for (index, change) in changes.iter().enumerate() {
-                                let mut item = Vec::new();
-                                wrapped(&mut item, if index == 0 { "changes" } else { "" }, change, room.saturating_sub(2), pal.warn);
-                                for (k, (name, value, color)) in item.into_iter().enumerate() {
-                                    lines.push((name, if k == 0 { value } else { format!("  {value}") }, color));
-                                }
+                                indented(&mut lines, if index == 0 { "changes" } else { "" }, change, room, pal.warn);
                             }
                             if let Some(taken) = rc.keys_taken.as_ref().filter(|_| rc.keys > 0) {
-                                lines.push(if taken.is_empty() {
-                                    ("your keys".into(), format!("none of the {} new default keys is bound by you", rc.keys), pal.ok)
-                                } else {
-                                    ("your keys".into(), format!("{} of the {} new default keys bound by you: {}", taken.len(), rc.keys, taken.join(" · ")), pal.warn)
-                                });
+                                let text = match (taken.len(), rc.keys) {
+                                    (0, 1) => "the new default key is not bound by you".to_string(),
+                                    (0, keys) => format!("none of the {keys} new default keys is bound by you"),
+                                    (_, 1) => format!("the new default key is bound by you: {}", taken.join(" · ")),
+                                    (count, keys) => format!("{count} of the {keys} new default keys bound by you: {}", taken.join(" · ")),
+                                };
+                                indented(&mut lines, "your keys", &text, room, if taken.is_empty() { pal.ok } else { pal.warn });
                             }
                             for (index, change) in rc.deprecations.iter().enumerate() {
-                                lines.push((if index == 0 { "deprecated" } else { "" }.into(), change.clone(), pal.label));
+                                indented(&mut lines, if index == 0 { "deprecated" } else { "" }, change, room, pal.label);
                             }
                             if rc.more > 0 {
                                 lines.push((String::new(), format!("+ {} more in the release notes", thousands(rc.more)), pal.faint));

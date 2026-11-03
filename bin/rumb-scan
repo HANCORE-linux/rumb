@@ -1061,8 +1061,9 @@ omarchy_notes_filter='def ver: ltrimstr("v") | gsub("-"; "")
        titles: ([.[].fixes[]] | .[:12]), security_titles: ([.[].security[]] | .[:12])} end'
 
 omarchy_releases() {
-  [[ -s $tmp/omarchy.json ]] || curl -fsS --max-time 10 -H 'Accept: application/vnd.github+json' \
-    'https://api.github.com/repos/omacom/omarchy/releases?per_page=30' -o "$tmp/omarchy.json" 2>/dev/null
+  [[ -s $tmp/omarchy.json ]] || { curl -fsS --max-time 10 -H 'Accept: application/vnd.github+json' \
+    'https://api.github.com/repos/omacom/omarchy/releases?per_page=30' -o "$tmp/omarchy.part" 2>/dev/null &&
+    mv "$tmp/omarchy.part" "$tmp/omarchy.json"; }
 }
 
 collect_omarchy_notes() {

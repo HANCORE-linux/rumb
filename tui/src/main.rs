@@ -2283,6 +2283,30 @@ mod tests {
     }
 
     #[test]
+    fn a_long_rc_window_keeps_every_warning_readable() {
+        let packages = |count: usize| Value::Array((0..count).map(|i| json!({"name": format!("pkg-{i:02}"), "old": "1.0-1", "new": "1.1-1"})).collect());
+        let taken = ["Super + Ctrl + N (Network)", "Super + Alt + Comma (Dismiss last notification)", "Super + Shift + T (Activity)"];
+        let mut app = rc_app(json!({"version": "4.5.0rc3", "packages": packages(40), "breaking": ["The boot menu stays out of the way now."],
+            "deprecations": ["Replace the old screen recorder with a new one that records every monitor and asks before it starts recording"], "more": 3, "keys": 11, "keys_taken": taken}));
+        let lines = window(&app);
+        assert!(lines.iter().any(|line| line.ends_with("pkg-07  1.0 → 1.1")) && !lines.iter().any(|line| line.contains("pkg-08")), "{lines:?}");
+        assert!(lines.iter().any(|line| line.ends_with("+ 32 more packages")), "{lines:?}");
+        for (w, h) in [(271, 60), (170, 50)] {
+            let rows = screen(&app, w, h).join("\n");
+            for text in ["The boot menu stays out of the way now.", "your keys", "Super + Shift + T (Activity)", "starts recording", "+ 3 more in the release notes"] {
+                assert!(rows.contains(text), "{w}x{h}: missing {text}\n{rows}");
+            }
+        }
+        app.omarchy_rc.as_mut().unwrap().packages.truncate(9);
+        let lines = window(&app);
+        assert!(lines.iter().any(|line| line.ends_with("pkg-08  1.0 → 1.1")) && !lines.iter().any(|line| line.contains("more packages")), "{lines:?}");
+        for (taken, text) in [(json!([]), "the new default key is not bound by you"), (json!(["Super + Q (Clear clipboard)"]), "the new default key is bound by you: Super + Q (Clear clipboard)")] {
+            let one = rc_app(json!({"version": "4.5.0rc3", "packages": [], "breaking": [], "keys": 1, "keys_taken": taken}));
+            assert!(window(&one).iter().any(|line| line.ends_with(text)), "{text}");
+        }
+    }
+
+    #[test]
     fn rc_values_that_are_not_known_stay_out_of_the_omarchy_tile() {
         let app = rc_app(json!({"version": "4.5.0rc3", "packages": [{"name": "omarchy", "old": "4.0.6-1", "new": "4.5.0rc3-1"}], "breaking": null, "keys": 0, "keys_taken": null}));
         let rows = app.omarchy_rc.as_ref().unwrap().rows();
