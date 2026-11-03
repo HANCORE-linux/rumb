@@ -2212,6 +2212,56 @@ mod tests {
         lines.iter().position(|line| line.contains(text)).unwrap_or_else(|| panic!("{text:?} missing in {lines:?}"))
     }
 
+    fn rc_app(rc: Value) -> App {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        app.apply(source::Event::Start { last_upgrade: None, problems_since: "2026-11-01T20:00:00+01:00".into(), now: None, omarchy: true, last_upgraded: Vec::new() }, now);
+        app.apply(stage("updates", json!({"updates": []})), now);
+        app.apply(stage("news", json!({"news": [], "news_check_failed": false, "omarchy_notes": null, "omarchy_rc": rc})), now);
+        app.tile = Some(3);
+        app.overlay = true;
+        app
+    }
+
+    #[test]
+    fn the_omarchy_tile_shows_what_switching_to_the_rc_channel_brings() {
+        let mut app = rc_app(json!({"version": "4.5.0rc3", "packages": [
+            {"name": "omarchy", "old": "4.0.6-1", "new": "4.5.0rc3-1"},
+            {"name": "omarchy-speedtest", "old": "", "new": "0.2.1-1"}
+        ], "breaking": ["The boot menu stays out of the way now.", "Calculator: Super + Ctrl + Q is now Super + Shift + Q."],
+            "deprecations": ["Remove Lazydocker from new installs"], "more": 221, "keys": 11, "keys_taken": ["Super + Q (Clear clipboard)"]}));
+        let rows = app.omarchy_rc.as_ref().unwrap().rows();
+        assert_eq!(rows.iter().map(|(name, value, _)| format!("{name} {value}")).collect::<Vec<_>>(), ["rc 4.5.0rc3", "packages 2", "changes 2", "keys taken 1"]);
+        assert_eq!(rows.iter().map(|row| row.2).collect::<Vec<_>>(), [app::Severity::Neutral, app::Severity::Neutral, app::Severity::Warn, app::Severity::Warn]);
+        let lines = window(&app);
+        assert!(lines[line_at(&lines, "rc 4.5.0rc3")].ends_with("release candidate · switch with omarchy-channel-set rc"));
+        assert!(lines[line_at(&lines, "packages")].ends_with("omarchy  4.0.6 → 4.5.0rc3"));
+        assert!(lines[line_at(&lines, "omarchy-speedtest")].ends_with("omarchy-speedtest 0.2.1 · new"));
+        assert!(lines[line_at(&lines, "changes")].ends_with("The boot menu stays out of the way now."));
+        assert!(lines[line_at(&lines, "your keys")].ends_with("1 of the 11 new default keys bound by you: Super + Q (Clear clipboard)"));
+        assert!(lines[line_at(&lines, "deprecated")].ends_with("Remove Lazydocker from new installs"));
+        assert!(lines.last().unwrap().ends_with("+ 221 more in the release notes"));
+        app.overlay = false;
+        let rows = screen(&app, 170, 50);
+        let (x, y) = find(&rows, "changes").unwrap();
+        assert!(rows[usize::from(y)].chars().skip(usize::from(x)).take_while(|c| *c != '│').collect::<String>().trim_end().ends_with(" 2"), "{rows:?}");
+        assert!(rows.iter().any(|row| row.contains("rc = release candidate")), "{rows:?}");
+    }
+
+    #[test]
+    fn rc_values_that_are_not_known_stay_out_of_the_omarchy_tile() {
+        let app = rc_app(json!({"version": "4.5.0rc3", "packages": [{"name": "omarchy", "old": "4.0.6-1", "new": "4.5.0rc3-1"}], "breaking": null, "keys": 0, "keys_taken": null}));
+        let rows = app.omarchy_rc.as_ref().unwrap().rows();
+        assert_eq!(rows.iter().map(|(name, _, _)| *name).collect::<Vec<_>>(), ["rc", "packages"]);
+        let lines = window(&app);
+        assert!(lines[line_at(&lines, "release notes")].ends_with("unavailable"));
+        assert!(!lines.iter().any(|line| line.contains("your keys") || line.contains("changes")), "{lines:?}");
+        let free = rc_app(json!({"version": "4.5.0rc3", "packages": [], "breaking": [], "keys": 11, "keys_taken": []}));
+        let rows = free.omarchy_rc.as_ref().unwrap().rows();
+        assert_eq!(rows.iter().map(|(name, value, severity)| (*name, value.as_str(), *severity)).collect::<Vec<_>>()[2..], [("changes", "0", app::Severity::Neutral), ("keys taken", "0", app::Severity::Ok)]);
+        assert!(window(&free).iter().any(|line| line.ends_with("none of the 11 new default keys is bound by you")));
+    }
+
     #[test]
     fn the_owner_window_says_how_risky_the_update_is_that_may_fix_a_problem() {
         let mut app = demo_at(30_000);

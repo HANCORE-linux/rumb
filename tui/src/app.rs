@@ -283,6 +283,45 @@ pub struct OmarchyNotes {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct OmarchyRc {
+    pub version: String,
+    #[serde(default)]
+    pub packages: Vec<RcPackage>,
+    #[serde(default)]
+    pub breaking: Option<Vec<String>>,
+    #[serde(default)]
+    pub deprecations: Vec<String>,
+    #[serde(default)]
+    pub more: u64,
+    #[serde(default)]
+    pub keys: u64,
+    #[serde(default)]
+    pub keys_taken: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RcPackage {
+    pub name: String,
+    #[serde(default)]
+    pub old: String,
+    pub new: String,
+}
+
+impl OmarchyRc {
+    /// The tile rows that are known: rc, packages, changes, keys taken.
+    pub fn rows(&self) -> Vec<(&'static str, String, Severity)> {
+        let mut rows = vec![("rc", self.version.clone(), Severity::Neutral), ("packages", self.packages.len().to_string(), Severity::Neutral)];
+        if let Some(changes) = &self.breaking {
+            rows.push(("changes", changes.len().to_string(), if changes.is_empty() { Severity::Neutral } else { Severity::Warn }));
+        }
+        if let Some(taken) = self.keys_taken.as_ref().filter(|_| self.keys > 0) {
+            rows.push(("keys taken", taken.len().to_string(), if taken.is_empty() { Severity::Ok } else { Severity::Warn }));
+        }
+        rows
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct OmarchyRelease {
     pub tag: String,
     pub fixes: u64,
@@ -446,6 +485,7 @@ pub struct App {
     pub news: Vec<News>,
     pub news_failed: bool,
     pub omarchy_notes: Option<OmarchyNotes>,
+    pub omarchy_rc: Option<OmarchyRc>,
     pub preflight: Option<Preflight>,
     pub anatomy: Option<Anatomy>,
     pub anatomy_at: Option<Instant>,
@@ -509,6 +549,7 @@ impl App {
             news: Vec::new(),
             news_failed: false,
             omarchy_notes: None,
+            omarchy_rc: None,
             preflight: None,
             anatomy: None,
             anatomy_at: None,
@@ -637,6 +678,7 @@ impl App {
                 self.news = field(&data, "news")?;
                 self.news_failed = field(&data, "news_check_failed")?;
                 self.omarchy_notes = data.get("omarchy_notes").cloned().and_then(|notes| serde_json::from_value(notes).ok());
+                self.omarchy_rc = data.get("omarchy_rc").cloned().and_then(|rc| serde_json::from_value(rc).ok());
             }
             _ => {
                 self.preflight = Some(serde_json::from_value(data)?);
