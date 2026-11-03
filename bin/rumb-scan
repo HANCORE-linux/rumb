@@ -1031,14 +1031,16 @@ collect_news() {
   fi
 
   collect_omarchy_notes
+  collect_omarchy_rc
 
   tsv_json "$tmp/news.tsv" date title link manual_intervention |
     jq 'map(.manual_intervention |= (. == "true"))' >"$tmp/news.json"
-  emit --slurpfile news "$tmp/news.json" --argjson news_error "$news_error" --argjson omarchy_notes "$omarchy_notes" \
-    '{event: "stage", stage: "news", data: {news: $news[0], news_check_failed: ($news_error == 1), omarchy_notes: $omarchy_notes}}'
+  emit --slurpfile news "$tmp/news.json" --argjson news_error "$news_error" --argjson omarchy_notes "$omarchy_notes" --argjson omarchy_rc "$omarchy_rc" \
+    '{event: "stage", stage: "news", data: {news: $news[0], news_check_failed: ($news_error == 1), omarchy_notes: $omarchy_notes, omarchy_rc: $omarchy_rc}}'
 }
 
-omarchy_notes_filter='def ver: ltrimstr("v") | split(".") | map(try tonumber catch -1);
+omarchy_notes_filter='def ver: ltrimstr("v") | gsub("-"; "")
+    | try (capture("^(?<n>[0-9]+(\\.[0-9]+)*)(?<pre>[a-z]+(?<p>[0-9]*))?$") | ((.n | split(".") | map(tonumber)) + [0, 0, 0, 0])[:4] + [if .pre == null then 1e9 else (.p | tonumber? // 0) end]) catch [-1];
   def notes: (.tag_name | ltrimstr("v")) as $tag | reduce ((.body // "") | gsub("\r"; "") | split("\n")[]) as $line ({tag: $tag, section: "", counts: {}, fixes: [], security: []};
     if ($line | startswith("## ")) then .section = ($line[3:] | ascii_downcase)
     elif ($line | startswith("- ")) and .section != "" then
@@ -1047,15 +1049,22 @@ omarchy_notes_filter='def ver: ltrimstr("v") | split(".") | map(try tonumber cat
         elif .section == "security" then .security += [$line[2:] | sub(" by @.*$"; "")]
         else . end
     else . end);
-  [.[]? | select((.draft | not) and (.prerelease | not) and (.tag_name | type) == "string")
+  ($new | test("[a-z]")) as $candidate
+  | [.[]? | select((.draft | not) and ((.prerelease | not) or $candidate) and (.tag_name | type) == "string")
     | select((.tag_name | ver) > ($old | ver) and (.tag_name | ver) <= ($new | ver))]
-  | sort_by(.tag_name | ver) | reverse | map(notes)
+  | sort_by(.tag_name | ver) | (map(select(.prerelease | not)) + (map(select(.prerelease)) | .[-1:])) | reverse | map(notes)
   | if length == 0 then null else
       {from: $old, to: $new, releases: length,
        fixes: (map(.counts.fixes // 0) | add), improvements: (map(.counts.improvements // 0) | add),
        security: (map(.counts.security // 0) | add),
        per_release: map({tag, fixes: (.counts.fixes // 0), improvements: (.counts.improvements // 0), security: (.counts.security // 0)}),
        titles: ([.[].fixes[]] | .[:12]), security_titles: ([.[].security[]] | .[:12])} end'
+
+omarchy_releases() {
+  [[ -s $tmp/omarchy.json ]] || { curl -fsS --max-time 10 -H 'Accept: application/vnd.github+json' \
+    'https://api.github.com/repos/omacom/omarchy/releases?per_page=30' -o "$tmp/omarchy.part" 2>/dev/null &&
+    mv "$tmp/omarchy.part" "$tmp/omarchy.json"; }
+}
 
 collect_omarchy_notes() {
   local name spec="" old new
@@ -1072,8 +1081,7 @@ collect_omarchy_notes() {
   old=${old%-*}
   new=${new%-*}
   step news "fetching Omarchy release notes"
-  if curl -fsS --max-time 10 -H 'Accept: application/vnd.github+json' \
-    'https://api.github.com/repos/omacom/omarchy/releases?per_page=30' -o "$tmp/omarchy.json" 2>/dev/null &&
+  if omarchy_releases &&
     omarchy_notes=$(jq -c --arg old "$old" --arg new "$new" "$omarchy_notes_filter" "$tmp/omarchy.json" 2>/dev/null) &&
     [[ -n $omarchy_notes ]]; then
     done_step news "fetching Omarchy release notes" "$(jq '.releases // 0' <<<"$omarchy_notes")"
@@ -1081,6 +1089,79 @@ collect_omarchy_notes() {
     omarchy_notes=null
     done_step news "fetching Omarchy release notes" null
   fi
+}
+
+# The newest release candidate's notes: the breaking changes, the deprecations, and which of the
+# new default keys the user has bound already ($binds is null without a running Hyprland).
+omarchy_rc_filter='def clean: gsub("`"; "") | sub(" by @.*$"; "") | sub("^\\s+"; "") | sub("\\s+$"; "");
+  def mask: {super: 64, shift: 1, ctrl: 4, control: 4, alt: 8};
+  def combo: split(" + ") | map(ascii_downcase)
+    | {mods: .[:-1], keys: (.[-1] | if . == "arrows" then ["left", "right", "up", "down"] elif . == "right alt" then ["alt_r"] else [.] end)}
+    | if all(.mods[]; mask[.] != null) then .mask = ([.mods[] | mask[.]] | add // 0) else empty end;
+  [.[]? | select((.draft | not) and (.tag_name | type) == "string" and (.tag_name | ltrimstr("v") | gsub("-"; "")) == $version)][0]
+  | if . == null then {breaking: null, deprecations: [], more: 0, keys: 0, keys_taken: null} else
+      reduce ((.body // "") | gsub("\r"; "") | split("\n")[]) as $line ({section: "", breaking: [], deprecations: [], defaults: "", bullets: 0, shown: 0};
+        if ($line | startswith("## ")) then .section = ($line[3:] | ascii_downcase)
+        else
+          (if ($line | startswith("- ")) then .bullets += 1 else . end)
+          | if .section == "breaking changes" then
+              if ($line | startswith("- ")) then .breaking += [$line[2:] | clean] | .shown += 1
+              elif ($line | startswith("**")) and ($line | test(":\\*\\*\\s*$") | not) then .breaking += [$line | capture("^\\*\\*(?<text>.+?)\\*\\*").text | clean]
+              elif ($line | startswith("New defaults")) then .defaults = $line
+              else . end
+            elif .section == "deprecations" and ($line | startswith("- ")) then .deprecations += [$line[2:] | clean] | .shown += 1
+            else . end
+        end)
+      | [.defaults | gsub("\\([^)]*\\)"; "") | scan("`([^`]+)`") | .[0]] as $keys
+      | {breaking, deprecations, more: (.bullets - .shown), keys: ($keys | length),
+         keys_taken: (if $binds == null or ($keys | length) == 0 then null else
+           [$keys[] as $key | ($key | combo) as $combo
+             | [$binds[] | select(.modmask == $combo.mask and ((.key | ascii_downcase) as $bound | $combo.keys | index($bound)))][0]
+             | select(. != null) | if .description != "" then "\($key) (\(.description))" else $key end] end)}
+    end
+  | {version: $version, packages: $packages[0]} + .'
+
+collect_omarchy_rc() {
+  local rc_dir="$tmp/rc" defaults=${OMARCHY_PATH:-/usr/share/omarchy}/default/pacman stable_db=${TMPDIR:-/tmp}/checkup-db-${UID}/ installed version candidate binds=null
+  local -a rc
+  omarchy_rc=null
+  [[ ${OMARCHY_PATH:-/usr/share/omarchy} == /usr/share/omarchy && " ${update_errors[*]} " != *" repo "* ]] || return 0
+  installed=$(pacman -Q omarchy 2>/dev/null) || return 0
+  grep -q '^Server = https://pkgs.omarchy.org/stable/' /etc/pacman.conf 2>/dev/null || return 0
+  [[ -r $defaults/pacman-rc.conf && -r $defaults/mirrorlist-rc ]] && command -v fakeroot >/dev/null || return 0
+  step news "reading the Omarchy rc channel"
+  mkdir -p "$rc_dir/db"
+  ln -s /var/lib/pacman/local "$rc_dir/db/local"
+  sed -e "s#^Include *= */etc/pacman.d/mirrorlist\$#Include = $defaults/mirrorlist-rc#" -e '/^DownloadUser/d' "$defaults/pacman-rc.conf" >"$rc_dir/pacman.conf"
+  rc=(--config "$rc_dir/pacman.conf" --dbpath "$rc_dir/db" --logfile /dev/null)
+  if ! LC_ALL=C timeout 60 fakeroot -- pacman -Sy "${rc[@]}" --disable-sandbox >/dev/null 2>&1; then
+    done_step news "reading the Omarchy rc channel" null
+    return 0
+  fi
+  version=$(LC_ALL=C pacman -Si "${rc[@]}" omarchy/omarchy 2>/dev/null | awk -F' *: ' '$1 == "Version" { print $2; exit }')
+  candidate=$(LC_ALL=C pacman -Si --dbpath "$stable_db" omarchy/omarchy 2>/dev/null | awk -F' *: ' '$1 == "Version" { print $2; exit }')
+  if [[ -z $version ]] || (($(vercmp "$version" "${candidate:-${installed#omarchy }}") <= 0)); then
+    done_step news "reading the Omarchy rc channel" 0
+    return 0
+  fi
+  if ! LC_ALL=C timeout 60 fakeroot -- pacman -Sup "${rc[@]}" --noconfirm --print-format '%n %v' >"$rc_dir/rc.txt" 2>/dev/null ||
+    ! LC_ALL=C timeout 60 fakeroot -- pacman -Sup --dbpath "$stable_db" --logfile /dev/null --noconfirm --print-format '%n %v' >"$rc_dir/stable.txt" 2>/dev/null; then
+    done_step news "reading the Omarchy rc channel" null
+    return 0
+  fi
+  comm -13 <(awk 'NF == 2' "$rc_dir/stable.txt" | sort) <(awk 'NF == 2' "$rc_dir/rc.txt" | sort) |
+    while read -r name new; do
+      printf '%s\x1f%s\x1f%s\n' "$name" "$(pacman -Q "$name" 2>/dev/null | cut -d' ' -f2)" "$new"
+    done >"$rc_dir/packages.tsv"
+  tsv_json "$rc_dir/packages.tsv" name old new >"$rc_dir/packages.json"
+  if command -v hyprctl >/dev/null && [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+    binds=$(timeout 5 hyprctl -j binds 2>/dev/null | jq -c 'if type == "array" then . else null end' 2>/dev/null) || binds=null
+    [[ -n $binds ]] || binds=null
+  fi
+  omarchy_releases || echo '[]' >"$tmp/omarchy.json"
+  omarchy_rc=$(jq -c --arg version "${version%-*}" --argjson binds "$binds" --slurpfile packages "$rc_dir/packages.json" "$omarchy_rc_filter" "$tmp/omarchy.json" 2>/dev/null) || omarchy_rc=null
+  [[ -n $omarchy_rc ]] || omarchy_rc=null
+  done_step news "reading the Omarchy rc channel" "$(jq '.packages | length' <<<"$omarchy_rc" 2>/dev/null || echo null)"
 }
 collect_news
 
@@ -1218,6 +1299,7 @@ jq -n \
   --slurpfile activity "$tmp/activity.json" \
   --argjson news_error "$news_error" \
   --argjson omarchy_notes "${omarchy_notes:-null}" \
+  --argjson omarchy_rc "${omarchy_rc:-null}" \
   --argjson free_bytes "$free_bytes" \
   --argjson free_ok "$free_ok" \
   --argjson snapper "$snapper_configured" \
@@ -1242,6 +1324,7 @@ jq -n \
       news: $n,
       news_check_failed: ($news_error == 1),
       omarchy_notes: $omarchy_notes,
+      omarchy_rc: $omarchy_rc,
       problems: $p,
       problem_check_errors: $problem_errors,
       activity: $activity[0],

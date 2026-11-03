@@ -10,7 +10,7 @@
 <p align="center">A terminal dashboard for Arch Linux and Omarchy: what the next update brings, and what is already failing. It only reads and never asks for root.</p>
 
 <p align="center">
-  <img src="docs/overview.png" alt="The eye reads the scan and signals each tile" width="100%">
+  <img src="docs/scan.gif" alt="The eye glances from tile to tile while the scan runs" width="100%">
 </p>
 
 ## Omarchy
@@ -42,6 +42,14 @@ rumb draws the eye, the icons and the graphs as images.
 - foot, kitty and Ghostty are supported.
 - Alacritty cannot show images, so the eye and the icons stay empty. It is not supported.
 - Other terminals are untested.
+
+## Themes
+
+rumb takes its colours from the current Omarchy theme and follows it when it changes. Without Omarchy it uses Labra.
+
+- Press `Esc` with nothing open to show the options in the eye. `←` and `→` change the theme at once, typing keeps the themes whose names contain the text, and rumb remembers the choice for the next start.
+- `rumb --theme <name>` or `RUMB_THEME=<name> rumb` starts with another theme. `rumb --themes` lists the names.
+- On Omarchy, `system` goes back to the current Omarchy theme.
 
 ## Contributing
 

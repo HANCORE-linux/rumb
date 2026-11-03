@@ -180,6 +180,7 @@ pub fn command_of(label: &str) -> &str {
         "measuring the package cache" => "paccache -dk1",
         "fetching Arch news" => "curl archlinux.org/feeds/news",
         "fetching Omarchy release notes" => "curl omacom/omarchy/releases",
+        "reading the Omarchy rc channel" => "pacman -Sup rc channel",
         "checking disk space and snapshots" => "df /",
         other => other,
     }
@@ -210,6 +211,7 @@ pub fn result_of(label: &str, value: &Value) -> String {
             Some(n) => format!("{n} new"),
         },
         "fetching Omarchy release notes" => number.map_or_else(|| "failed".to_string(), |n| format!("{n} {}", if n == 1 { "release" } else { "releases" })),
+        "reading the Omarchy rc channel" => count("package", "packages"),
         "checking disk space and snapshots" => number.map_or_else(String::new, |bytes| format!("{} available", crate::page::bytes(bytes))),
         _ => match value {
             Value::String(text) => text.clone(),

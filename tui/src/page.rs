@@ -470,7 +470,17 @@ fn ring_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
             text(buf, inner.x, inner.y + 2, "release notes unavailable", Style::new().fg(pal.faint), inner.width);
         } else {
             let col = place_ring(rings, inner, cell, crate::ink::RingSpec { slots: 96, ticks: 4, center: vec![("0".to_string(), pal.ink2, 16)], ..Default::default() });
-            column(buf, col, vec![vec![label("up to date", pal)]]);
+            match &app.omarchy_rc {
+                Some(rc) => {
+                    let top = col.y + col.height.saturating_sub(5) / 2;
+                    text(buf, col.x, top, "up to date", Style::new().fg(pal.label), col.width);
+                    for (k, (name, value, severity)) in rc.rows().into_iter().enumerate() {
+                        row(buf, col, top + 2 + k as u16, name, &value, rc_tone(severity, pal), pal);
+                    }
+                    tile_legend(buf, area, vec![faint("rc = release candidate · if you switch", pal)]);
+                }
+                None => column(buf, col, vec![vec![label("up to date", pal)]]),
+            }
         }
         return;
     };
@@ -810,6 +820,12 @@ fn tile_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
         } else {
             let x = big(buf, inner.x, inner.y + 1, "0", Style::new().fg(pal.ink2));
             text(buf, x, inner.y + 3, "up to date", Style::new().fg(pal.label), inner.right().saturating_sub(x));
+            if let Some(rc) = &app.omarchy_rc {
+                for (k, (name, value, severity)) in rc.rows().into_iter().enumerate() {
+                    row(buf, inner, inner.y + 5 + k as u16, name, &value, rc_tone(severity, pal), pal);
+                }
+                legend(buf, area, "rc = release candidate · if you switch", pal);
+            }
         }
         return;
     };
@@ -821,6 +837,25 @@ fn tile_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
     row(buf, inner, inner.y + 5, "improvements", &notes.improvements.to_string(), pal.ink, pal);
     row(buf, inner, inner.y + 6, "security", &notes.security.to_string(), if notes.security > 0 { pal.warn } else { pal.ink }, pal);
     legend(buf, area, "from the release notes", pal);
+}
+
+const RC_PACKAGES: usize = 8;
+
+fn indented(lines: &mut Vec<(String, String, Color)>, name: &str, text: &str, room: usize, color: Color) {
+    let mut item = Vec::new();
+    wrapped(&mut item, name, text, room.saturating_sub(2), color);
+    for (k, (name, value, color)) in item.into_iter().enumerate() {
+        lines.push((name, if k == 0 { value } else { format!("  {value}") }, color));
+    }
+}
+
+fn rc_tone(severity: Severity, pal: &Palette) -> Color {
+    match severity {
+        Severity::Ok => pal.ok,
+        Severity::Warn => pal.warn,
+        Severity::Bad => pal.alert,
+        Severity::Neutral => pal.ink,
+    }
 }
 
 fn tile_disk(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant) {
@@ -1525,14 +1560,14 @@ pub fn demangle(symbol: &str) -> String {
     if parts.is_empty() { symbol.to_string() } else { parts.join("::") }
 }
 
-fn frame_text(frame: &str) -> String {
+pub fn frame_text(frame: &str) -> String {
     match frame.split_once(" (") {
         Some((name, module)) => format!("{} ({module}", demangle(name)),
         None => frame.to_string(),
     }
 }
 
-fn signal_meaning(signal: &str) -> &'static str {
+pub fn signal_meaning(signal: &str) -> &'static str {
     match signal {
         "SIGSEGV" => "invalid memory access",
         "SIGABRT" => "the program stopped itself",
@@ -1989,6 +2024,44 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
                 lines.push(("release notes".into(), "unavailable".to_string(), pal.label));
             } else {
                 lines.push(("omarchy".into(), "up to date".to_string(), pal.label));
+                if let Some(rc) = &app.omarchy_rc {
+                    lines.push((format!("rc {}", rc.version), "release candidate · switch with omarchy-channel-set rc".to_string(), pal.label));
+                    let listed = if rc.packages.len() > RC_PACKAGES + 1 { RC_PACKAGES } else { rc.packages.len() };
+                    for (index, package) in rc.packages.iter().take(listed).enumerate() {
+                        let value = if package.old.is_empty() {
+                            format!("{} {} · new", package.name, package.new.rsplit_once('-').map_or(package.new.as_str(), |(version, _)| version))
+                        } else {
+                            format!("{}  {}", package.name, versions(&package.old, &package.new, 60))
+                        };
+                        lines.push((if index == 0 { "packages" } else { "" }.into(), value, pal.ink));
+                    }
+                    if rc.packages.len() > listed {
+                        lines.push((String::new(), format!("+ {} more packages", thousands((rc.packages.len() - listed) as u64)), pal.faint));
+                    }
+                    match &rc.breaking {
+                        Some(changes) => {
+                            for (index, change) in changes.iter().enumerate() {
+                                indented(&mut lines, if index == 0 { "changes" } else { "" }, change, room, pal.warn);
+                            }
+                            if let Some(taken) = rc.keys_taken.as_ref().filter(|_| rc.keys > 0) {
+                                let text = match (taken.len(), rc.keys) {
+                                    (0, 1) => "the new default key is not bound by you".to_string(),
+                                    (0, keys) => format!("none of the {keys} new default keys is bound by you"),
+                                    (_, 1) => format!("the new default key is bound by you: {}", taken.join(" · ")),
+                                    (count, keys) => format!("{count} of the {keys} new default keys bound by you: {}", taken.join(" · ")),
+                                };
+                                indented(&mut lines, "your keys", &text, room, if taken.is_empty() { pal.ok } else { pal.warn });
+                            }
+                            for (index, change) in rc.deprecations.iter().enumerate() {
+                                indented(&mut lines, if index == 0 { "deprecated" } else { "" }, change, room, pal.label);
+                            }
+                            if rc.more > 0 {
+                                lines.push((String::new(), format!("+ {} more in the release notes", thousands(rc.more)), pal.faint));
+                            }
+                        }
+                        None => lines.push(("release notes".into(), "unavailable".to_string(), pal.label)),
+                    }
+                }
             }
             "OMARCHY"
         }

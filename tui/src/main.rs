@@ -86,6 +86,11 @@ struct Options {
     args: Vec<String>,
 }
 
+fn print_and_exit(text: &str) -> ! {
+    let _ = writeln!(io::stdout(), "{text}");
+    std::process::exit(0);
+}
+
 fn parse_args() -> Result<Options, String> {
     let mut options = Options { demo: false, no_anim: false, theme: None, args: Vec::new() };
     let mut args = std::env::args().skip(1);
@@ -95,23 +100,14 @@ fn parse_args() -> Result<Options, String> {
             "--no-anim" => options.no_anim = true,
             "--no-aur" => options.args.push(arg),
             "--theme" => options.theme = Some(args.next().ok_or("--theme needs a name")?),
-            "--themes" => {
-                println!("{}", theme::choices().join("\n"));
-                std::process::exit(0);
-            }
-            "-V" | "--version" => {
-                println!("rumb {}", env!("CARGO_PKG_VERSION"));
-                std::process::exit(0);
-            }
+            "--themes" => print_and_exit(&theme::choices().join("\n")),
+            "-V" | "--version" => print_and_exit(&format!("rumb {}", env!("CARGO_PKG_VERSION"))),
             "--since" => {
                 let value = args.next().ok_or("--since needs a value")?;
                 options.args.push(arg);
                 options.args.push(value);
             }
-            "-h" | "--help" => {
-                println!("{USAGE}");
-                std::process::exit(0);
-            }
+            "-h" | "--help" => print_and_exit(USAGE),
             other => return Err(format!("Unknown option: {other}")),
         }
     }
@@ -1820,6 +1816,44 @@ mod tests {
     }
 
     #[test]
+    fn a_tile_that_waits_for_its_data_shows_no_dial() {
+        let start = Instant::now();
+        let mut app = App::new(false, true, start);
+        app.pictures = true;
+        let mut motion = Motion::new(true, start);
+        let lines: Vec<(u64, &str)> = include_str!("../demo.ndjson")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .scan(0, |at, line| {
+                *at += serde_json::from_str::<Value>(line).unwrap()["_delay"].as_u64().unwrap_or(0);
+                Some((*at, line))
+            })
+            .collect();
+        let (mut next, mut waiting) = (0, 0);
+        for millis in (0..12_000).step_by(100) {
+            let now = start + Duration::from_millis(millis);
+            while next < lines.len() && lines[next].0 <= millis {
+                motion.push(serde_json::from_str(lines[next].1).unwrap(), lines[next].1, &mut app, now);
+                next += 1;
+            }
+            motion.step(&mut app, now, 0.1);
+            let mut terminal = Terminal::new(TestBackend::new(271, 60)).unwrap();
+            let mut scene = None;
+            terminal.draw(|frame| scene = Some(page::draw(frame, &app, &motion, &palette::Palette::labra(), now, (7, 17)))).unwrap();
+            let (buffer, scene) = (terminal.backend().buffer().clone(), scene.unwrap());
+            for y in 1..14 {
+                let line: String = (0..271).map(|x| buffer[(x, y)].symbol()).collect();
+                for (byte, _) in line.match_indices("checking…") {
+                    let x = line[..byte].chars().count() as u16;
+                    waiting += 1;
+                    assert!(!scene.placements.iter().any(|placement| placement.rect.contains((x, y).into())), "a dial under \"checking…\" at {x},{y} after {millis} ms");
+                }
+            }
+        }
+        assert!(waiting > 0, "no tile waited in the first 12 s of the demo");
+    }
+
+    #[test]
     fn lists_are_held_only_while_their_data_flies() {
         let start = Instant::now();
         let mut app = App::new(false, true, start);
@@ -2210,6 +2244,80 @@ mod tests {
 
     fn line_at(lines: &[String], text: &str) -> usize {
         lines.iter().position(|line| line.contains(text)).unwrap_or_else(|| panic!("{text:?} missing in {lines:?}"))
+    }
+
+    fn rc_app(rc: Value) -> App {
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        app.apply(source::Event::Start { last_upgrade: None, problems_since: "2026-11-01T20:00:00+01:00".into(), now: None, omarchy: true, last_upgraded: Vec::new() }, now);
+        app.apply(stage("updates", json!({"updates": []})), now);
+        app.apply(stage("news", json!({"news": [], "news_check_failed": false, "omarchy_notes": null, "omarchy_rc": rc})), now);
+        app.tile = Some(3);
+        app.overlay = true;
+        app
+    }
+
+    #[test]
+    fn the_omarchy_tile_shows_what_switching_to_the_rc_channel_brings() {
+        let mut app = rc_app(json!({"version": "4.5.0rc3", "packages": [
+            {"name": "omarchy", "old": "4.0.6-1", "new": "4.5.0rc3-1"},
+            {"name": "omarchy-speedtest", "old": "", "new": "0.2.1-1"}
+        ], "breaking": ["The boot menu stays out of the way now.", "Calculator: Super + Ctrl + Q is now Super + Shift + Q."],
+            "deprecations": ["Remove Lazydocker from new installs"], "more": 221, "keys": 11, "keys_taken": ["Super + Q (Clear clipboard)"]}));
+        let rows = app.omarchy_rc.as_ref().unwrap().rows();
+        assert_eq!(rows.iter().map(|(name, value, _)| format!("{name} {value}")).collect::<Vec<_>>(), ["rc 4.5.0rc3", "packages 2", "changes 2", "keys taken 1"]);
+        assert_eq!(rows.iter().map(|row| row.2).collect::<Vec<_>>(), [app::Severity::Neutral, app::Severity::Neutral, app::Severity::Warn, app::Severity::Warn]);
+        let lines = window(&app);
+        assert!(lines[line_at(&lines, "rc 4.5.0rc3")].ends_with("release candidate · switch with omarchy-channel-set rc"));
+        assert!(lines[line_at(&lines, "packages")].ends_with("omarchy  4.0.6 → 4.5.0rc3"));
+        assert!(lines[line_at(&lines, "omarchy-speedtest")].ends_with("omarchy-speedtest 0.2.1 · new"));
+        assert!(lines[line_at(&lines, "changes")].ends_with("The boot menu stays out of the way now."));
+        assert!(lines[line_at(&lines, "your keys")].ends_with("1 of the 11 new default keys bound by you: Super + Q (Clear clipboard)"));
+        assert!(lines[line_at(&lines, "deprecated")].ends_with("Remove Lazydocker from new installs"));
+        assert!(lines.last().unwrap().ends_with("+ 221 more in the release notes"));
+        app.overlay = false;
+        let rows = screen(&app, 170, 50);
+        let (x, y) = find(&rows, "changes").unwrap();
+        assert!(rows[usize::from(y)].chars().skip(usize::from(x)).take_while(|c| *c != '│').collect::<String>().trim_end().ends_with(" 2"), "{rows:?}");
+        assert!(rows.iter().any(|row| row.contains("rc = release candidate")), "{rows:?}");
+    }
+
+    #[test]
+    fn a_long_rc_window_keeps_every_warning_readable() {
+        let packages = |count: usize| Value::Array((0..count).map(|i| json!({"name": format!("pkg-{i:02}"), "old": "1.0-1", "new": "1.1-1"})).collect());
+        let taken = ["Super + Ctrl + N (Network)", "Super + Alt + Comma (Dismiss last notification)", "Super + Shift + T (Activity)"];
+        let mut app = rc_app(json!({"version": "4.5.0rc3", "packages": packages(40), "breaking": ["The boot menu stays out of the way now."],
+            "deprecations": ["Replace the old screen recorder with a new one that records every monitor and asks before it starts recording"], "more": 3, "keys": 11, "keys_taken": taken}));
+        let lines = window(&app);
+        assert!(lines.iter().any(|line| line.ends_with("pkg-07  1.0 → 1.1")) && !lines.iter().any(|line| line.contains("pkg-08")), "{lines:?}");
+        assert!(lines.iter().any(|line| line.ends_with("+ 32 more packages")), "{lines:?}");
+        for (w, h) in [(271, 60), (170, 50)] {
+            let rows = screen(&app, w, h).join("\n");
+            for text in ["The boot menu stays out of the way now.", "your keys", "Super + Shift + T (Activity)", "starts recording", "+ 3 more in the release notes"] {
+                assert!(rows.contains(text), "{w}x{h}: missing {text}\n{rows}");
+            }
+        }
+        app.omarchy_rc.as_mut().unwrap().packages.truncate(9);
+        let lines = window(&app);
+        assert!(lines.iter().any(|line| line.ends_with("pkg-08  1.0 → 1.1")) && !lines.iter().any(|line| line.contains("more packages")), "{lines:?}");
+        for (taken, text) in [(json!([]), "the new default key is not bound by you"), (json!(["Super + Q (Clear clipboard)"]), "the new default key is bound by you: Super + Q (Clear clipboard)")] {
+            let one = rc_app(json!({"version": "4.5.0rc3", "packages": [], "breaking": [], "keys": 1, "keys_taken": taken}));
+            assert!(window(&one).iter().any(|line| line.ends_with(text)), "{text}");
+        }
+    }
+
+    #[test]
+    fn rc_values_that_are_not_known_stay_out_of_the_omarchy_tile() {
+        let app = rc_app(json!({"version": "4.5.0rc3", "packages": [{"name": "omarchy", "old": "4.0.6-1", "new": "4.5.0rc3-1"}], "breaking": null, "keys": 0, "keys_taken": null}));
+        let rows = app.omarchy_rc.as_ref().unwrap().rows();
+        assert_eq!(rows.iter().map(|(name, _, _)| *name).collect::<Vec<_>>(), ["rc", "packages"]);
+        let lines = window(&app);
+        assert!(lines[line_at(&lines, "release notes")].ends_with("unavailable"));
+        assert!(!lines.iter().any(|line| line.contains("your keys") || line.contains("changes")), "{lines:?}");
+        let free = rc_app(json!({"version": "4.5.0rc3", "packages": [], "breaking": [], "keys": 11, "keys_taken": []}));
+        let rows = free.omarchy_rc.as_ref().unwrap().rows();
+        assert_eq!(rows.iter().map(|(name, value, severity)| (*name, value.as_str(), *severity)).collect::<Vec<_>>()[2..], [("changes", "0", app::Severity::Neutral), ("keys taken", "0", app::Severity::Ok)]);
+        assert!(window(&free).iter().any(|line| line.ends_with("none of the 11 new default keys is bound by you")));
     }
 
     #[test]
