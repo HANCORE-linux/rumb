@@ -2095,7 +2095,11 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
             } else if app.updates.iter().any(|update| update.name == "omarchy" || update.name == "omarchy-dev") {
                 lines.push(("release notes".into(), "unavailable".to_string(), pal.label));
             } else {
-                lines.push(("omarchy".into(), "up to date".to_string(), pal.label));
+                let current = app.anatomy.as_ref().map(|anatomy| anatomy.omarchy.as_str()).filter(|version| !version.is_empty());
+                lines.push(("omarchy".into(), current.map_or_else(|| "up to date".to_string(), |version| format!("{version} up to date")), pal.label));
+                if let Some(page) = app.omarchy_release_page() {
+                    lines.push(("release notes".into(), page, pal.label));
+                }
                 if let Some(rc) = &app.omarchy_rc {
                     lines.push((format!("rc {}", rc.version), "release candidate · switch with omarchy-channel-set rc".to_string(), pal.label));
                     let listed = if rc.packages.len() > RC_PACKAGES + 1 { RC_PACKAGES } else { rc.packages.len() };

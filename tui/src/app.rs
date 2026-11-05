@@ -974,8 +974,25 @@ impl App {
         Some((first, change))
     }
 
-    pub fn omarchy_link(&self) -> Option<&str> {
-        self.omarchy_notes.as_ref().filter(|_| self.omarchy).and_then(|notes| notes.link.as_deref())
+    pub fn omarchy_release_page(&self) -> Option<String> {
+        let version = self.anatomy.as_ref()?.omarchy.as_str();
+        let (base, candidate) = match version.split_once("rc") {
+            Some((base, number)) if !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit()) => (base, format!("-rc{number}")),
+            Some(_) => return None,
+            None => (version, String::new()),
+        };
+        (base.starts_with(|ch: char| ch.is_ascii_digit()) && base.chars().all(|ch| ch.is_ascii_digit() || ch == '.')).then(|| format!("https://github.com/omacom/omarchy/releases/tag/v{base}{candidate}"))
+    }
+
+    pub fn omarchy_link(&self) -> Option<String> {
+        if !self.omarchy {
+            return None;
+        }
+        if let Some(notes) = &self.omarchy_notes {
+            return notes.link.clone();
+        }
+        let pending = self.updates.iter().any(|update| update.name == "omarchy" || update.name == "omarchy-dev");
+        if pending || self.stage_done_at[2].is_none() { None } else { self.omarchy_release_page() }
     }
 
     pub fn cache_command(&self) -> bool {

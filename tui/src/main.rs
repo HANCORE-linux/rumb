@@ -505,7 +505,7 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
                     copying += 1;
                 }
                 Action::CopyLink => {
-                    if let Some(link) = app.omarchy_link().map(str::to_string) {
+                    if let Some(link) = app.omarchy_link() {
                         let done = copy_done.clone();
                         std::thread::spawn(move || done.send((format!("copied {link}"), export::copy(link))));
                         copying += 1;
@@ -2425,6 +2425,39 @@ mod tests {
         let mut other = notes_app(json!({"releases": 0, "fixes": 0, "improvements": 0, "security": 0, "link": link}));
         other.omarchy = false;
         assert_ne!(press(&mut other, &[KeyCode::Enter]), Action::CopyLink);
+    }
+
+    #[test]
+    fn an_omarchy_that_is_up_to_date_links_its_release() {
+        let mut app = rc_app(Value::Null);
+        let page = |version: &str| format!("https://github.com/omacom/omarchy/releases/tag/{version}");
+        app.anatomy = demo_at(60_000).anatomy;
+        app.anatomy.as_mut().unwrap().omarchy = "4.5.0".to_string();
+        let lines = window(&app);
+        assert!(lines.iter().any(|line| line.ends_with("4.5.0 up to date")), "{lines:?}");
+        assert!(lines.iter().any(|line| line.ends_with(&page("v4.5.0"))), "{lines:?}");
+        for (w, h) in [(271, 60), (150, 44)] {
+            let rows = screen(&app, w, h);
+            assert!(rows.join("\n").contains(&page("v4.5.0")), "{w}x{h}");
+            assert!(rows.last().unwrap().contains("Enter copy link"), "{w}x{h}");
+        }
+        assert_eq!(app.omarchy_link(), Some(page("v4.5.0")));
+        assert_eq!(press(&mut app, &[KeyCode::Enter]), Action::CopyLink);
+        let versions = |app: &mut App, version: &str| {
+            app.anatomy.as_mut().unwrap().omarchy = version.to_string();
+            app.omarchy_release_page()
+        };
+        assert_eq!(versions(&mut app, "4.5.0rc3"), Some(page("v4.5.0-rc3")));
+        for other in ["dev (abc1234)", "dev", "", "4.5.0rc", "rc3", "4.5.0.r12.gabc"] {
+            assert_eq!(versions(&mut app, other), None, "{other}");
+        }
+        versions(&mut app, "dev (abc1234)");
+        let lines = window(&app);
+        assert!(lines.iter().any(|line| line.ends_with("dev (abc1234) up to date")) && !lines.iter().any(|line| line.contains("release notes")), "{lines:?}");
+        assert_eq!(app.omarchy_link(), None);
+        versions(&mut app, "4.5.0");
+        app.updates = serde_json::from_value(json!([{"name": "omarchy", "old": "4.5.0-1", "new": "4.5.1-1", "source": "repo", "bump": "patch", "risk": "high", "reason": ""}])).unwrap();
+        assert_eq!(app.omarchy_link(), None);
     }
 
     #[test]
