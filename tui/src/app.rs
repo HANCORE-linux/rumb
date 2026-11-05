@@ -59,7 +59,9 @@ impl Subsystem {
     /// Which part of the system a package belongs to, by name.
     pub fn of(name: &str) -> Self {
         let starts = |prefix: &str| name.starts_with(prefix);
-        if name == "linux" || starts("linux-") || name == "kernel" {
+        if matches!(name, "m1n1" | "uboot-asahi" | "omarchy-mac-boot") {
+            Subsystem::Base
+        } else if name == "linux" || starts("linux-") || name == "kernel" {
             Subsystem::Kernel
         } else if ["mesa", "lib32-mesa", "nvidia", "lib32-nvidia", "vulkan", "lib32-vulkan", "libva", "intel-media"].iter().any(|p| starts(p)) {
             Subsystem::Graphics
@@ -968,6 +970,10 @@ impl App {
             .then(|| self.activity.iter().filter(|day| day.date.as_str() <= first).flat_map(|day| day.changes.iter().filter(|change| change.name == problem.package).map(move |change| (day.date.as_str(), change))).last())
             .flatten();
         Some((first, change))
+    }
+
+    pub fn omarchy_link(&self) -> Option<&str> {
+        self.omarchy_notes.as_ref().filter(|_| self.omarchy).and_then(|notes| notes.link.as_deref())
     }
 
     pub fn cache_command(&self) -> bool {

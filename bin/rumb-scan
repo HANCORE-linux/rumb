@@ -75,6 +75,7 @@ CORE_PACKAGES=(
   qt6-base qt6-declarative qt6-wayland 'hypr*' aquamarine xdg-desktop-portal-hyprland
   quickshell omarchy omarchy-dev systemd systemd-libs glibc lib32-glibc 'limine*'
   mkinitcpio pacman uwsm sddm pipewire wireplumber cryptsetup btrfs-progs
+  m1n1 uboot-asahi omarchy-mac-boot
 )
 
 is_core() {
@@ -598,8 +599,8 @@ collect_problems() {
 
   jq -r --argjson since "$since_epoch" "$journal_source"' recent | source' "$tmp/journal.json" 2>/dev/null | sort >"$tmp/sources.txt"
   mapfile -t paths < <(uniq "$tmp/sources.txt")
-  owners_of "/usr/lib/modules/$(uname -r)/vmlinuz" "${paths[@]}"
-  owner_of "/usr/lib/modules/$(uname -r)/vmlinuz"
+  owners_of "/usr/lib/modules/$(uname -r)/modules.builtin" "${paths[@]}"
+  owner_of "/usr/lib/modules/$(uname -r)/modules.builtin"
   kernel_package=$REPLY
 
   journal_total=0
@@ -1054,20 +1055,22 @@ omarchy_notes_filter='def ver: ltrimstr("v") | gsub("-"; "")
   | [.[]? | select((.draft | not) and ((.prerelease | not) or $candidate) and (.tag_name | type) == "string")
     | select((.tag_name | ver) > ($old | ver) and (.tag_name | ver) <= ($new | ver))]
   | sort_by(.tag_name | ver) | (map(select(.prerelease | not)) + (map(select(.prerelease)) | .[-1:])) | reverse
+  | ([.[] | select((.prerelease | not) and (sections | not)) | (.body // "") | capture("Release notes: (?<url>https?://\\S+)").url][0]) as $web
   | map(if (.prerelease | not) and (sections | not) then
       . as $final | (.tag_name | ver | .[:4]) as $base
       | ([$all[]? | select((.draft | not) and .prerelease and (.tag_name | type) == "string" and (.tag_name | ver | .[:4]) == $base and (.tag_name | ver) > ($old | ver))] | sort_by(.tag_name | ver) | last)
-      | if . == null then empty else . + {final: ($final.tag_name | ltrimstr("v")), link: (($final.body // "") | capture("Release notes: (?<url>https?://\\S+)").url // null)} end
+      | if . == null then empty else . + {final: ($final.tag_name | ltrimstr("v"))} end
     else . end)
-  | . as $chosen | map(. as $release | notes | .final = $release.final | .link = $release.link)
-  | if length == 0 then null else
+  | . as $chosen | map(. as $release | notes | .final = $release.final)
+  | if length == 0 then (if $web == null then null else {from: $old, to: $new, releases: 0, fixes: 0, improvements: 0, security: 0, link: $web} end) else
       {from: $old, to: $new, releases: length,
        fixes: (map(.counts.fixes // 0) | add), improvements: (map(.counts.improvements // 0) | add),
        security: (map(.counts.security // 0) | add),
        per_release: map({tag, fixes: (.counts.fixes // 0), improvements: (.counts.improvements // 0), security: (.counts.security // 0)}),
-       final: ([.[].final | select(. != null)][0]), link: ([.[].link | select(. != null)][0]),
+       final: ([.[].final | select(. != null)][0]), link: $web,
        titles: ([.[].fixes[]] | .[:12]), security_titles: ([.[].security[]] | .[:12])}
-      + ($chosen[0] | changes($binds) | {breaking, deprecations, more, keys, keys_taken}) end'
+      + ($chosen | map(changes($binds; true)) | {breaking: (map(.breaking) | add), deprecations: (map(.deprecations) | add), more: (map(.more) | add), keys: (map(.keys) | add),
+          keys_taken: (map(.keys_taken | select(. != null)) | if length == 0 then null else add | unique end)}) end'
 
 omarchy_releases() {
   [[ -s $tmp/omarchy.json ]] || { curl -fsS --max-time 10 -H 'Accept: application/vnd.github+json' \
@@ -1106,15 +1109,15 @@ omarchy_changes_defs='def clean: gsub("`"; "") | sub(" by @.*$"; "") | sub("^\\s
   def mask: {super: 64, shift: 1, ctrl: 4, control: 4, alt: 8};
   def combo: split(" + ") | map(ascii_downcase)
     | {mods: .[:-1], keys: (.[-1] | if . == "arrows" then ["left", "right", "up", "down"] elif . == "right alt" then ["alt_r"] else [.] end)}
-    | if all(.mods[]; mask[.] != null) then .mask = ([.mods[] | mask[.]] | add // 0) else empty end;
-  def changes($binds):
+    | if all(.mods[]; mask[.] != null) then .mask = ([.mods[] | mask[.]] | add // 0) | .masks = (if .keys == ["alt_r"] then [.mask, .mask + 8] else [.mask] end) else empty end;
+  def changes($binds; $whole):
       reduce ((.body // "") | gsub("\r"; "") | split("\n")[]) as $line ({section: "", breaking: [], deprecations: [], defaults: "", bullets: 0, shown: 0};
         if ($line | startswith("## ")) then .section = ($line[3:] | ascii_downcase)
         else
           (if ($line | startswith("- ")) then .bullets += 1 else . end)
           | if .section == "breaking changes" then
               if ($line | startswith("- ")) then .breaking += [$line[2:] | clean] | .shown += 1
-              elif ($line | startswith("**")) and ($line | test(":\\*\\*\\s*$") | not) then .breaking += [$line | capture("^\\*\\*(?<text>.+?)\\*\\*").text | clean]
+              elif ($line | startswith("**")) and ($line | test(":\\*\\*\\s*$") | not) then .breaking += [if $whole then $line | gsub("\\*\\*"; "") else $line | capture("^\\*\\*(?<text>.+?)\\*\\*").text end | clean]
               elif ($line | startswith("New defaults")) then .defaults = $line
               else . end
             elif .section == "deprecations" and ($line | startswith("- ")) then .deprecations += [$line[2:] | clean] | .shown += 1
@@ -1124,11 +1127,11 @@ omarchy_changes_defs='def clean: gsub("`"; "") | sub(" by @.*$"; "") | sub("^\\s
       | {breaking, deprecations, more: (.bullets - .shown), keys: ($keys | length),
          keys_taken: (if $binds == null or ($keys | length) == 0 then null else
            [$keys[] as $key | ($key | combo) as $combo
-             | [$binds[] | select(.modmask == $combo.mask and ((.key | ascii_downcase) as $bound | $combo.keys | index($bound)))][0]
+             | [$binds[] | select(.modmask as $bound | $combo.masks | index($bound)) | select((.key | ascii_downcase) as $bound | $combo.keys | index($bound))][0]
              | select(. != null) | if .description != "" then "\($key) (\(.description))" else $key end] end)}
   ;'
 omarchy_rc_filter='[.[]? | select((.draft | not) and (.tag_name | type) == "string" and (.tag_name | ltrimstr("v") | gsub("-"; "")) == $version)][0]
-  | if . == null then {breaking: null, deprecations: [], more: 0, keys: 0, keys_taken: null} else changes($binds) end
+  | if . == null then {breaking: null, deprecations: [], more: 0, keys: 0, keys_taken: null} else changes($binds; false) end
   | {version: $version, packages: $packages[0]} + .'
 
 hyprland_binds() {

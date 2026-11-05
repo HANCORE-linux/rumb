@@ -465,8 +465,10 @@ fn ring_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
         text(buf, inner.x, inner.y + 2, "checking…", Style::new().fg(pal.faint), inner.width);
         return;
     };
-    let Some(notes) = app.omarchy_notes.as_ref() else {
-        if app.updates.iter().any(|update| update.name == "omarchy" || update.name == "omarchy-dev") {
+    let Some(notes) = app.omarchy_notes.as_ref().filter(|notes| notes.releases > 0) else {
+        if app.omarchy_notes.is_some() {
+            text(buf, inner.x, inner.y + 2, "release notes on the web", Style::new().fg(pal.faint), inner.width);
+        } else if app.updates.iter().any(|update| update.name == "omarchy" || update.name == "omarchy-dev") {
             text(buf, inner.x, inner.y + 2, "release notes unavailable", Style::new().fg(pal.faint), inner.width);
         } else {
             let col = place_ring(rings, inner, cell, crate::ink::RingSpec { slots: 96, ticks: 4, center: vec![("0".to_string(), pal.ink2, 16)], ..Default::default() });
@@ -489,7 +491,7 @@ fn ring_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
     let unit = UNITS.into_iter().map(|unit| unit as u64).find(|unit| wedges(*unit) <= 48).unwrap_or(10000);
     let kinds: Vec<(Color, u8)> = std::iter::repeat_n((pal.ink, 9), counted.div_ceil(unit) as usize)
         .chain(std::iter::repeat_n((pal.ink2, 6), notes.improvements.div_ceil(unit) as usize))
-        .chain(std::iter::repeat_n((pal.warn, 12), notes.security.div_ceil(unit) as usize))
+        .chain(std::iter::repeat_n((pal.alert, 12), notes.security.div_ceil(unit) as usize))
         .collect();
     let slots = 96u16;
     let step = slots / kinds.len().max(1) as u16;
@@ -504,7 +506,7 @@ fn ring_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
     let top = col.y + col.height.saturating_sub(4 + rows.len() as u16) / 2;
     text(buf, col.x, top, &notes_origin(notes), Style::new().fg(pal.label), col.width);
     keyed(buf, col, top + 2, pal.ink2, "improvements", &notes.improvements.to_string(), pal.ink, pal);
-    keyed(buf, col, top + 3, pal.warn, "security", &notes.security.to_string(), if notes.security > 0 { pal.warn } else { pal.ink }, pal);
+    keyed(buf, col, top + 3, pal.alert, "security", &notes.security.to_string(), if notes.security > 0 { pal.alert } else { pal.ink }, pal);
     for (k, (name, value, severity)) in rows.into_iter().enumerate() {
         keyed(buf, col, top + 4 + k as u16, rc_tone(severity, pal), name, &value, rc_tone(severity, pal), pal);
     }
@@ -819,8 +821,10 @@ fn tile_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
         text(buf, inner.x, inner.y + 2, "checking…", Style::new().fg(pal.faint), inner.width);
         return;
     };
-    let Some(notes) = app.omarchy_notes.as_ref() else {
-        if app.updates.iter().any(|update| update.name == "omarchy" || update.name == "omarchy-dev") {
+    let Some(notes) = app.omarchy_notes.as_ref().filter(|notes| notes.releases > 0) else {
+        if app.omarchy_notes.is_some() {
+            text(buf, inner.x, inner.y + 2, "release notes on the web", Style::new().fg(pal.faint), inner.width);
+        } else if app.updates.iter().any(|update| update.name == "omarchy" || update.name == "omarchy-dev") {
             text(buf, inner.x, inner.y + 2, "release notes unavailable", Style::new().fg(pal.faint), inner.width);
         } else {
             let x = big(buf, inner.x, inner.y + 1, "0", Style::new().fg(pal.ink2));
@@ -840,7 +844,7 @@ fn tile_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
     text(buf, x, inner.y + 2, if notes.fixes == 1 { "fix" } else { "fixes" }, Style::new().fg(pal.label), room);
     text(buf, x, inner.y + 3, &notes_origin(notes), Style::new().fg(pal.label), room);
     row(buf, inner, inner.y + 5, "improvements", &notes.improvements.to_string(), pal.ink, pal);
-    row(buf, inner, inner.y + 6, "security", &notes.security.to_string(), if notes.security > 0 { pal.warn } else { pal.ink }, pal);
+    row(buf, inner, inner.y + 6, "security", &notes.security.to_string(), if notes.security > 0 { pal.alert } else { pal.ink }, pal);
     for (k, (name, value, severity)) in note_rows(notes).into_iter().enumerate() {
         row(buf, inner, inner.y + 7 + k as u16, name, &value, rc_tone(severity, pal), pal);
     }
@@ -848,10 +852,10 @@ fn tile_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
 }
 
 const RC_PACKAGES: usize = 8;
-const NOTE_SECURITY: usize = 4;
+const NOTE_DEPRECATED: usize = 5;
 
 fn notes_origin(notes: &crate::app::OmarchyNotes) -> String {
-    match notes.per_release.first().filter(|_| notes.final_release.is_some()) {
+    match notes.per_release.first().filter(|_| notes.final_release.is_some() && notes.releases == 1) {
         Some(release) => format!("from {}", release.tag),
         None => format!("in {} {}", notes.releases, if notes.releases == 1 { "release" } else { "releases" }),
     }
@@ -1513,6 +1517,8 @@ fn draw_keys(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
         vec![("↑↓", "day"), ("←→", "previous/next"), ("Esc", "close"), ("c", "copy"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
     } else if app.overlay && app.tile == Some(4) && app.cache_command() {
         vec![("Enter", "copy command"), ("←→", "previous/next"), ("Esc", "close"), ("c", "copy"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
+    } else if app.overlay && app.tile == Some(3) && app.omarchy_link().is_some() {
+        vec![("Enter", "copy link"), ("←→", "previous/next"), ("Esc", "close"), ("c", "copy"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
     } else if app.overlay && (app.tile.is_some() || app.part.is_some()) {
         vec![("←→", "previous/next"), ("Esc", "close"), ("c", "copy"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
     } else if app.overlay {
@@ -2053,7 +2059,7 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
                     if release.security > 0 {
                         parts.push(format!("{} security", release.security));
                     }
-                    lines.push((release.tag.clone(), parts.join(" · "), if release.security > 0 { pal.warn } else { pal.ink }));
+                    lines.push((release.tag.clone(), parts.join(" · "), if release.security > 0 { pal.alert } else { pal.ink }));
                 }
                 if let Some(final_release) = &notes.final_release {
                     indented(&mut lines, "source", &format!("newest release candidate · {final_release} lists its changes on the web"), room, pal.label);
@@ -2061,18 +2067,17 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
                 if let Some(link) = &notes.link {
                     lines.push(("release notes".into(), link.clone(), pal.label));
                 }
-                change_lines(&mut lines, &notes.breaking, notes.keys, notes.keys_taken.as_ref(), &notes.deprecations, room, pal);
+                change_lines(&mut lines, &notes.breaking, notes.keys, notes.keys_taken.as_ref(), &notes.deprecations[..notes.deprecations.len().min(NOTE_DEPRECATED)], room, pal);
                 let listed = !notes.breaking.is_empty();
-                let security = if listed { notes.security_titles.len().min(NOTE_SECURITY) } else { notes.security_titles.len() };
-                for (index, title) in notes.security_titles.iter().take(security).enumerate() {
-                    lines.push((if index == 0 { "security" } else { "" }.into(), title.clone(), pal.ink));
-                }
                 if !listed {
+                    for (index, title) in notes.security_titles.iter().enumerate() {
+                        lines.push((if index == 0 { "security" } else { "" }.into(), title.clone(), pal.ink));
+                    }
                     for (index, title) in notes.titles.iter().enumerate() {
                         lines.push((if index == 0 { "fixes" } else { "" }.into(), title.clone(), pal.label));
                     }
                 }
-                let hidden = if listed { (notes.more as usize).saturating_sub(security) } else { ((notes.fixes + notes.security) as usize).saturating_sub(notes.titles.len() + security) };
+                let hidden = if listed { notes.more as usize + notes.deprecations.len().saturating_sub(NOTE_DEPRECATED) } else { ((notes.fixes + notes.security) as usize).saturating_sub(notes.titles.len() + notes.security_titles.len()) };
                 if hidden > 0 {
                     lines.push((String::new(), format!("+ {} more in the release notes", thousands(hidden as u64)), pal.faint));
                 }

@@ -199,6 +199,7 @@ enum Action {
     Export,
     Copy,
     CopyCommand,
+    CopyLink,
     Theme(bool),
     ThemeFilter,
 }
@@ -256,6 +257,7 @@ fn on_key(app: &mut App, key: KeyEvent, page: [usize; 3], now: Instant) -> Actio
             KeyCode::Tab => app.cycle_focus(true),
             KeyCode::BackTab => app.cycle_focus(false),
             KeyCode::Enter if app.overlay && app.tile == Some(4) && app.cache_command() => return Action::CopyCommand,
+            KeyCode::Enter if app.overlay && app.tile == Some(3) && app.omarchy_link().is_some() => return Action::CopyLink,
             KeyCode::Up if app.overlay && app.tile == Some(1) => app.move_day(false),
             KeyCode::Down if app.overlay && app.tile == Some(1) => app.move_day(true),
             KeyCode::Enter => {
@@ -501,6 +503,13 @@ fn run(terminal: &mut DefaultTerminal, options: &Options, script: Option<PathBuf
                     let done = copy_done.clone();
                     std::thread::spawn(move || done.send((format!("copied {}", page::CACHE_COMMAND), export::copy(page::CACHE_COMMAND.to_string()))));
                     copying += 1;
+                }
+                Action::CopyLink => {
+                    if let Some(link) = app.omarchy_link().map(str::to_string) {
+                        let done = copy_done.clone();
+                        std::thread::spawn(move || done.send((format!("copied {link}"), export::copy(link))));
+                        copying += 1;
+                    }
                 }
                 Action::Copy => {
                     if let Some(text) = page::overlay_text(&app, &theme.palette) {
@@ -2207,6 +2216,7 @@ mod tests {
                         app.theme.clone_from(&theme.name);
                     }
                     Action::CopyCommand => app.status = Some((format!("copied {}", page::CACHE_COMMAND), true, now)),
+                    Action::CopyLink => app.status = Some((format!("copied {}", app.omarchy_link().unwrap_or_default()), true, now)),
                     _ if (app.focus, app.lists[app.focus.index()].selected, app.tile, app.part) != before => motion.select(&app, now),
                     _ => {}
                 }
@@ -2314,7 +2324,8 @@ mod tests {
 
     #[test]
     fn a_release_without_notes_shows_those_of_its_newest_rc() {
-        let breaking: Vec<String> = (0..11).map(|k| if k % 2 == 0 { format!("Change {k}: Super + Ctrl + Q is now Super + Shift + Q.") } else { format!("Change {k}: Super + Ctrl + T is now Super + Shift + T, and Super + Ctrl + T opens themes.") }).collect();
+        let mut breaking: Vec<String> = (0..11).map(|k| if k % 2 == 0 { format!("Change {k}: Super + Ctrl + Q is now Super + Shift + Q.") } else { format!("Change {k}: Super + Ctrl + T is now Super + Shift + T, and Super + Ctrl + T opens themes.") }).collect();
+        breaking[0] = "The boot menu stays out of the way now. ".repeat(11) + "Tap any key.";
         let deprecations: Vec<String> = (0..7).map(|k| format!("Replace old tool {k}")).collect();
         let security: Vec<String> = (0..12).map(|k| format!("Harden part {k}")).collect();
         let fixes: Vec<String> = (0..12).map(|k| format!("Fix part {k}")).collect();
@@ -2323,16 +2334,73 @@ mod tests {
             "breaking": breaking, "deprecations": deprecations, "more": 221, "keys": 11, "keys_taken": []}));
         for (w, h) in [(271, 60), (220, 55), (170, 50), (150, 44)] {
             let rows = screen(&app, w, h).join("\n");
-            for text in ["newest release candidate · 4.5.0 lists its", "https://omarchy.org/news/2026/11/omarchy-4-5/", "Change 10:", "none of the 11 new default keys is bound by you", "Replace old tool 6", "Harden part 3", "+ 217 more in the release notes"] {
+            for text in ["newest release candidate · 4.5.0 lists its", "https://omarchy.org/news/2026/11/omarchy-4-5/", "Tap any key.", "Change 10:", "none of the 11 new default keys is bound by you", "Replace old tool 4", "+ 223 more in the release notes", "Enter copy link"] {
                 assert!(rows.contains(text), "{w}x{h}: missing {text}\n{rows}");
             }
-            assert!(!rows.contains("Harden part 4") && !rows.contains("Fix part 0"), "{w}x{h}\n{rows}");
+            assert!(!rows.contains("Replace old tool 5") && !rows.contains("Harden part 0") && !rows.contains("Fix part 0"), "{w}x{h}\n{rows}");
         }
         app.overlay = false;
         let rows = screen(&app, 271, 60).join("\n");
         for text in ["from 4.5.0-rc3", "changes", "keys taken", "1 wedge ≤ 5 notes · release notes"] {
             assert!(rows.contains(text), "missing {text}\n{rows}");
         }
+        let pal = palette::Palette::paper();
+        let (buffer, _) = render(&app, 271, 60, app.started + Duration::from_secs(60));
+        let tone = |name: &str| {
+            let lines = screen(&app, 271, 60);
+            let y = lines.iter().position(|line| line.contains(name)).unwrap();
+            let start = lines[y].chars().collect::<Vec<_>>().windows(name.chars().count()).position(|part| part.iter().collect::<String>() == name).unwrap();
+            let dot = buffer[(start as u16 - 2, y as u16)].fg;
+            let number = (start + name.chars().count()..271).map(|x| &buffer[(x as u16, y as u16)]).find(|cell| cell.symbol().chars().all(|ch| ch.is_ascii_digit())).unwrap().fg;
+            (dot, number)
+        };
+        assert_eq!(tone("security"), (pal.alert, pal.alert));
+        assert_eq!(tone("changes"), (pal.warn, pal.warn));
+    }
+
+    #[test]
+    fn the_link_of_the_release_notes_can_be_copied() {
+        let link = "https://omarchy.org/news/2026/11/omarchy-4-5/";
+        let mut app = notes_app(json!({"releases": 0, "fixes": 0, "improvements": 0, "security": 0, "link": link}));
+        assert!(window(&app).iter().any(|line| line.ends_with(link)), "{:?}", window(&app));
+        for (w, h) in [(271, 60), (170, 50), (150, 44)] {
+            assert!(screen(&app, w, h).last().unwrap().contains("Enter copy link"), "{w}x{h}");
+        }
+        assert_eq!(press(&mut app, &[KeyCode::Enter]), Action::CopyLink);
+        assert!(app.overlay);
+        app.status = Some((format!("copied {link}"), true, app.started + Duration::from_secs(60)));
+        for (w, h) in [(271, 60), (220, 55), (170, 50), (150, 44)] {
+            assert!(screen(&app, w, h).last().unwrap().contains(&format!("copied {link}")), "{w}x{h}");
+        }
+        app.status = None;
+        app.overlay = false;
+        for (w, h) in [(271, 60), (170, 50)] {
+            let rows = screen(&app, w, h).join("\n");
+            assert!(rows.contains("release notes on the web") && !rows.contains("release notes unavailable"), "{w}x{h}\n{rows}");
+        }
+        app.overlay = true;
+        app.omarchy_notes.as_mut().unwrap().link = None;
+        assert_ne!(press(&mut app, &[KeyCode::Enter]), Action::CopyLink);
+        let mut other = notes_app(json!({"releases": 0, "fixes": 0, "improvements": 0, "security": 0, "link": link}));
+        other.omarchy = false;
+        assert_ne!(press(&mut other, &[KeyCode::Enter]), Action::CopyLink);
+    }
+
+    #[test]
+    fn notes_of_several_releases_count_as_several() {
+        let mut app = notes_app(json!({"releases": 2, "fixes": 93, "improvements": 58, "security": 13, "final": "4.5.0", "per_release": [{"tag": "4.5.1", "fixes": 2, "improvements": 0, "security": 0}, {"tag": "4.5.0-rc3", "fixes": 91, "improvements": 58, "security": 13}], "breaking": ["The boot menu stays out of the way now."], "deprecations": [], "more": 223, "keys": 0, "keys_taken": null}));
+        app.overlay = false;
+        let rows = screen(&app, 271, 60).join("\n");
+        assert!(rows.contains("in 2 releases") && !rows.contains("from 4.5"), "{rows}");
+    }
+
+    #[test]
+    fn the_mac_boot_chain_belongs_to_the_base() {
+        for name in ["m1n1", "uboot-asahi", "omarchy-mac-boot"] {
+            assert_eq!(app::Subsystem::of(name), app::Subsystem::Base, "{name}");
+        }
+        assert_eq!(app::Subsystem::of("omarchy"), app::Subsystem::Shell);
+        assert_eq!(app::Subsystem::of("linux-asahi"), app::Subsystem::Kernel);
     }
 
     #[test]
