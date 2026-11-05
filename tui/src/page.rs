@@ -883,12 +883,12 @@ fn change_lines(lines: &mut Vec<(String, String, Color)>, breaking: &[String], k
     }
     if let Some(taken) = taken.filter(|_| keys > 0) {
         let text = match (taken.len(), keys) {
-            (0, 1) => "the new default key is not bound by you".to_string(),
-            (0, keys) => format!("none of the {keys} new default keys is bound by you"),
-            (_, 1) => format!("the new default key is bound by you: {}", taken.join(" · ")),
-            (count, keys) => format!("{count} of the {keys} new default keys bound by you: {}", taken.join(" · ")),
+            (0, 1) => "the new default key is not bound yet".to_string(),
+            (0, keys) => format!("none of the {keys} new default keys is bound yet"),
+            (_, 1) => format!("the new default key is already bound: {}", taken.join(" · ")),
+            (count, keys) => format!("{count} of the {keys} new default keys already bound: {}", taken.join(" · ")),
         };
-        indented(lines, "your keys", &text, room, if taken.is_empty() { pal.ok } else { pal.warn });
+        indented(lines, "keys", &text, room, if taken.is_empty() { pal.ok } else { pal.warn });
     }
     for (index, change) in deprecations.iter().enumerate() {
         indented(lines, if index == 0 { "deprecated" } else { "" }, change, room, pal.label);

@@ -2323,7 +2323,7 @@ mod tests {
         assert!(lines[line_at(&lines, "packages")].ends_with("omarchy  4.0.6 → 4.5.0rc3"));
         assert!(lines[line_at(&lines, "omarchy-speedtest")].ends_with("omarchy-speedtest 0.2.1 · new"));
         assert!(lines[line_at(&lines, "changes")].ends_with("The boot menu stays out of the way now."));
-        assert!(lines[line_at(&lines, "your keys")].ends_with("1 of the 11 new default keys bound by you: Super + Q (Clear clipboard)"));
+        assert!(lines[line_at(&lines, "keys  ")].ends_with("1 of the 11 new default keys already bound: Super + Q (Clear clipboard)"));
         assert!(lines[line_at(&lines, "deprecated")].ends_with("Remove Lazydocker from new installs"));
         assert!(lines.last().unwrap().ends_with("+ 221 more in the release notes"));
         app.overlay = false;
@@ -2344,14 +2344,14 @@ mod tests {
         assert!(lines.iter().any(|line| line.ends_with("+ 32 more packages")), "{lines:?}");
         for (w, h) in [(271, 60), (170, 50)] {
             let rows = screen(&app, w, h).join("\n");
-            for text in ["The boot menu stays out of the way now.", "your keys", "Super + Shift + T (Activity)", "starts recording", "+ 3 more in the release notes"] {
+            for text in ["The boot menu stays out of the way now.", "keys  ", "Super + Shift + T (Activity)", "starts recording", "+ 3 more in the release notes"] {
                 assert!(rows.contains(text), "{w}x{h}: missing {text}\n{rows}");
             }
         }
         app.omarchy_rc.as_mut().unwrap().packages.truncate(9);
         let lines = window(&app);
         assert!(lines.iter().any(|line| line.ends_with("pkg-08  1.0 → 1.1")) && !lines.iter().any(|line| line.contains("more packages")), "{lines:?}");
-        for (taken, text) in [(json!([]), "the new default key is not bound by you"), (json!(["Super + Q (Clear clipboard)"]), "the new default key is bound by you: Super + Q (Clear clipboard)")] {
+        for (taken, text) in [(json!([]), "the new default key is not bound yet"), (json!(["Super + Q (Clear clipboard)"]), "the new default key is already bound: Super + Q (Clear clipboard)")] {
             let one = rc_app(json!({"version": "4.5.0rc3", "packages": [], "breaking": [], "keys": 1, "keys_taken": taken}));
             assert!(window(&one).iter().any(|line| line.ends_with(text)), "{text}");
         }
@@ -2375,7 +2375,7 @@ mod tests {
             "breaking": breaking, "deprecations": deprecations, "more": 221, "keys": 11, "keys_taken": []}));
         for (w, h) in [(271, 60), (220, 55), (170, 50), (150, 44)] {
             let rows = screen(&app, w, h).join("\n");
-            for text in ["newest release candidate · 4.5.0 lists its", "https://omarchy.org/news/2026/11/omarchy-4-5/", "Tap any key.", "Change 10:", "none of the 11 new default keys is bound by you", "Replace old tool 4", "+ 223 more in the release notes", "Enter copy link"] {
+            for text in ["newest release candidate · 4.5.0 lists its", "https://omarchy.org/news/2026/11/omarchy-4-5/", "Tap any key.", "Change 10:", "none of the 11 new default keys is bound yet", "Replace old tool 4", "+ 223 more in the release notes", "Enter copy link"] {
                 assert!(rows.contains(text), "{w}x{h}: missing {text}\n{rows}");
             }
             assert!(!rows.contains("Replace old tool 5") && !rows.contains("Harden part 0") && !rows.contains("Fix part 0"), "{w}x{h}\n{rows}");
@@ -2484,7 +2484,7 @@ mod tests {
         for text in ["2 fixes", "Fix one", "+ 1 more in the release notes"] {
             assert!(lines.iter().any(|line| line.contains(text)), "missing {text}: {lines:?}");
         }
-        assert!(!lines.iter().any(|line| line.contains("source") || line.contains("changes") || line.contains("your keys")), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.contains("source") || line.contains("changes") || line.contains("keys  ")), "{lines:?}");
         app.overlay = false;
         let rows = screen(&app, 271, 60).join("\n");
         assert!(rows.contains("in 1 release") && rows.contains("1 wedge = 1 note · release notes") && !rows.contains("keys taken"), "{rows}");
@@ -2497,11 +2497,11 @@ mod tests {
         assert_eq!(rows.iter().map(|(name, _, _)| *name).collect::<Vec<_>>(), ["rc", "packages"]);
         let lines = window(&app);
         assert!(lines[line_at(&lines, "release notes")].ends_with("unavailable"));
-        assert!(!lines.iter().any(|line| line.contains("your keys") || line.contains("changes")), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.contains("keys  ") || line.contains("changes")), "{lines:?}");
         let free = rc_app(json!({"version": "4.5.0rc3", "packages": [], "breaking": [], "keys": 11, "keys_taken": []}));
         let rows = free.omarchy_rc.as_ref().unwrap().rows();
         assert_eq!(rows.iter().map(|(name, value, severity)| (*name, value.as_str(), *severity)).collect::<Vec<_>>()[2..], [("changes", "0", app::Severity::Neutral), ("keys taken", "0", app::Severity::Ok)]);
-        assert!(window(&free).iter().any(|line| line.ends_with("none of the 11 new default keys is bound by you")));
+        assert!(window(&free).iter().any(|line| line.ends_with("none of the 11 new default keys is bound yet")));
     }
 
     #[test]
