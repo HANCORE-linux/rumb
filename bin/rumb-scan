@@ -75,7 +75,7 @@ CORE_PACKAGES=(
   qt6-base qt6-declarative qt6-wayland 'hypr*' aquamarine xdg-desktop-portal-hyprland
   quickshell omarchy omarchy-dev systemd systemd-libs glibc lib32-glibc 'limine*'
   mkinitcpio pacman uwsm sddm pipewire wireplumber cryptsetup btrfs-progs
-  m1n1 uboot-asahi omarchy-mac-boot
+  m1n1 uboot-asahi omarchy-mac-boot omarchy-hyprland-titlebars
 )
 
 is_core() {
@@ -782,6 +782,10 @@ collect_anatomy() {
   else
     reboot_pending=true
   fi
+  local reboot_flag=${HOME:-}/.local/state/omarchy/reboot-required reboot_requested=false
+  if [[ -f $reboot_flag ]] && (($(stat -c %Y "$reboot_flag" 2>/dev/null || echo 0) >= $(awk '/^btime/ { print $2 }' /proc/stat 2>/dev/null || echo 0))); then
+    reboot_requested=true
+  fi
   uptime_seconds=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
   uptime_seconds=${uptime_seconds%.*}
   [[ $uptime_seconds =~ ^[0-9]+$ ]] || uptime_seconds=null
@@ -970,7 +974,7 @@ collect_anatomy() {
     <"$tmp/deps.tsv" >"$tmp/deps.json"
   emit --arg hostname "$(uname -n)" --arg os "$os" --arg desktop "$desktop" --arg omarchy "$omarchy" \
     --arg kernel_running "$kernel_running" --arg kernel_installed "$kernel_installed" --arg kernel_package "$kernel_pkg" \
-    --argjson reboot_pending "$reboot_pending" --argjson cache_bytes "$cache_bytes" --argjson cache_freeable "$cache_freeable" \
+    --argjson reboot_pending "$reboot_pending" --argjson reboot_requested "$reboot_requested" --argjson cache_bytes "$cache_bytes" --argjson cache_freeable "$cache_freeable" \
     --argjson packages "$packages" --argjson explicit "$explicit" \
     --argjson orphans "$orphans" --arg orphan_names "$orphan_names" --argjson upgrades_per_day "$upgrades_json" \
     --argjson uptime_seconds "$uptime_seconds" --arg nvidia_loaded "$nvidia_loaded" --arg nvidia_installed "$nvidia_installed" \
@@ -979,7 +983,7 @@ collect_anatomy() {
     --slurpfile stale "$tmp/stale.json" --slurpfile config_files "$tmp/config_files.json" \
     '{event: "stage", stage: "anatomy", data: {hostname: $hostname, os: $os, desktop: $desktop, omarchy: $omarchy,
       packages: $packages, explicit: $explicit, orphans: $orphans, orphan_names: ($orphan_names | split("\n") | map(select(length > 0)) | .[:40]), cache_bytes: $cache_bytes, cache_freeable_bytes: $cache_freeable,
-      kernel_running: $kernel_running, kernel_installed: $kernel_installed, kernel_package: $kernel_package, reboot_pending: $reboot_pending,
+      kernel_running: $kernel_running, kernel_installed: $kernel_installed, kernel_package: $kernel_package, reboot_pending: $reboot_pending, reboot_requested: $reboot_requested,
       uptime_seconds: $uptime_seconds, nvidia_loaded: $nvidia_loaded, nvidia_installed: $nvidia_installed,
       hyprland_running: $hyprland_running, hyprland_installed: $hyprland_installed,
       upgrades_per_day: $upgrades_per_day, repos: $repos[0], deps: $deps[0], cached: $cached[0], journal: $journal[0],

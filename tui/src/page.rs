@@ -858,6 +858,7 @@ const RC_PACKAGES: usize = 8;
 const NOTE_DEPRECATED: usize = 5;
 const WINDOW_ROWS: usize = 200;
 const DAY_CHANGES: usize = 5;
+const DAY_BESIDE: u16 = 96;
 
 fn notes_origin(notes: &crate::app::OmarchyNotes) -> String {
     match notes.per_release.first().filter(|_| notes.final_release.is_some() && notes.releases == 1) {
@@ -1012,7 +1013,7 @@ fn checks(app: &App) -> Vec<(&'static str, String, Severity)> {
         checks.push(("risk", if high > 0 { "high" } else { "no high" }.into(), level(high == 0, Severity::Bad)));
     }
     if let Some(anatomy) = &app.anatomy {
-        let (reboot, severity) = if anatomy.reboot_pending {
+        let (reboot, severity) = if anatomy.reboot_pending || anatomy.reboot_requested {
             ("pending", Severity::Bad)
         } else if !app.reboot_after().is_empty() {
             ("after update", Severity::Warn)
@@ -1814,9 +1815,13 @@ fn draw_days(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut
     let mut rect = place(area, app, scene, width, height);
     if let Some(around) = scene.eye.map(|eye| Rect::new(eye.x.saturating_sub(1), eye.y.saturating_sub(1), eye.width + 2, eye.height + 2))
         && rect.intersects(around)
-        && around.bottom() + height < area.bottom()
     {
-        rect.y = around.bottom();
+        let free = around.x.saturating_sub(area.x + 1);
+        if free >= DAY_BESIDE {
+            rect = Rect::new(around.x - free.min(width) - 1, rect.y, free.min(width), height);
+        } else if around.bottom() + height < area.bottom() {
+            rect.y = around.bottom();
+        }
     }
     scene.overlay = Some(rect);
     clear_around(buf, area, rect, pal);
@@ -2191,6 +2196,8 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
                 let after = app.reboot_after();
                 let (state, color) = if anatomy.reboot_pending {
                     (format!("pending · {} running, {installed} installed", anatomy.kernel_running), pal.alert)
+                } else if anatomy.reboot_requested {
+                    ("pending · requested by Omarchy".to_string(), pal.alert)
                 } else if !after.is_empty() {
                     (reboot_reason(&after), pal.warn)
                 } else {

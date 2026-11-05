@@ -1391,6 +1391,22 @@ mod tests {
     }
 
     #[test]
+    fn a_reboot_omarchy_asks_for_counts_as_pending() {
+        let mut app = demo_at(60_000);
+        app.anatomy.as_mut().unwrap().reboot_pending = false;
+        app.tile = Some(5);
+        app.overlay = true;
+        let quiet = window(&app);
+        assert!(!quiet.iter().any(|line| line.contains("requested by Omarchy")), "{quiet:?}");
+        app.anatomy.as_mut().unwrap().reboot_requested = true;
+        let lines = window(&app);
+        assert!(lines.iter().any(|line| line.contains("pending · requested by Omarchy")), "{lines:?}");
+        app.overlay = false;
+        app.tile = None;
+        assert!(screen(&app, 271, 60).iter().any(|row| row.contains("reboot") && row.contains("pending")));
+    }
+
+    #[test]
     fn windows_stay_where_they_open() {
         let sizes = [(271, 60), (220, 55), (170, 50), (150, 44)];
         let place = |app: &App, w: u16, h: u16| render(app, w, h, app.started + Duration::from_secs(60)).1.overlay.expect("window drawn");
@@ -1408,6 +1424,11 @@ mod tests {
         }
         let mut app = demo_at(60_000);
         app.overlay = true;
+        for (w, h) in sizes {
+            let tops: Vec<_> = (0..6).map(|tile| { app.tile = Some(tile); place(&app, w, h).y }).collect();
+            assert!(tops.windows(2).all(|pair| pair[0] == pair[1]), "{w}x{h} tiles: {tops:?}");
+        }
+        app.tile = None;
         for (w, h) in sizes {
             let tops: Vec<_> = (0..7).map(|part| { app.part = Some(part); place(&app, w, h).y }).collect();
             assert!(tops.windows(2).all(|pair| pair[0] == pair[1]), "{w}x{h} parts: {tops:?}");
@@ -2473,6 +2494,7 @@ mod tests {
         for name in ["m1n1", "uboot-asahi", "omarchy-mac-boot"] {
             assert_eq!(app::Subsystem::of(name), app::Subsystem::Base, "{name}");
         }
+        assert_eq!(app::Subsystem::of("omarchy-hyprland-titlebars"), app::Subsystem::Compositor);
         assert_eq!(app::Subsystem::of("omarchy"), app::Subsystem::Shell);
         assert_eq!(app::Subsystem::of("linux-asahi"), app::Subsystem::Kernel);
     }

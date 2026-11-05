@@ -65,7 +65,7 @@ impl Subsystem {
             Subsystem::Kernel
         } else if ["mesa", "lib32-mesa", "nvidia", "lib32-nvidia", "vulkan", "lib32-vulkan", "libva", "intel-media"].iter().any(|p| starts(p)) {
             Subsystem::Graphics
-        } else if starts("hypr") || matches!(name, "aquamarine" | "xdg-desktop-portal-hyprland" | "uwsm" | "sddm" | "Hyprland") {
+        } else if starts("hypr") || matches!(name, "aquamarine" | "xdg-desktop-portal-hyprland" | "uwsm" | "sddm" | "Hyprland" | "omarchy-hyprland-titlebars") {
             Subsystem::Compositor
         } else if ["qt5-", "qt6-", "gtk", "libadwaita"].iter().any(|p| starts(p)) {
             Subsystem::Toolkit
@@ -172,6 +172,8 @@ pub struct Anatomy {
     pub cache_freeable_bytes: Option<u64>,
     #[serde(default)]
     pub reboot_pending: bool,
+    #[serde(default)]
+    pub reboot_requested: bool,
     #[serde(default)]
     pub upgrades_per_day: Vec<u64>,
     #[serde(default)]

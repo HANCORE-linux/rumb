@@ -131,6 +131,8 @@ pub fn report(app: &App) -> String {
         let after: Vec<String> = app.reboot_after().iter().map(|(what, update)| format!("{what} {} -> {}", clean(&update.old), clean(&update.new))).collect();
         let reboot = if anatomy.reboot_pending {
             format!("pending, kernel {} is installed", clean(&anatomy.kernel_installed))
+        } else if anatomy.reboot_requested {
+            "pending, requested by Omarchy".into()
         } else if !after.is_empty() {
             format!("after this update ({})", after.join(", "))
         } else {
