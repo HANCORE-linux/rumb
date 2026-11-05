@@ -645,6 +645,25 @@
     "selection": "#1f253a",
     "yellow": "#50f7d4"
   },
+  "jade-horse": {
+    "accent": "#8bcbb1",
+    "background": "#142620",
+    "blue": "#96b7d0",
+    "bright_foreground": "#f0faf4",
+    "bright_red": "#e6a6aa",
+    "cyan": "#86c7c5",
+    "dark_foreground": "#91ad9f",
+    "foreground": "#dfede5",
+    "green": "#8bcbb1",
+    "light_foreground": "#bed6c9",
+    "lighter_background": "#203b31",
+    "magenta": "#b7a1c8",
+    "mode": "dark",
+    "muted": "#64887b",
+    "red": "#d88d91",
+    "selection": "#2b5147",
+    "yellow": "#c5cc91"
+  },
   "kanagawa": {
     "accent": "#dcd7ba",
     "background": "#1f1f28",
@@ -778,25 +797,6 @@
     "selection": "#434c5e",
     "yellow": "#ebcb8b"
   },
-  "osaka-jade": {
-    "accent": "#509475",
-    "background": "#111c18",
-    "blue": "#509475",
-    "bright_foreground": "#f7e8b2",
-    "bright_red": "#db9f9c",
-    "cyan": "#2dd5b7",
-    "dark_foreground": "#81b8a8",
-    "foreground": "#c1c497",
-    "green": "#549e6a",
-    "light_foreground": "#d6d5bc",
-    "lighter_background": "#23372b",
-    "magenta": "#d2689c",
-    "mode": "dark",
-    "muted": "#53685b",
-    "red": "#ff5345",
-    "selection": "#32473b",
-    "yellow": "#459451"
-  },
   "retro-82": {
     "accent": "#faa968",
     "background": "#05182e",
@@ -873,6 +873,25 @@
     "selection": "#343d41",
     "yellow": "#d9dbdc"
   },
+  "starship": {
+    "accent": "#ff9f0a",
+    "background": "#1c1c1e",
+    "blue": "#8fb8de",
+    "bright_foreground": "#ffffff",
+    "bright_red": "#ff8373",
+    "cyan": "#a6dcef",
+    "dark_foreground": "#98989d",
+    "foreground": "#f5f5f7",
+    "green": "#ff9f0a",
+    "light_foreground": "#fbfbfd",
+    "lighter_background": "#2c2c2e",
+    "magenta": "#ff8fa3",
+    "mode": "dark",
+    "muted": "#8e8e93",
+    "red": "#ff5f4a",
+    "selection": "#3a3a3c",
+    "yellow": "#ffc27a"
+  },
   "tokyo-night": {
     "accent": "#7aa2f7",
     "background": "#1a1b26",
@@ -929,5 +948,24 @@
     "red": "#2a2a2a",
     "selection": "#c0c0c0",
     "yellow": "#4a4a4a"
+  },
+  "osaka-jade": {
+    "accent": "#509475",
+    "background": "#111c18",
+    "blue": "#509475",
+    "bright_foreground": "#f7e8b2",
+    "bright_red": "#db9f9c",
+    "cyan": "#2dd5b7",
+    "dark_foreground": "#81b8a8",
+    "foreground": "#c1c497",
+    "green": "#549e6a",
+    "light_foreground": "#d6d5bc",
+    "lighter_background": "#23372b",
+    "magenta": "#d2689c",
+    "mode": "dark",
+    "muted": "#53685b",
+    "red": "#ff5345",
+    "selection": "#32473b",
+    "yellow": "#459451"
   }
 }

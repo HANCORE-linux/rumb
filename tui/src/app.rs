@@ -280,6 +280,20 @@ pub struct OmarchyNotes {
     pub titles: Vec<String>,
     #[serde(default)]
     pub security_titles: Vec<String>,
+    #[serde(default, rename = "final")]
+    pub final_release: Option<String>,
+    #[serde(default)]
+    pub link: Option<String>,
+    #[serde(default)]
+    pub breaking: Vec<String>,
+    #[serde(default)]
+    pub deprecations: Vec<String>,
+    #[serde(default)]
+    pub more: u64,
+    #[serde(default)]
+    pub keys: u64,
+    #[serde(default)]
+    pub keys_taken: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

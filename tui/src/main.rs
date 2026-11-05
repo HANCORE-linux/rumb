@@ -2306,6 +2306,48 @@ mod tests {
         }
     }
 
+    fn notes_app(notes: Value) -> App {
+        let mut app = rc_app(Value::Null);
+        app.apply(stage("news", json!({"news": [], "news_check_failed": false, "omarchy_notes": notes, "omarchy_rc": null})), Instant::now());
+        app
+    }
+
+    #[test]
+    fn a_release_without_notes_shows_those_of_its_newest_rc() {
+        let breaking: Vec<String> = (0..11).map(|k| if k % 2 == 0 { format!("Change {k}: Super + Ctrl + Q is now Super + Shift + Q.") } else { format!("Change {k}: Super + Ctrl + T is now Super + Shift + T, and Super + Ctrl + T opens themes.") }).collect();
+        let deprecations: Vec<String> = (0..7).map(|k| format!("Replace old tool {k}")).collect();
+        let security: Vec<String> = (0..12).map(|k| format!("Harden part {k}")).collect();
+        let fixes: Vec<String> = (0..12).map(|k| format!("Fix part {k}")).collect();
+        let mut app = notes_app(json!({"releases": 1, "fixes": 91, "improvements": 58, "security": 13, "final": "4.5.0", "link": "https://omarchy.org/news/2026/11/omarchy-4-5/",
+            "per_release": [{"tag": "4.5.0-rc3", "fixes": 91, "improvements": 58, "security": 13}], "titles": fixes, "security_titles": security,
+            "breaking": breaking, "deprecations": deprecations, "more": 221, "keys": 11, "keys_taken": []}));
+        for (w, h) in [(271, 60), (220, 55), (170, 50), (150, 44)] {
+            let rows = screen(&app, w, h).join("\n");
+            for text in ["newest release candidate · 4.5.0 lists its", "https://omarchy.org/news/2026/11/omarchy-4-5/", "Change 10:", "none of the 11 new default keys is bound by you", "Replace old tool 6", "Harden part 3", "+ 217 more in the release notes"] {
+                assert!(rows.contains(text), "{w}x{h}: missing {text}\n{rows}");
+            }
+            assert!(!rows.contains("Harden part 4") && !rows.contains("Fix part 0"), "{w}x{h}\n{rows}");
+        }
+        app.overlay = false;
+        let rows = screen(&app, 271, 60).join("\n");
+        for text in ["from 4.5.0-rc3", "changes", "keys taken", "1 wedge ≤ 5 notes · release notes"] {
+            assert!(rows.contains(text), "missing {text}\n{rows}");
+        }
+    }
+
+    #[test]
+    fn a_release_with_its_own_notes_lists_its_fixes() {
+        let mut app = notes_app(json!({"releases": 1, "fixes": 2, "improvements": 0, "security": 0, "per_release": [{"tag": "4.0.6", "fixes": 2, "improvements": 0, "security": 0}], "titles": ["Fix one"], "breaking": [], "deprecations": [], "more": 2, "keys": 0, "keys_taken": null}));
+        let lines = window(&app);
+        for text in ["2 fixes", "Fix one", "+ 1 more in the release notes"] {
+            assert!(lines.iter().any(|line| line.contains(text)), "missing {text}: {lines:?}");
+        }
+        assert!(!lines.iter().any(|line| line.contains("source") || line.contains("changes") || line.contains("your keys")), "{lines:?}");
+        app.overlay = false;
+        let rows = screen(&app, 271, 60).join("\n");
+        assert!(rows.contains("in 1 release") && rows.contains("1 wedge = 1 note · release notes") && !rows.contains("keys taken"), "{rows}");
+    }
+
     #[test]
     fn rc_values_that_are_not_known_stay_out_of_the_omarchy_tile() {
         let app = rc_app(json!({"version": "4.5.0rc3", "packages": [{"name": "omarchy", "old": "4.0.6-1", "new": "4.5.0rc3-1"}], "breaking": null, "keys": 0, "keys_taken": null}));
