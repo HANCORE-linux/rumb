@@ -1391,6 +1391,47 @@ mod tests {
     }
 
     #[test]
+    fn windows_stay_where_they_open() {
+        let sizes = [(271, 60), (220, 55), (170, 50), (150, 44)];
+        let place = |app: &App, w: u16, h: u16| render(app, w, h, app.started + Duration::from_secs(60)).1.overlay.expect("window drawn");
+        let now = Instant::now();
+        let mut app = App::new(false, false, now);
+        let source = |k: usize| json!({"kind": "journal", "subject": format!("/usr/bin/tool-{k}"), "count": 1, "package": ""});
+        let change = |k: usize| json!({"action": "upgraded", "name": format!("pkg-{k}"), "version": "1.0 -> 2.0"});
+        let day = |date: &str, sources: usize, changes: usize| json!({"date": date, "crashes": 0, "errors": 1, "sources": (0..sources).map(source).collect::<Vec<_>>(), "changes": (0..changes).map(change).collect::<Vec<_>>()});
+        app.apply(stage("problems", json!({"problems": [], "activity": [day("2026-10-01", 1, 0), day("2026-10-02", 9, 12), day("2026-10-03", 2, 1), day("2026-10-04", 5, 3), day("2026-10-05", 0, 0)]})), now);
+        app.tile = Some(1);
+        app.overlay = true;
+        for (w, h) in sizes {
+            let rects: Vec<_> = (0..app.shown_days().len()).map(|k| { app.day = Some(k); place(&app, w, h) }).collect();
+            assert!(rects.windows(2).all(|pair| pair[0] == pair[1]), "{w}x{h}: {rects:?}");
+        }
+        let mut app = demo_at(60_000);
+        app.overlay = true;
+        for (w, h) in sizes {
+            let tops: Vec<_> = (0..7).map(|part| { app.part = Some(part); place(&app, w, h).y }).collect();
+            assert!(tops.windows(2).all(|pair| pair[0] == pair[1]), "{w}x{h} parts: {tops:?}");
+        }
+        app.part = None;
+        for pane in [Pane::Updates, Pane::Problems, Pane::Events] {
+            app.focus = pane;
+            for (w, h) in sizes {
+                app.select(pane, 2);
+                app.overlay = false;
+                render(&app, w, h, app.started + Duration::from_secs(60));
+                assert!(app.window_top.get().is_none());
+                app.overlay = true;
+                let first = place(&app, w, h);
+                for row in 0..app.rows(pane) as isize {
+                    app.select(pane, row);
+                    let rect = place(&app, w, h);
+                    assert_eq!((rect.x, rect.y), (first.x, first.y), "{pane:?} {w}x{h} row {row}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn events_from_earlier_days_show_their_date() {
         let now = Instant::now();
         let mut app = App::new(false, false, now);
@@ -2354,7 +2395,7 @@ mod tests {
             let number = (start + name.chars().count()..271).map(|x| &buffer[(x as u16, y as u16)]).find(|cell| cell.symbol().chars().all(|ch| ch.is_ascii_digit())).unwrap().fg;
             (dot, number)
         };
-        assert_eq!(tone("security"), (pal.alert, pal.alert));
+        assert_eq!(tone("security"), (pal.warn, pal.warn));
         assert_eq!(tone("changes"), (pal.warn, pal.warn));
     }
 

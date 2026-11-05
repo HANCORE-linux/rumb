@@ -81,6 +81,9 @@ pub fn draw(frame: &mut Frame, app: &App, motion: &Motion, pal: &Palette, now: I
     let area = frame.area();
     let buf = frame.buffer_mut();
     fill(buf, area, pal.page);
+    if !app.overlay {
+        app.window_top.set(None);
+    }
     let mut scene = Scene::default();
     if !fits(app, area.width, area.height) {
         draw_too_small(buf, area, pal, min_size(app));
@@ -491,7 +494,7 @@ fn ring_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
     let unit = UNITS.into_iter().map(|unit| unit as u64).find(|unit| wedges(*unit) <= 48).unwrap_or(10000);
     let kinds: Vec<(Color, u8)> = std::iter::repeat_n((pal.ink, 9), counted.div_ceil(unit) as usize)
         .chain(std::iter::repeat_n((pal.ink2, 6), notes.improvements.div_ceil(unit) as usize))
-        .chain(std::iter::repeat_n((pal.alert, 12), notes.security.div_ceil(unit) as usize))
+        .chain(std::iter::repeat_n((pal.warn, 12), notes.security.div_ceil(unit) as usize))
         .collect();
     let slots = 96u16;
     let step = slots / kinds.len().max(1) as u16;
@@ -506,7 +509,7 @@ fn ring_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
     let top = col.y + col.height.saturating_sub(4 + rows.len() as u16) / 2;
     text(buf, col.x, top, &notes_origin(notes), Style::new().fg(pal.label), col.width);
     keyed(buf, col, top + 2, pal.ink2, "improvements", &notes.improvements.to_string(), pal.ink, pal);
-    keyed(buf, col, top + 3, pal.alert, "security", &notes.security.to_string(), if notes.security > 0 { pal.alert } else { pal.ink }, pal);
+    keyed(buf, col, top + 3, pal.warn, "security", &notes.security.to_string(), if notes.security > 0 { pal.warn } else { pal.ink }, pal);
     for (k, (name, value, severity)) in rows.into_iter().enumerate() {
         keyed(buf, col, top + 4 + k as u16, rc_tone(severity, pal), name, &value, rc_tone(severity, pal), pal);
     }
@@ -844,7 +847,7 @@ fn tile_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
     text(buf, x, inner.y + 2, if notes.fixes == 1 { "fix" } else { "fixes" }, Style::new().fg(pal.label), room);
     text(buf, x, inner.y + 3, &notes_origin(notes), Style::new().fg(pal.label), room);
     row(buf, inner, inner.y + 5, "improvements", &notes.improvements.to_string(), pal.ink, pal);
-    row(buf, inner, inner.y + 6, "security", &notes.security.to_string(), if notes.security > 0 { pal.alert } else { pal.ink }, pal);
+    row(buf, inner, inner.y + 6, "security", &notes.security.to_string(), if notes.security > 0 { pal.warn } else { pal.ink }, pal);
     for (k, (name, value, severity)) in note_rows(notes).into_iter().enumerate() {
         row(buf, inner, inner.y + 7 + k as u16, name, &value, rc_tone(severity, pal), pal);
     }
@@ -853,6 +856,8 @@ fn tile_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
 
 const RC_PACKAGES: usize = 8;
 const NOTE_DEPRECATED: usize = 5;
+const WINDOW_ROWS: usize = 200;
+const DAY_CHANGES: usize = 5;
 
 fn notes_origin(notes: &crate::app::OmarchyNotes) -> String {
     match notes.per_release.first().filter(|_| notes.final_release.is_some() && notes.releases == 1) {
@@ -1794,12 +1799,18 @@ fn draw_days(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut
     let days = app.shown_days();
     let chosen = app.chosen_day();
     let (sources, changes, owners) = day_parts(app, days[chosen]);
-    let listed = changes.len().min(6);
+    let listed = changes.len().min(DAY_CHANGES);
     let more = usize::from(changes.len() > listed);
     let programs = if sources.is_empty() { 0 } else { sources.len() + 1 };
     let pacman = if changes.is_empty() { 0 } else { usize::from(programs > 0) + 1 + listed + more };
     let width = area.width.saturating_sub(10).min(150);
-    let height = (days.len().max(programs + pacman) as u16 + 4).min(area.height.saturating_sub(6));
+    let tallest = days.iter().map(|day| {
+        let (sources, changes, _) = day_parts(app, day);
+        let listed = changes.len().min(DAY_CHANGES);
+        let programs = if sources.is_empty() { 0 } else { sources.len() + 1 };
+        programs + if changes.is_empty() { 0 } else { usize::from(programs > 0) + 1 + listed + usize::from(changes.len() > listed) }
+    }).max().unwrap_or(programs + pacman);
+    let height = (days.len().max(tallest) as u16 + 4).min(area.height.saturating_sub(6));
     let mut rect = place(area, app, scene, width, height);
     if let Some(around) = scene.eye.map(|eye| Rect::new(eye.x.saturating_sub(1), eye.y.saturating_sub(1), eye.width + 2, eye.height + 2))
         && rect.intersects(around)
@@ -2059,7 +2070,7 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
                     if release.security > 0 {
                         parts.push(format!("{} security", release.security));
                     }
-                    lines.push((release.tag.clone(), parts.join(" · "), if release.security > 0 { pal.alert } else { pal.ink }));
+                    lines.push((release.tag.clone(), parts.join(" · "), if release.security > 0 { pal.warn } else { pal.ink }));
                 }
                 if let Some(final_release) = &notes.final_release {
                     indented(&mut lines, "source", &format!("newest release candidate · {final_release} lists its changes on the web"), room, pal.label);
@@ -2312,7 +2323,12 @@ fn place(area: Rect, app: &App, scene: &Scene, width: u16, height: u16) -> Rect 
         (if part < 4 { area.x + half / 2 } else { area.x + half + half / 2 }, band.y)
     } else if let Some(row) = scene.chosen[app.focus.index()] {
         let list = scene.lists.iter().find(|(pane, _)| *pane == app.focus).map_or(area, |(_, rect)| *rect);
-        (list.x + list.width / 2, row.y.saturating_sub(2).max(list.y))
+        let top = match app.window_top.get() {
+            Some((pane, top)) if pane == app.focus => top,
+            _ => row.y.saturating_sub(2).max(list.y),
+        };
+        app.window_top.set(Some((app.focus, top)));
+        (list.x + list.width / 2, top)
     } else {
         return centred;
     };
@@ -2427,7 +2443,7 @@ pub fn overlay_text(app: &App, pal: &Palette) -> Option<String> {
     if !app.overlay {
         return None;
     }
-    let (mut text, lines) = overlay_details(app, usize::MAX, pal)?;
+    let (mut text, lines) = overlay_details(app, None, usize::MAX, pal)?;
     for (name, value, _) in &lines {
         text.push('\n');
         text.push_str(format!("{name:<13} {value}").trim_end());
@@ -2437,7 +2453,7 @@ pub fn overlay_text(app: &App, pal: &Palette) -> Option<String> {
 
 type Details = (String, Vec<(String, String, Color)>);
 
-fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
+fn overlay_details(app: &App, row: Option<usize>, room: usize, pal: &Palette) -> Option<Details> {
     let mut lines: Vec<(String, String, Color)> = Vec::new();
     let title;
     if let Some(tile) = app.tile {
@@ -2452,7 +2468,7 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
     match app.focus {
         Pane::Updates => {
             let updates = app.visible_updates();
-            let update = updates.get(app.lists[0].selected.min(updates.len().saturating_sub(1)))?;
+            let update = updates.get(row.unwrap_or(app.lists[0].selected).min(updates.len().saturating_sub(1)))?;
             title = update.name.clone();
             let deps = app.anatomy.as_ref().and_then(|anatomy| anatomy.deps.get(&update.name));
             let commit = update.bump == "commit";
@@ -2528,7 +2544,7 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
         }
         Pane::Problems => {
             let problems = app.visible_problems();
-            let problem = problems.get(app.lists[1].selected.min(problems.len().saturating_sub(1)))?;
+            let problem = problems.get(row.unwrap_or(app.lists[1].selected).min(problems.len().saturating_sub(1)))?;
             title = problem.name().to_string();
             lines.push(("subject".into(), problem.subject.clone(), pal.ink));
             lines.push(("kind".into(), kind_label(&problem.kind).to_string(), pal.ink));
@@ -2588,7 +2604,7 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
         }
         Pane::Events => {
             let events = app.visible_events();
-            let event = events.get(app.lists[2].selected.min(events.len().saturating_sub(1)))?;
+            let event = events.get(row.unwrap_or(app.lists[2].selected).min(events.len().saturating_sub(1)))?;
             title = event.ident.clone();
             let when = match event.day.get(5..) {
                 Some(day) => format!("{day} {}", event.clock),
@@ -2642,16 +2658,28 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
         return;
     }
     let full = area.width.saturating_sub(20).min(104);
-    let content = |width: u16| {
-        let (title, mut lines) = overlay_details(app, width.saturating_sub(18) as usize, pal)?;
+    let content = |width: u16, row: Option<usize>| {
+        let (title, mut lines) = overlay_details(app, row, width.saturating_sub(18) as usize, pal)?;
         if app.tile.is_none() && app.part.is_none() && app.focus == Pane::Problems {
             lines.push(("j".into(), format!("shows the live journal filtered to {title}"), pal.label));
         }
         let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(6));
         Some((title, lines, height))
     };
-    let Some((mut title, mut lines, height)) = content(full) else { return };
-    let mut rect = place(area, app, scene, full, height);
+    let tallest = |width: u16| -> u16 {
+        let room = width.saturating_sub(18) as usize;
+        let height = |lines: usize| (lines as u16 + 4).min(area.height.saturating_sub(6));
+        if app.tile.is_some() {
+            (0..6).map(|tile| height(tile_details(app, tile, room, pal).1.len())).max().unwrap_or(0)
+        } else if app.part.is_some() {
+            (0..subsystem_parts(app).len()).map(|part| height(part_details(app, part, room, pal).1.len())).max().unwrap_or(0)
+        } else {
+            (0..app.rows(app.focus).min(WINDOW_ROWS)).filter_map(|row| content(width, Some(row)).map(|(_, _, tall)| tall)).max().unwrap_or(0)
+        }
+    };
+    let Some((mut title, mut lines, mut height)) = content(full, None) else { return };
+    let tall = tallest(full).max(height);
+    let mut rect = place(area, app, scene, full, tall);
     if let Some(eye) = scene.eye {
         let around = Rect::new(eye.x.saturating_sub(1), eye.y.saturating_sub(1), eye.width + 2, eye.height + 2);
         if rect.intersects(around) {
@@ -2659,16 +2687,18 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
             let free = if leftward { around.x.saturating_sub(area.x + 1) } else { area.right().saturating_sub(around.right()) };
             if free >= 72 {
                 let width = free.min(full);
-                if let Some((beside, rows, tall)) = content(width) {
+                if let Some((beside, rows, own)) = content(width, None) {
                     let x = if leftward { around.x - width - 1 } else { around.right() };
-                    rect = Rect::new(x, place(area, app, scene, width, tall).y, width, tall);
-                    (title, lines) = (beside, rows);
+                    rect = Rect::new(x, place(area, app, scene, width, tallest(width).max(own)).y, width, own);
+                    (title, lines, height) = (beside, rows, own);
                 }
-            } else if around.bottom() + height < area.bottom() {
+            } else if around.bottom() + tall < area.bottom() {
                 rect.y = around.bottom();
             }
         }
     }
+    rect.height = height;
+    rect.y = rect.y.min(area.bottom().saturating_sub(height + 1)).max(area.y + 1);
     scene.overlay = Some(rect);
     clear_around(buf, area, rect, pal);
     clear(buf, rect, pal);
