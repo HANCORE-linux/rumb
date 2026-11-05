@@ -81,6 +81,10 @@ pub fn draw(frame: &mut Frame, app: &App, motion: &Motion, pal: &Palette, now: I
     let area = frame.area();
     let buf = frame.buffer_mut();
     fill(buf, area, pal.page);
+    if !app.overlay {
+        app.window_top.set(None);
+        app.window_tall.borrow_mut().clear();
+    }
     let mut scene = Scene::default();
     if !fits(app, area.width, area.height) {
         draw_too_small(buf, area, pal, min_size(app));
@@ -465,8 +469,10 @@ fn ring_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
         text(buf, inner.x, inner.y + 2, "checking…", Style::new().fg(pal.faint), inner.width);
         return;
     };
-    let Some(notes) = app.omarchy_notes.as_ref() else {
-        if app.updates.iter().any(|update| update.name == "omarchy" || update.name == "omarchy-dev") {
+    let Some(notes) = app.omarchy_notes.as_ref().filter(|notes| notes.releases > 0) else {
+        if app.omarchy_notes.is_some() {
+            text(buf, inner.x, inner.y + 2, "release notes on the web", Style::new().fg(pal.faint), inner.width);
+        } else if app.updates.iter().any(|update| update.name == "omarchy" || update.name == "omarchy-dev") {
             text(buf, inner.x, inner.y + 2, "release notes unavailable", Style::new().fg(pal.faint), inner.width);
         } else {
             let col = place_ring(rings, inner, cell, crate::ink::RingSpec { slots: 96, ticks: 4, center: vec![("0".to_string(), pal.ink2, 16)], ..Default::default() });
@@ -485,10 +491,11 @@ fn ring_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
         return;
     };
     let counted = (notes.fixes as f64 * reveal(app, now, Some(done), 0.0, 600.0)).round() as u64;
-    let kinds: Vec<(Color, u8)> = std::iter::repeat_n((pal.ink, 9), counted as usize)
-        .chain(std::iter::repeat_n((pal.ink2, 6), notes.improvements as usize))
-        .chain(std::iter::repeat_n((pal.warn, 12), notes.security as usize))
-        .take(48)
+    let wedges = |unit: u64| notes.fixes.div_ceil(unit) + notes.improvements.div_ceil(unit) + notes.security.div_ceil(unit);
+    let unit = UNITS.into_iter().map(|unit| unit as u64).find(|unit| wedges(*unit) <= 48).unwrap_or(10000);
+    let kinds: Vec<(Color, u8)> = std::iter::repeat_n((pal.ink, 9), counted.div_ceil(unit) as usize)
+        .chain(std::iter::repeat_n((pal.ink2, 6), notes.improvements.div_ceil(unit) as usize))
+        .chain(std::iter::repeat_n((pal.warn, 12), notes.security.div_ceil(unit) as usize))
         .collect();
     let slots = 96u16;
     let step = slots / kinds.len().max(1) as u16;
@@ -499,11 +506,15 @@ fn ring_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
     }
     let center = vec![(counted.to_string(), pal.ink, 16), (if notes.fixes == 1 { "fix" } else { "fixes" }.to_string(), pal.label, 10)];
     let col = place_ring(rings, inner, cell, crate::ink::RingSpec { slots, dots, ticks: 4, center, ..Default::default() });
-    let top = col.y + col.height.saturating_sub(4) / 2;
-    text(buf, col.x, top, &format!("in {} {}", notes.releases, if notes.releases == 1 { "release" } else { "releases" }), Style::new().fg(pal.label), col.width);
+    let rows = note_rows(notes);
+    let top = col.y + col.height.saturating_sub(4 + rows.len() as u16) / 2;
+    text(buf, col.x, top, &notes_origin(notes), Style::new().fg(pal.label), col.width);
     keyed(buf, col, top + 2, pal.ink2, "improvements", &notes.improvements.to_string(), pal.ink, pal);
     keyed(buf, col, top + 3, pal.warn, "security", &notes.security.to_string(), if notes.security > 0 { pal.warn } else { pal.ink }, pal);
-    tile_legend(buf, area, vec![faint("1 wedge = 1 note · from the release notes", pal)]);
+    for (k, (name, value, severity)) in rows.into_iter().enumerate() {
+        keyed(buf, col, top + 4 + k as u16, rc_tone(severity, pal), name, &value, rc_tone(severity, pal), pal);
+    }
+    tile_legend(buf, area, vec![faint(&if unit == 1 { "1 wedge = 1 note · release notes".to_string() } else { format!("1 wedge ≤ {unit} notes · release notes") }, pal)]);
 }
 
 fn ring_disk(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instant, cell: (u16, u16), rings: &mut Vec<Placement>) {
@@ -814,8 +825,10 @@ fn tile_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
         text(buf, inner.x, inner.y + 2, "checking…", Style::new().fg(pal.faint), inner.width);
         return;
     };
-    let Some(notes) = app.omarchy_notes.as_ref() else {
-        if app.updates.iter().any(|update| update.name == "omarchy" || update.name == "omarchy-dev") {
+    let Some(notes) = app.omarchy_notes.as_ref().filter(|notes| notes.releases > 0) else {
+        if app.omarchy_notes.is_some() {
+            text(buf, inner.x, inner.y + 2, "release notes on the web", Style::new().fg(pal.faint), inner.width);
+        } else if app.updates.iter().any(|update| update.name == "omarchy" || update.name == "omarchy-dev") {
             text(buf, inner.x, inner.y + 2, "release notes unavailable", Style::new().fg(pal.faint), inner.width);
         } else {
             let x = big(buf, inner.x, inner.y + 1, "0", Style::new().fg(pal.ink2));
@@ -833,13 +846,56 @@ fn tile_omarchy(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Ins
     let x = big(buf, inner.x, inner.y + 1, &counted.to_string(), Style::new().fg(pal.ink));
     let room = inner.right().saturating_sub(x);
     text(buf, x, inner.y + 2, if notes.fixes == 1 { "fix" } else { "fixes" }, Style::new().fg(pal.label), room);
-    text(buf, x, inner.y + 3, &format!("in {} {}", notes.releases, if notes.releases == 1 { "release" } else { "releases" }), Style::new().fg(pal.label), room);
+    text(buf, x, inner.y + 3, &notes_origin(notes), Style::new().fg(pal.label), room);
     row(buf, inner, inner.y + 5, "improvements", &notes.improvements.to_string(), pal.ink, pal);
     row(buf, inner, inner.y + 6, "security", &notes.security.to_string(), if notes.security > 0 { pal.warn } else { pal.ink }, pal);
+    for (k, (name, value, severity)) in note_rows(notes).into_iter().enumerate() {
+        row(buf, inner, inner.y + 7 + k as u16, name, &value, rc_tone(severity, pal), pal);
+    }
     legend(buf, area, "from the release notes", pal);
 }
 
 const RC_PACKAGES: usize = 8;
+const NOTE_DEPRECATED: usize = 5;
+const WINDOW_ROWS: usize = 200;
+const DAY_CHANGES: usize = 5;
+const DAY_BESIDE: u16 = 96;
+
+fn notes_origin(notes: &crate::app::OmarchyNotes) -> String {
+    match notes.per_release.first().filter(|_| notes.final_release.is_some() && notes.releases == 1) {
+        Some(release) => format!("from {}", release.tag),
+        None => format!("in {} {}", notes.releases, if notes.releases == 1 { "release" } else { "releases" }),
+    }
+}
+
+fn note_rows(notes: &crate::app::OmarchyNotes) -> Vec<(&'static str, String, Severity)> {
+    let mut rows = Vec::new();
+    if !notes.breaking.is_empty() {
+        rows.push(("changes", notes.breaking.len().to_string(), Severity::Warn));
+    }
+    if let Some(taken) = notes.keys_taken.as_ref().filter(|_| notes.keys > 0) {
+        rows.push(("keys taken", taken.len().to_string(), if taken.is_empty() { Severity::Ok } else { Severity::Warn }));
+    }
+    rows
+}
+
+fn change_lines(lines: &mut Vec<(String, String, Color)>, breaking: &[String], keys: u64, taken: Option<&Vec<String>>, deprecations: &[String], room: usize, pal: &Palette) {
+    for (index, change) in breaking.iter().enumerate() {
+        indented(lines, if index == 0 { "changes" } else { "" }, change, room, pal.warn);
+    }
+    if let Some(taken) = taken.filter(|_| keys > 0) {
+        let text = match (taken.len(), keys) {
+            (0, 1) => "the new default key is not bound yet".to_string(),
+            (0, keys) => format!("none of the {keys} new default keys is bound yet"),
+            (_, 1) => format!("the new default key is already bound: {}", taken.join(" · ")),
+            (count, keys) => format!("{count} of the {keys} new default keys already bound: {}", taken.join(" · ")),
+        };
+        indented(lines, "keys", &text, room, if taken.is_empty() { pal.ok } else { pal.warn });
+    }
+    for (index, change) in deprecations.iter().enumerate() {
+        indented(lines, if index == 0 { "deprecated" } else { "" }, change, room, pal.label);
+    }
+}
 
 fn indented(lines: &mut Vec<(String, String, Color)>, name: &str, text: &str, room: usize, color: Color) {
     let mut item = Vec::new();
@@ -958,7 +1014,7 @@ fn checks(app: &App) -> Vec<(&'static str, String, Severity)> {
         checks.push(("risk", if high > 0 { "high" } else { "no high" }.into(), level(high == 0, Severity::Bad)));
     }
     if let Some(anatomy) = &app.anatomy {
-        let (reboot, severity) = if anatomy.reboot_pending {
+        let (reboot, severity) = if anatomy.reboot_pending || anatomy.reboot_requested {
             ("pending", Severity::Bad)
         } else if !app.reboot_after().is_empty() {
             ("after update", Severity::Warn)
@@ -1468,6 +1524,8 @@ fn draw_keys(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, now: Instan
         vec![("↑↓", "day"), ("←→", "previous/next"), ("Esc", "close"), ("c", "copy"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
     } else if app.overlay && app.tile == Some(4) && app.cache_command() {
         vec![("Enter", "copy command"), ("←→", "previous/next"), ("Esc", "close"), ("c", "copy"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
+    } else if app.overlay && app.tile == Some(3) && app.omarchy_link().is_some() {
+        vec![("Enter", "copy link"), ("←→", "previous/next"), ("Esc", "close"), ("c", "copy"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
     } else if app.overlay && (app.tile.is_some() || app.part.is_some()) {
         vec![("←→", "previous/next"), ("Esc", "close"), ("c", "copy"), ("e", "export"), ("r", "rescan"), ("q", "quit")]
     } else if app.overlay {
@@ -1743,18 +1801,28 @@ fn draw_days(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &mut
     let days = app.shown_days();
     let chosen = app.chosen_day();
     let (sources, changes, owners) = day_parts(app, days[chosen]);
-    let listed = changes.len().min(6);
+    let listed = changes.len().min(DAY_CHANGES);
     let more = usize::from(changes.len() > listed);
     let programs = if sources.is_empty() { 0 } else { sources.len() + 1 };
     let pacman = if changes.is_empty() { 0 } else { usize::from(programs > 0) + 1 + listed + more };
     let width = area.width.saturating_sub(10).min(150);
-    let height = (days.len().max(programs + pacman) as u16 + 4).min(area.height.saturating_sub(6));
+    let tallest = days.iter().map(|day| {
+        let (sources, changes, _) = day_parts(app, day);
+        let listed = changes.len().min(DAY_CHANGES);
+        let programs = if sources.is_empty() { 0 } else { sources.len() + 1 };
+        programs + if changes.is_empty() { 0 } else { usize::from(programs > 0) + 1 + listed + usize::from(changes.len() > listed) }
+    }).max().unwrap_or(programs + pacman);
+    let height = (days.len().max(tallest) as u16 + 4).min(area.height.saturating_sub(6));
     let mut rect = place(area, app, scene, width, height);
     if let Some(around) = scene.eye.map(|eye| Rect::new(eye.x.saturating_sub(1), eye.y.saturating_sub(1), eye.width + 2, eye.height + 2))
         && rect.intersects(around)
-        && around.bottom() + height < area.bottom()
     {
-        rect.y = around.bottom();
+        let free = around.x.saturating_sub(area.x + 1);
+        if free >= DAY_BESIDE {
+            rect = Rect::new(around.x - free.min(width) - 1, rect.y, free.min(width), height);
+        } else if around.bottom() + height < area.bottom() {
+            rect.y = around.bottom();
+        }
     }
     scene.overlay = Some(rect);
     clear_around(buf, area, rect, pal);
@@ -2010,20 +2078,34 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
                     }
                     lines.push((release.tag.clone(), parts.join(" · "), if release.security > 0 { pal.warn } else { pal.ink }));
                 }
-                for (index, title) in notes.security_titles.iter().enumerate() {
-                    lines.push((if index == 0 { "security" } else { "" }.into(), title.clone(), pal.ink));
+                if let Some(final_release) = &notes.final_release {
+                    indented(&mut lines, "source", &format!("newest release candidate · {final_release} lists its changes on the web"), room, pal.label);
                 }
-                for (index, title) in notes.titles.iter().enumerate() {
-                    lines.push((if index == 0 { "fixes" } else { "" }.into(), title.clone(), pal.label));
+                if let Some(link) = &notes.link {
+                    lines.push(("release notes".into(), link.clone(), pal.label));
                 }
-                let (total, shown) = ((notes.fixes + notes.security) as usize, notes.titles.len() + notes.security_titles.len());
-                if total > shown {
-                    lines.push((String::new(), format!("+ {} more in the release notes", total - shown), pal.faint));
+                change_lines(&mut lines, &notes.breaking, notes.keys, notes.keys_taken.as_ref(), &notes.deprecations[..notes.deprecations.len().min(NOTE_DEPRECATED)], room, pal);
+                let listed = !notes.breaking.is_empty();
+                if !listed {
+                    for (index, title) in notes.security_titles.iter().enumerate() {
+                        lines.push((if index == 0 { "security" } else { "" }.into(), title.clone(), pal.ink));
+                    }
+                    for (index, title) in notes.titles.iter().enumerate() {
+                        lines.push((if index == 0 { "fixes" } else { "" }.into(), title.clone(), pal.label));
+                    }
+                }
+                let hidden = notes.deprecations.len().saturating_sub(NOTE_DEPRECATED) + if listed { notes.more as usize } else { ((notes.fixes + notes.security) as usize).saturating_sub(notes.titles.len() + notes.security_titles.len()) };
+                if hidden > 0 {
+                    lines.push((String::new(), format!("+ {} more in the release notes", thousands(hidden as u64)), pal.faint));
                 }
             } else if app.updates.iter().any(|update| update.name == "omarchy" || update.name == "omarchy-dev") {
                 lines.push(("release notes".into(), "unavailable".to_string(), pal.label));
             } else {
-                lines.push(("omarchy".into(), "up to date".to_string(), pal.label));
+                let current = app.anatomy.as_ref().map(|anatomy| anatomy.omarchy.as_str()).filter(|version| !version.is_empty());
+                lines.push(("omarchy".into(), current.map_or_else(|| "up to date".to_string(), |version| format!("{version} up to date")), pal.label));
+                if let Some(page) = app.omarchy_release_page() {
+                    lines.push(("release notes".into(), page, pal.label));
+                }
                 if let Some(rc) = &app.omarchy_rc {
                     lines.push((format!("rc {}", rc.version), "release candidate · switch with omarchy-channel-set rc".to_string(), pal.label));
                     let listed = if rc.packages.len() > RC_PACKAGES + 1 { RC_PACKAGES } else { rc.packages.len() };
@@ -2040,21 +2122,7 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
                     }
                     match &rc.breaking {
                         Some(changes) => {
-                            for (index, change) in changes.iter().enumerate() {
-                                indented(&mut lines, if index == 0 { "changes" } else { "" }, change, room, pal.warn);
-                            }
-                            if let Some(taken) = rc.keys_taken.as_ref().filter(|_| rc.keys > 0) {
-                                let text = match (taken.len(), rc.keys) {
-                                    (0, 1) => "the new default key is not bound by you".to_string(),
-                                    (0, keys) => format!("none of the {keys} new default keys is bound by you"),
-                                    (_, 1) => format!("the new default key is bound by you: {}", taken.join(" · ")),
-                                    (count, keys) => format!("{count} of the {keys} new default keys bound by you: {}", taken.join(" · ")),
-                                };
-                                indented(&mut lines, "your keys", &text, room, if taken.is_empty() { pal.ok } else { pal.warn });
-                            }
-                            for (index, change) in rc.deprecations.iter().enumerate() {
-                                indented(&mut lines, if index == 0 { "deprecated" } else { "" }, change, room, pal.label);
-                            }
+                            change_lines(&mut lines, changes, rc.keys, rc.keys_taken.as_ref(), &rc.deprecations, room, pal);
                             if rc.more > 0 {
                                 lines.push((String::new(), format!("+ {} more in the release notes", thousands(rc.more)), pal.faint));
                             }
@@ -2129,6 +2197,8 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
                 let after = app.reboot_after();
                 let (state, color) = if anatomy.reboot_pending {
                     (format!("pending · {} running, {installed} installed", anatomy.kernel_running), pal.alert)
+                } else if anatomy.reboot_requested {
+                    ("pending · requested by Omarchy".to_string(), pal.alert)
                 } else if !after.is_empty() {
                     (reboot_reason(&after), pal.warn)
                 } else {
@@ -2265,7 +2335,12 @@ fn place(area: Rect, app: &App, scene: &Scene, width: u16, height: u16) -> Rect 
         (if part < 4 { area.x + half / 2 } else { area.x + half + half / 2 }, band.y)
     } else if let Some(row) = scene.chosen[app.focus.index()] {
         let list = scene.lists.iter().find(|(pane, _)| *pane == app.focus).map_or(area, |(_, rect)| *rect);
-        (list.x + list.width / 2, row.y.saturating_sub(2).max(list.y))
+        let top = match app.window_top.get() {
+            Some((pane, top)) if pane == app.focus => top,
+            _ => row.y.saturating_sub(2).max(list.y),
+        };
+        app.window_top.set(Some((app.focus, top)));
+        (list.x + list.width / 2, top)
     } else {
         return centred;
     };
@@ -2307,6 +2382,8 @@ fn part_details(app: &App, k: usize, room: usize, pal: &Palette) -> (String, Vec
                 let after = app.reboot_after();
                 let (reboot, color) = if kernel.reboot_pending {
                     ("pending now".to_string(), pal.alert)
+                } else if app.anatomy.as_ref().is_some_and(|anatomy| anatomy.reboot_requested) {
+                    ("pending · requested by Omarchy".to_string(), pal.alert)
                 } else if !after.is_empty() {
                     (reboot_reason(&after), pal.warn)
                 } else {
@@ -2380,7 +2457,7 @@ pub fn overlay_text(app: &App, pal: &Palette) -> Option<String> {
     if !app.overlay {
         return None;
     }
-    let (mut text, lines) = overlay_details(app, usize::MAX, pal)?;
+    let (mut text, lines) = overlay_details(app, None, usize::MAX, pal)?;
     for (name, value, _) in &lines {
         text.push('\n');
         text.push_str(format!("{name:<13} {value}").trim_end());
@@ -2390,7 +2467,7 @@ pub fn overlay_text(app: &App, pal: &Palette) -> Option<String> {
 
 type Details = (String, Vec<(String, String, Color)>);
 
-fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
+fn overlay_details(app: &App, row: Option<usize>, room: usize, pal: &Palette) -> Option<Details> {
     let mut lines: Vec<(String, String, Color)> = Vec::new();
     let title;
     if let Some(tile) = app.tile {
@@ -2405,7 +2482,7 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
     match app.focus {
         Pane::Updates => {
             let updates = app.visible_updates();
-            let update = updates.get(app.lists[0].selected.min(updates.len().saturating_sub(1)))?;
+            let update = updates.get(row.unwrap_or(app.lists[0].selected).min(updates.len().saturating_sub(1)))?;
             title = update.name.clone();
             let deps = app.anatomy.as_ref().and_then(|anatomy| anatomy.deps.get(&update.name));
             let commit = update.bump == "commit";
@@ -2481,7 +2558,7 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
         }
         Pane::Problems => {
             let problems = app.visible_problems();
-            let problem = problems.get(app.lists[1].selected.min(problems.len().saturating_sub(1)))?;
+            let problem = problems.get(row.unwrap_or(app.lists[1].selected).min(problems.len().saturating_sub(1)))?;
             title = problem.name().to_string();
             lines.push(("subject".into(), problem.subject.clone(), pal.ink));
             lines.push(("kind".into(), kind_label(&problem.kind).to_string(), pal.ink));
@@ -2541,7 +2618,7 @@ fn overlay_details(app: &App, room: usize, pal: &Palette) -> Option<Details> {
         }
         Pane::Events => {
             let events = app.visible_events();
-            let event = events.get(app.lists[2].selected.min(events.len().saturating_sub(1)))?;
+            let event = events.get(row.unwrap_or(app.lists[2].selected).min(events.len().saturating_sub(1)))?;
             title = event.ident.clone();
             let when = match event.day.get(5..) {
                 Some(day) => format!("{day} {}", event.clock),
@@ -2595,16 +2672,34 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
         return;
     }
     let full = area.width.saturating_sub(20).min(104);
-    let content = |width: u16| {
-        let (title, mut lines) = overlay_details(app, width.saturating_sub(18) as usize, pal)?;
+    let content = |width: u16, row: Option<usize>| {
+        let (title, mut lines) = overlay_details(app, row, width.saturating_sub(18) as usize, pal)?;
         if app.tile.is_none() && app.part.is_none() && app.focus == Pane::Problems {
             lines.push(("j".into(), format!("shows the live journal filtered to {title}"), pal.label));
         }
         let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(6));
         Some((title, lines, height))
     };
-    let Some((mut title, mut lines, height)) = content(full) else { return };
-    let mut rect = place(area, app, scene, full, height);
+    let tallest = |width: u16| -> u16 {
+        let shape = (app.focus, app.tile.is_some(), app.part.is_some(), width, area.height, app.rows(app.focus));
+        if let Some(tall) = app.window_tall.borrow().get(&shape) {
+            return *tall;
+        }
+        let room = width.saturating_sub(18) as usize;
+        let height = |lines: usize| (lines as u16 + 4).min(area.height.saturating_sub(6));
+        let tall = if app.tile.is_some() {
+            (0..6).map(|tile| height(tile_details(app, tile, room, pal).1.len())).max().unwrap_or(0)
+        } else if app.part.is_some() {
+            (0..subsystem_parts(app).len()).map(|part| height(part_details(app, part, room, pal).1.len())).max().unwrap_or(0)
+        } else {
+            (0..app.rows(app.focus).min(WINDOW_ROWS)).filter_map(|row| content(width, Some(row)).map(|(_, _, tall)| tall)).max().unwrap_or(0)
+        };
+        app.window_tall.borrow_mut().insert(shape, tall);
+        tall
+    };
+    let Some((mut title, mut lines, mut height)) = content(full, None) else { return };
+    let tall = tallest(full).max(height);
+    let mut rect = place(area, app, scene, full, tall);
     if let Some(eye) = scene.eye {
         let around = Rect::new(eye.x.saturating_sub(1), eye.y.saturating_sub(1), eye.width + 2, eye.height + 2);
         if rect.intersects(around) {
@@ -2612,16 +2707,18 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
             let free = if leftward { around.x.saturating_sub(area.x + 1) } else { area.right().saturating_sub(around.right()) };
             if free >= 72 {
                 let width = free.min(full);
-                if let Some((beside, rows, tall)) = content(width) {
+                if let Some((beside, rows, own)) = content(width, None) {
                     let x = if leftward { around.x - width - 1 } else { around.right() };
-                    rect = Rect::new(x, place(area, app, scene, width, tall).y, width, tall);
-                    (title, lines) = (beside, rows);
+                    rect = Rect::new(x, place(area, app, scene, width, tallest(width).max(own)).y, width, own);
+                    (title, lines, height) = (beside, rows, own);
                 }
-            } else if around.bottom() + height < area.bottom() {
+            } else if around.bottom() + tall < area.bottom() {
                 rect.y = around.bottom();
             }
         }
     }
+    rect.height = height;
+    rect.y = rect.y.min(area.bottom().saturating_sub(height + 1)).max(area.y + 1);
     scene.overlay = Some(rect);
     clear_around(buf, area, rect, pal);
     clear(buf, rect, pal);

@@ -75,6 +75,7 @@ CORE_PACKAGES=(
   qt6-base qt6-declarative qt6-wayland 'hypr*' aquamarine xdg-desktop-portal-hyprland
   quickshell omarchy omarchy-dev systemd systemd-libs glibc lib32-glibc 'limine*'
   mkinitcpio pacman uwsm sddm pipewire wireplumber cryptsetup btrfs-progs
+  m1n1 uboot-asahi omarchy-mac-boot omarchy-hyprland-titlebars
 )
 
 is_core() {
@@ -598,8 +599,8 @@ collect_problems() {
 
   jq -r --argjson since "$since_epoch" "$journal_source"' recent | source' "$tmp/journal.json" 2>/dev/null | sort >"$tmp/sources.txt"
   mapfile -t paths < <(uniq "$tmp/sources.txt")
-  owners_of "/usr/lib/modules/$(uname -r)/vmlinuz" "${paths[@]}"
-  owner_of "/usr/lib/modules/$(uname -r)/vmlinuz"
+  owners_of "/usr/lib/modules/$(uname -r)/modules.builtin" "${paths[@]}"
+  owner_of "/usr/lib/modules/$(uname -r)/modules.builtin"
   kernel_package=$REPLY
 
   journal_total=0
@@ -780,6 +781,10 @@ collect_anatomy() {
     [[ -n $kernel_pkg ]] && kernel_installed=$(pacman -Q "$kernel_pkg" 2>/dev/null | cut -d' ' -f2)
   else
     reboot_pending=true
+  fi
+  local reboot_flag=${HOME:-}/.local/state/omarchy/reboot-required reboot_requested=false
+  if [[ -f $reboot_flag ]] && (($(stat -c %Y "$reboot_flag" 2>/dev/null || echo 0) >= $(awk '/^btime/ { print $2 }' /proc/stat 2>/dev/null || echo 0))); then
+    reboot_requested=true
   fi
   uptime_seconds=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
   uptime_seconds=${uptime_seconds%.*}
@@ -969,7 +974,7 @@ collect_anatomy() {
     <"$tmp/deps.tsv" >"$tmp/deps.json"
   emit --arg hostname "$(uname -n)" --arg os "$os" --arg desktop "$desktop" --arg omarchy "$omarchy" \
     --arg kernel_running "$kernel_running" --arg kernel_installed "$kernel_installed" --arg kernel_package "$kernel_pkg" \
-    --argjson reboot_pending "$reboot_pending" --argjson cache_bytes "$cache_bytes" --argjson cache_freeable "$cache_freeable" \
+    --argjson reboot_pending "$reboot_pending" --argjson reboot_requested "$reboot_requested" --argjson cache_bytes "$cache_bytes" --argjson cache_freeable "$cache_freeable" \
     --argjson packages "$packages" --argjson explicit "$explicit" \
     --argjson orphans "$orphans" --arg orphan_names "$orphan_names" --argjson upgrades_per_day "$upgrades_json" \
     --argjson uptime_seconds "$uptime_seconds" --arg nvidia_loaded "$nvidia_loaded" --arg nvidia_installed "$nvidia_installed" \
@@ -978,7 +983,7 @@ collect_anatomy() {
     --slurpfile stale "$tmp/stale.json" --slurpfile config_files "$tmp/config_files.json" \
     '{event: "stage", stage: "anatomy", data: {hostname: $hostname, os: $os, desktop: $desktop, omarchy: $omarchy,
       packages: $packages, explicit: $explicit, orphans: $orphans, orphan_names: ($orphan_names | split("\n") | map(select(length > 0)) | .[:40]), cache_bytes: $cache_bytes, cache_freeable_bytes: $cache_freeable,
-      kernel_running: $kernel_running, kernel_installed: $kernel_installed, kernel_package: $kernel_package, reboot_pending: $reboot_pending,
+      kernel_running: $kernel_running, kernel_installed: $kernel_installed, kernel_package: $kernel_package, reboot_pending: $reboot_pending, reboot_requested: $reboot_requested,
       uptime_seconds: $uptime_seconds, nvidia_loaded: $nvidia_loaded, nvidia_installed: $nvidia_installed,
       hyprland_running: $hyprland_running, hyprland_installed: $hyprland_installed,
       upgrades_per_day: $upgrades_per_day, repos: $repos[0], deps: $deps[0], cached: $cached[0], journal: $journal[0],
@@ -1049,16 +1054,27 @@ omarchy_notes_filter='def ver: ltrimstr("v") | gsub("-"; "")
         elif .section == "security" then .security += [$line[2:] | sub(" by @.*$"; "")]
         else . end
     else . end);
-  ($new | test("[a-z]")) as $candidate
+  def sections: (.body // "") | gsub("\r"; "") | test("(?m)^## ");
+  . as $all | ($new | test("[a-z]")) as $candidate
   | [.[]? | select((.draft | not) and ((.prerelease | not) or $candidate) and (.tag_name | type) == "string")
     | select((.tag_name | ver) > ($old | ver) and (.tag_name | ver) <= ($new | ver))]
-  | sort_by(.tag_name | ver) | (map(select(.prerelease | not)) + (map(select(.prerelease)) | .[-1:])) | reverse | map(notes)
-  | if length == 0 then null else
+  | sort_by(.tag_name | ver) | (map(select(.prerelease | not)) + (map(select(.prerelease)) | .[-1:])) | reverse
+  | ([.[] | select((.prerelease | not) and (sections | not)) | (.body // "") | capture("Release notes: (?<url>https?://\\S+)").url][0]) as $web
+  | map(if (.prerelease | not) and (sections | not) then
+      . as $final | (.tag_name | ver | .[:4]) as $base
+      | ([$all[]? | select((.draft | not) and .prerelease and (.tag_name | type) == "string" and (.tag_name | ver | .[:4]) == $base and (.tag_name | ver) > ($old | ver))] | sort_by(.tag_name | ver) | last)
+      | if . == null then empty else . + {final: ($final.tag_name | ltrimstr("v"))} end
+    else . end)
+  | . as $chosen | map(. as $release | notes | .final = $release.final)
+  | if length == 0 then (if $web == null then null else {from: $old, to: $new, releases: 0, fixes: 0, improvements: 0, security: 0, link: $web} end) else
       {from: $old, to: $new, releases: length,
        fixes: (map(.counts.fixes // 0) | add), improvements: (map(.counts.improvements // 0) | add),
        security: (map(.counts.security // 0) | add),
        per_release: map({tag, fixes: (.counts.fixes // 0), improvements: (.counts.improvements // 0), security: (.counts.security // 0)}),
-       titles: ([.[].fixes[]] | .[:12]), security_titles: ([.[].security[]] | .[:12])} end'
+       final: ([.[].final | select(. != null)][0]), link: $web,
+       titles: ([.[].fixes[]] | .[:12]), security_titles: ([.[].security[]] | .[:12])}
+      + ($chosen | map(changes($binds; true)) | {breaking: (map(.breaking) | add), deprecations: (map(.deprecations) | add), more: (map(.more) | add), keys: (map(.keys) | add),
+          keys_taken: (map(.keys_taken | select(. != null)) | if length == 0 then null else add | unique end)}) end'
 
 omarchy_releases() {
   [[ -s $tmp/omarchy.json ]] || { curl -fsS --max-time 10 -H 'Accept: application/vnd.github+json' \
@@ -1082,7 +1098,7 @@ collect_omarchy_notes() {
   new=${new%-*}
   step news "fetching Omarchy release notes"
   if omarchy_releases &&
-    omarchy_notes=$(jq -c --arg old "$old" --arg new "$new" "$omarchy_notes_filter" "$tmp/omarchy.json" 2>/dev/null) &&
+    omarchy_notes=$(jq -c --arg old "$old" --arg new "$new" --argjson binds "$(hyprland_binds)" "$omarchy_changes_defs $omarchy_notes_filter" "$tmp/omarchy.json" 2>/dev/null) &&
     [[ -n $omarchy_notes ]]; then
     done_step news "fetching Omarchy release notes" "$(jq '.releases // 0' <<<"$omarchy_notes")"
   else
@@ -1093,20 +1109,19 @@ collect_omarchy_notes() {
 
 # The newest release candidate's notes: the breaking changes, the deprecations, and which of the
 # new default keys the user has bound already ($binds is null without a running Hyprland).
-omarchy_rc_filter='def clean: gsub("`"; "") | sub(" by @.*$"; "") | sub("^\\s+"; "") | sub("\\s+$"; "");
+omarchy_changes_defs='def clean: gsub("`"; "") | sub(" by @.*$"; "") | sub("^\\s+"; "") | sub("\\s+$"; "");
   def mask: {super: 64, shift: 1, ctrl: 4, control: 4, alt: 8};
   def combo: split(" + ") | map(ascii_downcase)
     | {mods: .[:-1], keys: (.[-1] | if . == "arrows" then ["left", "right", "up", "down"] elif . == "right alt" then ["alt_r"] else [.] end)}
-    | if all(.mods[]; mask[.] != null) then .mask = ([.mods[] | mask[.]] | add // 0) else empty end;
-  [.[]? | select((.draft | not) and (.tag_name | type) == "string" and (.tag_name | ltrimstr("v") | gsub("-"; "")) == $version)][0]
-  | if . == null then {breaking: null, deprecations: [], more: 0, keys: 0, keys_taken: null} else
+    | if all(.mods[]; mask[.] != null) then .mask = ([.mods[] | mask[.]] | add // 0) | .masks = (if .keys == ["alt_r"] then [.mask, .mask + 8] else [.mask] end) else empty end;
+  def changes($binds; $whole):
       reduce ((.body // "") | gsub("\r"; "") | split("\n")[]) as $line ({section: "", breaking: [], deprecations: [], defaults: "", bullets: 0, shown: 0};
         if ($line | startswith("## ")) then .section = ($line[3:] | ascii_downcase)
         else
           (if ($line | startswith("- ")) then .bullets += 1 else . end)
           | if .section == "breaking changes" then
               if ($line | startswith("- ")) then .breaking += [$line[2:] | clean] | .shown += 1
-              elif ($line | startswith("**")) and ($line | test(":\\*\\*\\s*$") | not) then .breaking += [$line | capture("^\\*\\*(?<text>.+?)\\*\\*").text | clean]
+              elif ($line | startswith("**")) and ($line | test(":\\*\\*\\s*$") | not) then .breaking += [if $whole then $line | gsub("\\*\\*"; "") else $line | capture("^\\*\\*(?<text>.+?)\\*\\*").text end | clean]
               elif ($line | startswith("New defaults")) then .defaults = $line
               else . end
             elif .section == "deprecations" and ($line | startswith("- ")) then .deprecations += [$line[2:] | clean] | .shown += 1
@@ -1116,10 +1131,21 @@ omarchy_rc_filter='def clean: gsub("`"; "") | sub(" by @.*$"; "") | sub("^\\s+";
       | {breaking, deprecations, more: (.bullets - .shown), keys: ($keys | length),
          keys_taken: (if $binds == null or ($keys | length) == 0 then null else
            [$keys[] as $key | ($key | combo) as $combo
-             | [$binds[] | select(.modmask == $combo.mask and ((.key | ascii_downcase) as $bound | $combo.keys | index($bound)))][0]
+             | [$binds[] | select(.modmask as $bound | $combo.masks | index($bound)) | select((.key | ascii_downcase) as $bound | $combo.keys | index($bound))][0]
              | select(. != null) | if .description != "" then "\($key) (\(.description))" else $key end] end)}
-    end
+  ;'
+omarchy_rc_filter='[.[]? | select((.draft | not) and (.tag_name | type) == "string" and (.tag_name | ltrimstr("v") | gsub("-"; "")) == $version)][0]
+  | if . == null then {breaking: null, deprecations: [], more: 0, keys: 0, keys_taken: null} else changes($binds; false) end
   | {version: $version, packages: $packages[0]} + .'
+
+hyprland_binds() {
+  local binds=null
+  if command -v hyprctl >/dev/null && [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+    binds=$(timeout 5 hyprctl -j binds 2>/dev/null | jq -c 'if type == "array" then . else null end' 2>/dev/null) || binds=null
+    [[ -n $binds ]] || binds=null
+  fi
+  echo "$binds"
+}
 
 collect_omarchy_rc() {
   local rc_dir="$tmp/rc" defaults=${OMARCHY_PATH:-/usr/share/omarchy}/default/pacman stable_db=${TMPDIR:-/tmp}/checkup-db-${UID}/ installed version candidate binds=null
@@ -1128,6 +1154,10 @@ collect_omarchy_rc() {
   [[ ${OMARCHY_PATH:-/usr/share/omarchy} == /usr/share/omarchy && " ${update_errors[*]} " != *" repo "* ]] || return 0
   installed=$(pacman -Q omarchy 2>/dev/null) || return 0
   grep -q '^Server = https://pkgs.omarchy.org/stable/' /etc/pacman.conf 2>/dev/null || return 0
+  if [[ $(uname -m) == aarch64 ]]; then
+    defaults+=/aarch64
+    grep -q '^\[asahi-alarm\]' /etc/pacman.conf 2>/dev/null && defaults+=-apple
+  fi
   [[ -r $defaults/pacman-rc.conf && -r $defaults/mirrorlist-rc ]] && command -v fakeroot >/dev/null || return 0
   step news "reading the Omarchy rc channel"
   mkdir -p "$rc_dir/db"
@@ -1154,12 +1184,9 @@ collect_omarchy_rc() {
       printf '%s\x1f%s\x1f%s\n' "$name" "$(pacman -Q "$name" 2>/dev/null | cut -d' ' -f2)" "$new"
     done >"$rc_dir/packages.tsv"
   tsv_json "$rc_dir/packages.tsv" name old new >"$rc_dir/packages.json"
-  if command -v hyprctl >/dev/null && [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
-    binds=$(timeout 5 hyprctl -j binds 2>/dev/null | jq -c 'if type == "array" then . else null end' 2>/dev/null) || binds=null
-    [[ -n $binds ]] || binds=null
-  fi
+  binds=$(hyprland_binds)
   omarchy_releases || echo '[]' >"$tmp/omarchy.json"
-  omarchy_rc=$(jq -c --arg version "${version%-*}" --argjson binds "$binds" --slurpfile packages "$rc_dir/packages.json" "$omarchy_rc_filter" "$tmp/omarchy.json" 2>/dev/null) || omarchy_rc=null
+  omarchy_rc=$(jq -c --arg version "${version%-*}" --argjson binds "$binds" --slurpfile packages "$rc_dir/packages.json" "$omarchy_changes_defs $omarchy_rc_filter" "$tmp/omarchy.json" 2>/dev/null) || omarchy_rc=null
   [[ -n $omarchy_rc ]] || omarchy_rc=null
   done_step news "reading the Omarchy rc channel" "$(jq '.packages | length' <<<"$omarchy_rc" 2>/dev/null || echo null)"
 }

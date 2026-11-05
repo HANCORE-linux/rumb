@@ -1,4 +1,4 @@
-.TH RUMB 1 2026-11-03 rumb "User Commands"
+.TH RUMB 1 2026-11-05 rumb "User Commands"
 .SH NAME
 rumb, rumb\-scan \- track software health and spot trouble early
 .SH SYNOPSIS
@@ -31,9 +31,11 @@ together with the Arch news published since then.
 It also lists your programs that still run files an update replaced,
 and the .pacnew and .pacsave files waiting in
 .IR /etc .
-On Omarchy, a pending Omarchy update also shows what its release notes fix.
+On Omarchy, a pending Omarchy update also shows what its release notes fix,
+the changes they list, and which new default keys are bound already.
+A release that lists its changes only on the web shows the notes of its newest release candidate.
 On the stable channel, a newer release candidate shows what switching to the rc channel brings:
-the extra packages, the changes its release notes list, and the new default keys you have bound already.
+the extra packages, the changes its release notes list, and which new default keys are bound already.
 .PP
 rumb only reads.
 It never runs
@@ -129,6 +131,7 @@ Select a row of the focused list.
 .TP
 .B enter
 Open the selected row, instrument or part.
+In an open window that offers a command or a link, such as the Omarchy release notes, copy it.
 .TP
 .BR / ", " f
 Filter the focused list.
@@ -210,6 +213,10 @@ when that is set).
 The current Omarchy theme
 .RI ( ~/.config/omarchy/current/theme/colors.toml
 on older Omarchy).
+.TP
+.I ~/.local/state/omarchy/reboot-required
+Omarchy's note that a reboot is needed.
+It counts when it is newer than the last boot.
 .TP
 .I /var/log/pacman.log
 The package manager log, or the

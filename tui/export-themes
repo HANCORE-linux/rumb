@@ -8,6 +8,7 @@ out=${1:-"$(dirname "$0")/themes.json"}
 declare -A taken=()
 published=(banish batou blackgold blackmoney blackturq demon dos-moos greek-noir harbor harbordark inkypinky kanso labra mechanoonna
   moodpeak oxford oxocarbon roseofdune ryu saga sapphire shadesofjade soft-echoes thegreek turbonite velvetnight whitegold)
+retired=(osaka-jade)
 entries=()
 add() {
   local name=$1 dir=$2
@@ -20,7 +21,7 @@ add() {
 for name in "${published[@]}"; do
   add "$name" "$HOME/Projects/custom-themes/$name"
 done
-for dir in /usr/share/omarchy/themes/*/; do
+for dir in "${OMARCHY_PATH:-/usr/share/omarchy}"/themes/*/; do
   add "$(basename "$dir")" "${dir%/}"
 done
 
@@ -31,5 +32,6 @@ for entry in "${entries[@]}"; do
     jq -Rn --arg name "$name" --args '
       [inputs | split("\t") | select(length == 2) | {(.[0]): .[1]}] | add
       | {(($name)): with_entries(select(.key as $k | $ARGS.positional | index($k)) | .value |= ascii_downcase)}' "${keys[@]}"
-done | jq -s 'add' >"$out"
+done | jq -s --slurpfile known "$(dirname "$0")/themes.json" --args 'add + ($known[0] | with_entries(select(.key as $name | $ARGS.positional | index($name))))' "${retired[@]}" >"$out.new" || { rm -f "$out.new"; exit 1; }
+mv "$out.new" "$out"
 echo "$(jq length "$out") themes written to $out"

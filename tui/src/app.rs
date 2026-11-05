@@ -59,11 +59,13 @@ impl Subsystem {
     /// Which part of the system a package belongs to, by name.
     pub fn of(name: &str) -> Self {
         let starts = |prefix: &str| name.starts_with(prefix);
-        if name == "linux" || starts("linux-") || name == "kernel" {
+        if matches!(name, "m1n1" | "uboot-asahi" | "omarchy-mac-boot") {
+            Subsystem::Base
+        } else if name == "linux" || starts("linux-") || name == "kernel" {
             Subsystem::Kernel
         } else if ["mesa", "lib32-mesa", "nvidia", "lib32-nvidia", "vulkan", "lib32-vulkan", "libva", "intel-media"].iter().any(|p| starts(p)) {
             Subsystem::Graphics
-        } else if starts("hypr") || matches!(name, "aquamarine" | "xdg-desktop-portal-hyprland" | "uwsm" | "sddm" | "Hyprland") {
+        } else if starts("hypr") || matches!(name, "aquamarine" | "xdg-desktop-portal-hyprland" | "uwsm" | "sddm" | "Hyprland" | "omarchy-hyprland-titlebars") {
             Subsystem::Compositor
         } else if ["qt5-", "qt6-", "gtk", "libadwaita"].iter().any(|p| starts(p)) {
             Subsystem::Toolkit
@@ -170,6 +172,8 @@ pub struct Anatomy {
     pub cache_freeable_bytes: Option<u64>,
     #[serde(default)]
     pub reboot_pending: bool,
+    #[serde(default)]
+    pub reboot_requested: bool,
     #[serde(default)]
     pub upgrades_per_day: Vec<u64>,
     #[serde(default)]
@@ -280,6 +284,20 @@ pub struct OmarchyNotes {
     pub titles: Vec<String>,
     #[serde(default)]
     pub security_titles: Vec<String>,
+    #[serde(default, rename = "final")]
+    pub final_release: Option<String>,
+    #[serde(default)]
+    pub link: Option<String>,
+    #[serde(default)]
+    pub breaking: Vec<String>,
+    #[serde(default)]
+    pub deprecations: Vec<String>,
+    #[serde(default)]
+    pub more: u64,
+    #[serde(default)]
+    pub keys: u64,
+    #[serde(default)]
+    pub keys_taken: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -407,7 +425,9 @@ pub struct Step {
     pub ended: Option<Instant>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub type WindowShape = (Pane, bool, bool, u16, u16, usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pane {
     Updates,
     Problems,
@@ -493,6 +513,8 @@ pub struct App {
     pub events: Vec<EventLine>,
     pub event_at: Option<Instant>,
     pub start_at: Option<Instant>,
+    pub window_top: std::cell::Cell<Option<(Pane, u16)>>,
+    pub window_tall: std::cell::RefCell<HashMap<WindowShape, u16>>,
     pub transaction: Option<(Instant, Option<Instant>)>,
     pub applied: Vec<(Update, Instant)>,
     pub applied_total: usize,
@@ -557,6 +579,8 @@ impl App {
             events: Vec::new(),
             event_at: None,
             start_at: None,
+            window_top: std::cell::Cell::new(None),
+            window_tall: std::cell::RefCell::default(),
             transaction: None,
             applied: Vec::new(),
             applied_total: 0,
@@ -591,6 +615,9 @@ impl App {
     }
 
     pub fn apply(&mut self, event: Event, now: Instant) {
+        if !matches!(event, Event::Activity { .. } | Event::Journal { .. }) {
+            self.window_tall.get_mut().clear();
+        }
         match event {
             Event::Start { last_upgrade, problems_since, now: scan_time, omarchy, last_upgraded } => {
                 self.start_at.get_or_insert(now);
@@ -954,6 +981,27 @@ impl App {
             .then(|| self.activity.iter().filter(|day| day.date.as_str() <= first).flat_map(|day| day.changes.iter().filter(|change| change.name == problem.package).map(move |change| (day.date.as_str(), change))).last())
             .flatten();
         Some((first, change))
+    }
+
+    pub fn omarchy_release_page(&self) -> Option<String> {
+        let version = self.anatomy.as_ref()?.omarchy.as_str();
+        let (base, candidate) = match version.split_once("rc") {
+            Some((base, number)) if !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit()) => (base, format!("-rc{number}")),
+            Some(_) => return None,
+            None => (version, String::new()),
+        };
+        (base.starts_with(|ch: char| ch.is_ascii_digit()) && base.chars().all(|ch| ch.is_ascii_digit() || ch == '.')).then(|| format!("https://github.com/omacom/omarchy/releases/tag/v{base}{candidate}"))
+    }
+
+    pub fn omarchy_link(&self) -> Option<String> {
+        if !self.omarchy {
+            return None;
+        }
+        if let Some(notes) = &self.omarchy_notes {
+            return notes.link.clone();
+        }
+        let pending = self.updates.iter().any(|update| update.name == "omarchy" || update.name == "omarchy-dev");
+        if pending || self.stage_done_at[2].is_none() { None } else { self.omarchy_release_page() }
     }
 
     pub fn cache_command(&self) -> bool {

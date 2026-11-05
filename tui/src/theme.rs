@@ -430,7 +430,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(own, 37);
+        assert_eq!(own, 38);
         assert_eq!(derive(&bundled()["labra"]).unwrap().eye, Color::Rgb(0x7d, 0x7a, 0x56));
     }
 
