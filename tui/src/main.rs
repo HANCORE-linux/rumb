@@ -1404,6 +1404,33 @@ mod tests {
         app.overlay = false;
         app.tile = None;
         assert!(screen(&app, 271, 60).iter().any(|row| row.contains("reboot") && row.contains("pending")));
+        app.part = Some(0);
+        app.overlay = true;
+        let lines = window(&app);
+        assert!(lines.iter().any(|line| line.contains("reboot") && line.contains("pending · requested by Omarchy")), "{lines:?}");
+    }
+
+    #[test]
+    fn an_open_window_measures_its_rows_once() {
+        let mut app = demo_at(60_000);
+        let at = app.started + Duration::from_secs(60);
+        app.overlay = true;
+        render(&app, 271, 60, at);
+        let measured = app.window_tall.borrow().clone();
+        assert!(!measured.is_empty());
+        let shape = *measured.keys().next().unwrap();
+        app.window_tall.borrow_mut().insert(shape, 7);
+        render(&app, 271, 60, at);
+        assert_eq!(app.window_tall.borrow().get(&shape), Some(&7));
+        app.apply(source::Event::Activity { line: "pacman upgraded tool".to_string() }, at);
+        assert_eq!(app.window_tall.borrow().get(&shape), Some(&7));
+        app.apply(stage("news", json!({"news": [], "news_check_failed": false})), at);
+        assert!(app.window_tall.borrow().is_empty());
+        render(&app, 271, 60, at);
+        assert!(!app.window_tall.borrow().is_empty());
+        app.overlay = false;
+        render(&app, 271, 60, at);
+        assert!(app.window_tall.borrow().is_empty());
     }
 
     #[test]
@@ -2510,6 +2537,15 @@ mod tests {
         app.overlay = false;
         let rows = screen(&app, 271, 60).join("\n");
         assert!(rows.contains("in 1 release") && rows.contains("1 wedge = 1 note · release notes") && !rows.contains("keys taken"), "{rows}");
+    }
+
+    #[test]
+    fn deprecations_that_do_not_fit_count_as_more() {
+        let deprecations: Vec<String> = (0..7).map(|k| format!("Replace old tool {k}")).collect();
+        let app = notes_app(json!({"releases": 1, "fixes": 1, "improvements": 0, "security": 0, "per_release": [{"tag": "4.0.6", "fixes": 1, "improvements": 0, "security": 0}], "titles": ["Fix one"], "breaking": [], "deprecations": deprecations, "more": 0, "keys": 0, "keys_taken": null}));
+        let lines = window(&app);
+        assert!(lines.iter().any(|line| line.contains("Replace old tool 4")) && !lines.iter().any(|line| line.contains("Replace old tool 5")), "{lines:?}");
+        assert!(lines.iter().any(|line| line.contains("+ 2 more in the release notes")), "{lines:?}");
     }
 
     #[test]

@@ -83,6 +83,7 @@ pub fn draw(frame: &mut Frame, app: &App, motion: &Motion, pal: &Palette, now: I
     fill(buf, area, pal.page);
     if !app.overlay {
         app.window_top.set(None);
+        app.window_tall.borrow_mut().clear();
     }
     let mut scene = Scene::default();
     if !fits(app, area.width, area.height) {
@@ -2093,7 +2094,7 @@ fn tile_details(app: &App, tile: usize, room: usize, pal: &Palette) -> (&'static
                         lines.push((if index == 0 { "fixes" } else { "" }.into(), title.clone(), pal.label));
                     }
                 }
-                let hidden = if listed { notes.more as usize + notes.deprecations.len().saturating_sub(NOTE_DEPRECATED) } else { ((notes.fixes + notes.security) as usize).saturating_sub(notes.titles.len() + notes.security_titles.len()) };
+                let hidden = notes.deprecations.len().saturating_sub(NOTE_DEPRECATED) + if listed { notes.more as usize } else { ((notes.fixes + notes.security) as usize).saturating_sub(notes.titles.len() + notes.security_titles.len()) };
                 if hidden > 0 {
                     lines.push((String::new(), format!("+ {} more in the release notes", thousands(hidden as u64)), pal.faint));
                 }
@@ -2381,6 +2382,8 @@ fn part_details(app: &App, k: usize, room: usize, pal: &Palette) -> (String, Vec
                 let after = app.reboot_after();
                 let (reboot, color) = if kernel.reboot_pending {
                     ("pending now".to_string(), pal.alert)
+                } else if app.anatomy.as_ref().is_some_and(|anatomy| anatomy.reboot_requested) {
+                    ("pending · requested by Omarchy".to_string(), pal.alert)
                 } else if !after.is_empty() {
                     (reboot_reason(&after), pal.warn)
                 } else {
@@ -2678,15 +2681,21 @@ fn draw_overlay(buf: &mut Buffer, area: Rect, app: &App, pal: &Palette, scene: &
         Some((title, lines, height))
     };
     let tallest = |width: u16| -> u16 {
+        let shape = (app.focus, app.tile.is_some(), app.part.is_some(), width, area.height, app.rows(app.focus));
+        if let Some(tall) = app.window_tall.borrow().get(&shape) {
+            return *tall;
+        }
         let room = width.saturating_sub(18) as usize;
         let height = |lines: usize| (lines as u16 + 4).min(area.height.saturating_sub(6));
-        if app.tile.is_some() {
+        let tall = if app.tile.is_some() {
             (0..6).map(|tile| height(tile_details(app, tile, room, pal).1.len())).max().unwrap_or(0)
         } else if app.part.is_some() {
             (0..subsystem_parts(app).len()).map(|part| height(part_details(app, part, room, pal).1.len())).max().unwrap_or(0)
         } else {
             (0..app.rows(app.focus).min(WINDOW_ROWS)).filter_map(|row| content(width, Some(row)).map(|(_, _, tall)| tall)).max().unwrap_or(0)
-        }
+        };
+        app.window_tall.borrow_mut().insert(shape, tall);
+        tall
     };
     let Some((mut title, mut lines, mut height)) = content(full, None) else { return };
     let tall = tallest(full).max(height);

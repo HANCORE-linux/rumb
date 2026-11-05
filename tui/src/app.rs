@@ -425,7 +425,9 @@ pub struct Step {
     pub ended: Option<Instant>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub type WindowShape = (Pane, bool, bool, u16, u16, usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pane {
     Updates,
     Problems,
@@ -512,6 +514,7 @@ pub struct App {
     pub event_at: Option<Instant>,
     pub start_at: Option<Instant>,
     pub window_top: std::cell::Cell<Option<(Pane, u16)>>,
+    pub window_tall: std::cell::RefCell<HashMap<WindowShape, u16>>,
     pub transaction: Option<(Instant, Option<Instant>)>,
     pub applied: Vec<(Update, Instant)>,
     pub applied_total: usize,
@@ -577,6 +580,7 @@ impl App {
             event_at: None,
             start_at: None,
             window_top: std::cell::Cell::new(None),
+            window_tall: std::cell::RefCell::default(),
             transaction: None,
             applied: Vec::new(),
             applied_total: 0,
@@ -611,6 +615,9 @@ impl App {
     }
 
     pub fn apply(&mut self, event: Event, now: Instant) {
+        if !matches!(event, Event::Activity { .. } | Event::Journal { .. }) {
+            self.window_tall.get_mut().clear();
+        }
         match event {
             Event::Start { last_upgrade, problems_since, now: scan_time, omarchy, last_upgraded } => {
                 self.start_at.get_or_insert(now);
